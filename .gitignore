@@ -1,0 +1,10 @@
+node_modules/
+electron_pid.txt
+
+# Local Claude Code dev tooling (the run-agent-desktop driver skill, etc.) -
+# useful for developing this app, not part of the app itself.
+.claude/
+
+# Author's own internal dev notes/changelog - full of environment-specific
+# history that isn't useful (and isn't meant) as public documentation.
+CLAUDE.md

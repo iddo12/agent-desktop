@@ -1,0 +1,845 @@
+:root {
+  --bg-app: #0f1115;
+  --bg-sidebar: #15181f;
+  --bg-panel: #1a1e26;
+  --bg-hover: #232833;
+  --bg-active: #2a3040;
+  --border: #262b35;
+  --text: #e6e8ec;
+  --text-muted: #8b93a3;
+  --accent: #6366f1;
+  --accent-2: #0ea5e9;
+  --health-healthy: #16a34a;
+  --health-warning: #d97706;
+  --health-critical: #dc2626;
+  --health-unknown: #6b7280;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Inter, system-ui, sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+}
+
+/* ---------------- Sidebar ---------------- */
+
+#sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+#sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 16px 12px;
+  -webkit-app-region: drag;
+}
+
+#app-title {
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+
+#new-agent-btn {
+  -webkit-app-region: no-drag;
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  border: none;
+  color: white;
+  font-weight: 600;
+  font-size: 0.8rem;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#new-agent-btn:hover { filter: brightness(1.1); }
+
+#agent-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 12px;
+}
+
+.agent-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px;
+  border-radius: 10px;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+.agent-item:hover { background: var(--bg-hover); }
+.agent-item.active { background: var(--bg-active); }
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #3a4050;
+  flex-shrink: 0;
+}
+.avatar-fallback {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 700;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+
+.agent-item-text {
+  min-width: 0;
+  flex: 1;
+}
+.agent-item-name {
+  font-weight: 600;
+  font-size: 0.88rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-item-role {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.health-dot.Healthy { background: var(--health-healthy); }
+.health-dot.Warning { background: var(--health-warning); }
+.health-dot.Critical { background: var(--health-critical); }
+.health-dot.Unknown { background: var(--health-unknown); }
+
+/* Overflow menu (Edit / Delete) per sidebar agent - only visible on hover
+   or while its own dropdown is open, to keep the resting list uncluttered. */
+.agent-item-menu-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+}
+.agent-item:hover .agent-item-menu-btn,
+.agent-item-menu-btn.open {
+  opacity: 1;
+}
+.agent-item-menu-btn:hover { background: var(--bg-active); color: var(--text); }
+
+.agent-item-menu {
+  position: fixed;
+  min-width: 140px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+  padding: 6px;
+  z-index: 20;
+}
+.agent-item-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 7px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.agent-item-menu button:hover { background: var(--bg-hover); }
+.agent-item-menu button.danger-text { color: var(--health-critical); }
+
+/* ---------------- Main panel ---------------- */
+
+#main-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+}
+
+#empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.hidden { display: none !important; }
+
+#chat-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#chat-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+#chat-header-text { flex: 1; min-width: 0; }
+#chat-name { font-weight: 700; font-size: 1rem; }
+#chat-role { color: var(--text-muted); font-size: 0.8rem; }
+
+/* Computed from the session's own JSONL usage data (see archive.js
+   getLatestUsage()) against an ASSUMED 200K context window - not a
+   confirmed figure for this specific model, just the long-standing typical
+   Claude context size, so this is an approximation. The tooltip spells out
+   the raw numbers so it's never silently misleading. */
+#five-hour-usage,
+#weekly-usage,
+#plan-tokens-remaining,
+#context-usage {
+  -webkit-app-region: no-drag;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+#context-usage.warning,
+#five-hour-usage.warning,
+#weekly-usage.warning { color: var(--health-warning); border-color: var(--health-warning); }
+#context-usage.critical,
+#five-hour-usage.critical,
+#weekly-usage.critical { color: var(--health-critical); border-color: var(--health-critical); }
+#reset-session-btn,
+#raw-terminal-toggle-btn,
+#model-picker-btn,
+#history-toggle-btn {
+  -webkit-app-region: no-drag;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+#reset-session-btn:hover,
+#raw-terminal-toggle-btn:hover,
+#model-picker-btn:hover,
+#history-toggle-btn:hover { color: var(--text); border-color: var(--accent); }
+#reset-session-btn:hover { border-color: var(--health-critical); color: var(--health-critical); }
+#raw-terminal-toggle-btn.active,
+#history-toggle-btn.active {
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: white;
+}
+
+/* ---------------- Chat message view (structured, not raw terminal) ---------------- */
+
+/* Rebuilt from xterm's own already-ANSI-parsed buffer (see renderer.js
+   rebuildChatView()), not the raw pty stream directly - reuses xterm's
+   battle-tested handling of cursor movement/redraws instead of
+   reimplementing it, but presents the result as real, selectable,
+   copyable DOM text instead of a terminal canvas. */
+/* #chat-body holds both views stacked exactly on top of each other (each
+   absolutely positioned to fill it completely) rather than swapping which
+   one is present in the layout - a hidden xterm terminal still needs its
+   REAL column width to wrap lines the same way it would if visible, or the
+   buffer-scraping in rebuildChatView() would read wrapping that doesn't
+   match what raw mode would actually show. Toggling `visibility` (not
+   `display`) keeps both views permanently sized correctly; only the
+   currently-active one is actually visible/interactive. */
+#chat-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+#chat-messages-view,
+#terminal-wrapper {
+  position: absolute;
+  inset: 0;
+}
+#chat-messages-view.view-hidden,
+#terminal-wrapper.view-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+#chat-messages-view {
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-bubble {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  font-size: 0.92rem;
+}
+.chat-bubble-agent {
+  color: var(--text);
+  align-self: flex-start;
+  max-width: 100%;
+}
+.chat-bubble-user {
+  background: #f2d675;
+  color: #241f0f;
+  align-self: flex-end;
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: 14px 14px 4px 14px;
+}
+.chat-status-line {
+  align-self: flex-start;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+/* Real timestamp per block (see formatBlockTime() in renderer.js) - small
+   and muted so it doesn't compete with the actual message, but present on
+   every block so staleness is visible at a glance rather than requiring a
+   manual JSONL timestamp check. */
+.chat-block-time {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  font-weight: 400;
+  font-style: normal;
+  color: var(--text-muted);
+  opacity: 0.75;
+}
+
+/* A dead pty and a merely-quiet one need different responses (restart vs.
+   wait) - this has to be visually unmistakable, not just another muted
+   status line, so it doesn't blend into the normal quiet moments a
+   conversation naturally has. */
+.chat-session-ended-notice {
+  align-self: center;
+  background: rgba(220, 38, 38, 0.14);
+  border: 1px solid rgba(220, 38, 38, 0.5);
+  color: #fca5a5;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: center;
+  max-width: 90%;
+}
+.chat-bubble-user .chat-block-time {
+  color: #6b5f2f;
+}
+
+/* [[DETAILS]] / [[WARNING]] / [[KEY]] marker split (see root CLAUDE.md
+   for the convention agents follow) - .chat-answer-details intentionally
+   looks identical to a plain .chat-bubble-agent (no box) so ordinary
+   narration reads the same as before; .chat-answer-warning and
+   .chat-answer-key each get their own highlighted callout, in visually
+   distinct colors (amber vs. teal) so a risk/caution note never gets
+   mistaken for the plain result/takeaway at a glance. */
+.chat-bubble-annotated {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.chat-answer-section {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  font-size: 0.92rem;
+}
+.chat-answer-details {
+  color: var(--text);
+}
+.chat-answer-key {
+  color: var(--text);
+  background: rgba(45, 164, 130, 0.16);
+  border-left: 3px solid #2da482;
+  border-radius: 4px 8px 8px 4px;
+  padding: 10px 14px;
+}
+.chat-answer-warning {
+  color: var(--text);
+  background: rgba(214, 158, 46, 0.16);
+  border-left: 3px solid #d69e2e;
+  border-radius: 4px 8px 8px 4px;
+  padding: 10px 14px;
+}
+
+/* Shown immediately at send time, before the CLI has echoed the message
+   back through the real terminal buffer yet - pulses gently so it reads as
+   "sending" rather than a normal, already-confirmed message. */
+.chat-bubble-pending {
+  animation: pending-pulse 1.4s ease-in-out infinite;
+}
+@keyframes pending-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.9; }
+}
+
+/* xterm's fit() addon measures #terminal-container's own box directly, so
+   that element must have zero padding/border of its own for accurate cols/
+   rows calculation (a mismatch here is what caused content to overlap the
+   scrollbar and the prompt line to render below the visible area) - visual
+   spacing is applied on this outer wrapper instead. position/inset for
+   #terminal-wrapper itself come from the shared #chat-body stacking rule
+   above - not repeated here, and no position:relative override, since
+   #terminal-bottom-mask (a child) just needs ITS containing block to be
+   positioned, which the inherited position:absolute already satisfies. */
+#terminal-wrapper {
+  padding: 12px 16px;
+  display: flex;
+}
+#terminal-container {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+#terminal-container .xterm {
+  height: 100%;
+}
+
+/* Claude Code's own CLI draws a native input-prompt box at the bottom of
+   whatever terminal size it's given (border lines + placeholder text) - it's
+   pixels rendered onto xterm's canvas by the CLI itself, not a DOM element,
+   so it can't be selectively removed - only masked. Redundant now that the
+   real chat-input box below handles composing messages. Covers a fixed
+   ~5 terminal rows; tall enough for the box, deliberately not much taller
+   so it doesn't risk covering the tail end of real output too. */
+#terminal-bottom-mask {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 12px;
+  height: 92px;
+  background: var(--bg-panel);
+  pointer-events: none;
+}
+
+/* ---------------- Chat input bar ---------------- */
+
+#chat-input-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--border);
+}
+
+/* Dedicated drag strip above the box - dragging it up/down resizes the
+   textarea from its top edge, like pulling up a bottom sheet, rather than
+   the browser's native resize (which only ever grows toward the bottom). */
+#chat-input-resize-handle {
+  height: 14px;
+  margin-top: 2px;
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#chat-input-resize-handle::before {
+  content: "";
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+}
+#chat-input-resize-handle:hover::before,
+#chat-input-resize-handle.dragging::before {
+  background: var(--accent);
+}
+
+/* Live "how long has it been thinking" counter (see updateThinkingIndicator()
+   in renderer.js) - sits above the compose box so it's visible without
+   scrolling the message list, and pulses gently (reusing the same
+   pending-pulse animation as an optimistically-sent user bubble) so it
+   reads as "alive," not a static label. Turns amber past LONG_BUSY_HINT_MS
+   as a gentle "this is taking a while" cue, not an error state - it's still
+   ticking because real output is still arriving. */
+#chat-thinking-indicator {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  animation: pending-pulse 1.4s ease-in-out infinite;
+}
+#chat-thinking-indicator.long {
+  color: #d69e2e;
+}
+
+/* Small utility row above the compose box - a one-click way to prefill the
+   input with a "save to master file" reminder, since that phrase only gets
+   typed occasionally and is easy to forget in the moment. */
+#chat-input-toolbar {
+  display: flex;
+  margin-bottom: 6px;
+}
+#save-to-master-btn {
+  background: rgba(99, 102, 241, 0.14);
+  border: 1px solid rgba(99, 102, 241, 0.55);
+  color: #c7d2fe;
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+#save-to-master-btn:hover { background: rgba(99, 102, 241, 0.26); border-color: var(--accent); color: var(--text); }
+
+#chat-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+/* Pending image/file attachments, dropped or pasted - shown as small
+   removable thumbnail chips above the textarea rather than as raw quoted
+   paths inside it, matching how a normal chat interface previews an
+   attached image before you send it. */
+#chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.attachment-chip {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  flex-shrink: 0;
+}
+.attachment-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attachment-chip .attachment-name-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  font-size: 0.6rem;
+  text-align: center;
+  color: var(--text-muted);
+  word-break: break-all;
+  overflow: hidden;
+}
+.attachment-remove-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(15, 17, 21, 0.85);
+  border: none;
+  color: var(--text);
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.attachment-remove-btn:hover {
+  background: var(--health-critical);
+}
+
+/* Messages sent while the agent is still busy - shown here instead of
+   being silently dropped, and auto-sent (in order) once it's free. */
+#chat-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 10px;
+  padding: 6px 10px;
+}
+.queue-item-icon {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-2);
+}
+.queue-item-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.queue-item-remove-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.queue-item-remove-btn:hover { color: var(--health-critical); }
+
+#chat-input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  padding: 12px 14px;
+  height: 56px;
+  min-height: 56px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+#chat-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Dragging a file/image over the compose area highlights the box, same
+   accent color as focus, so it's obvious the drop will land there. */
+#chat-input-bar.drag-over #chat-input {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+#chat-input-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#send-input-btn {
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  border: none;
+  color: white;
+  font-weight: 600;
+  font-size: 0.85rem;
+  border-radius: 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+#send-input-btn:hover { filter: brightness(1.1); }
+
+/* ---------------- History view ---------------- */
+
+#history-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+#history-day-list {
+  width: 200px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 12px 8px;
+}
+
+.history-day-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.history-day-item:hover { background: var(--bg-hover); color: var(--text); }
+.history-day-item.active { background: var(--bg-active); color: var(--text); font-weight: 600; }
+
+#history-show-more-btn {
+  width: 100%;
+  margin-top: 6px;
+  background: none;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  border-radius: 8px;
+  padding: 7px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+#history-show-more-btn:hover { color: var(--text); border-color: var(--accent); }
+
+#history-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 20px 28px;
+  line-height: 1.6;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+#history-content h1 { font-size: 1.1rem; color: var(--text-muted); font-weight: 600; margin: 0 0 18px; }
+#history-content h3 { font-size: 0.88rem; color: var(--accent-2); margin: 20px 0 6px; }
+#history-content h3:first-of-type { margin-top: 0; }
+#history-content p { margin: 0 0 14px; white-space: pre-wrap; }
+#history-empty { color: var(--text-muted); padding: 20px 28px; }
+
+/* ---------------- Modal ---------------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.modal-box {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 24px;
+  width: 380px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+}
+.modal-box h2 { margin: 0 0 16px; font-size: 1.1rem; }
+.modal-box label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 12px 0 4px;
+}
+.modal-box input[type=text], .modal-box textarea {
+  width: 100%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 0.88rem;
+  resize: vertical;
+}
+
+#avatar-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+button {
+  font-family: inherit;
+}
+button.primary {
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  border: none;
+  color: white;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+button.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+button.danger {
+  background: var(--health-critical);
+  border: none;
+  color: white;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+button.danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+button.danger:not(:disabled):hover { filter: brightness(1.1); }
+.modal-warning {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 4px 0 14px;
+}
+#pick-avatar-btn {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}

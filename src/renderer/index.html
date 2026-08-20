@@ -1,0 +1,107 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Agent Desktop</title>
+<link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <span id="app-title">Agents</span>
+        <button id="new-agent-btn" title="Create new agent">+ New</button>
+      </div>
+      <div id="agent-list"></div>
+    </aside>
+
+    <main id="main-panel">
+      <div id="empty-state">
+        <p>Select an agent on the left, or create a new one.</p>
+      </div>
+      <div id="chat-view" class="hidden">
+        <div id="chat-header">
+          <div id="chat-avatar-slot"></div>
+          <div id="chat-header-text">
+            <div id="chat-name"></div>
+            <div id="chat-role"></div>
+          </div>
+          <div id="five-hour-usage" class="hidden" title=""></div>
+          <div id="weekly-usage" class="hidden" title=""></div>
+          <div id="plan-tokens-remaining" class="hidden" title=""></div>
+          <div id="context-usage" class="hidden" title=""></div>
+          <button id="reset-session-btn" title="Clear this agent's current conversation context and start fresh (full history stays available in History)">Reset Session</button>
+          <button id="raw-terminal-toggle-btn" title="Switch to the raw terminal (needed for things like the Model picker's arrow keys)">Raw Terminal</button>
+          <button id="model-picker-btn" title="Choose which Claude model this agent uses">Model</button>
+          <button id="history-toggle-btn" title="View past conversation history">History</button>
+        </div>
+
+        <div id="chat-body">
+          <div id="chat-messages-view"></div>
+          <div id="terminal-wrapper" class="view-hidden">
+            <div id="terminal-container"></div>
+            <div id="terminal-bottom-mask"></div>
+          </div>
+        </div>
+        <div id="chat-input-bar">
+          <div id="chat-input-resize-handle"></div>
+          <div id="chat-thinking-indicator" class="hidden"></div>
+          <div id="chat-input-toolbar">
+            <button id="save-to-master-btn" title="Insert a reminder to flag this for whichever agent maintains your shared master file">Save to master file</button>
+          </div>
+          <div id="chat-attachments" class="hidden"></div>
+          <div id="chat-queue" class="hidden"></div>
+          <div id="chat-input-row">
+            <textarea id="chat-input" placeholder="Message this agent... (Enter to send, Shift+Enter for a new line)"></textarea>
+            <div id="chat-input-actions">
+              <button id="send-input-btn" title="Send">Send</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="history-view" class="hidden">
+          <div id="history-day-list"></div>
+          <div id="history-content"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div id="new-agent-modal" class="modal hidden">
+    <div class="modal-box">
+      <h2 id="agent-modal-title">Create New Agent</h2>
+      <label>Name</label>
+      <input id="new-agent-name" type="text" placeholder="e.g. Marketing Agent" />
+      <label>Role description</label>
+      <textarea id="new-agent-role" rows="3" placeholder="What does this agent do?"></textarea>
+      <label>Avatar (optional)</label>
+      <div id="avatar-picker">
+        <img id="avatar-preview" class="avatar" />
+        <button id="pick-avatar-btn">Choose image...</button>
+      </div>
+      <div class="modal-actions">
+        <button id="cancel-agent-btn" class="secondary">Cancel</button>
+        <button id="create-agent-btn" class="primary">Create Agent</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="delete-agent-modal" class="modal hidden">
+    <div class="modal-box">
+      <h2>Delete agent</h2>
+      <p id="delete-agent-warning" class="modal-warning"></p>
+      <label>Type the agent's name to confirm</label>
+      <input id="delete-agent-confirm-input" type="text" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="cancel-delete-agent-btn" class="secondary">Cancel</button>
+        <button id="confirm-delete-agent-btn" class="danger" disabled>Delete permanently</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
