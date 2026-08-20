@@ -1,7 +1,7 @@
 ﻿const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 const pty = require("node-pty");
 const { listAgents, createAgent, updateAgent, deleteAgent } = require("./agents");
 const { syncArchive, listArchivedDays, readArchivedDay, encodeProjectPath, getLatestUsage, getUsageWindows, getLiveTranscriptBlocks } = require("./archive");
@@ -177,6 +177,7 @@ ipcMain.handle("delete-agent", async (event, { agentPath }) => {
       setTimeout(finish, 2000);
     });
   }
+  stopBackgroundAgentForCwd(sessionCwdFor(agentPath));
   await deleteAgentWithRetry(agentPath);
   return { ok: true };
 });
@@ -224,6 +225,85 @@ function hasPriorSession(cwd) {
 
 const ARCHIVE_SYNC_INTERVAL_MS = 30000;
 
+// --- Native background-agent backend (2026-08-21) -------------------------
+// Instead of directly owning each agent's `claude` process via a bare
+// pty.spawn(), each agent is now dispatched as a real native Claude Code
+// background agent (`claude --bg`) and the pty here just attaches to it
+// (`claude attach <id>`) for the live view. Confirmed directly, live,
+// before building this: `claude attach` streams real incremental pty
+// output (not a static snapshot), and a background agent's process
+// genuinely survives independent of whatever is currently attached to it -
+// killing/losing the attach connection does not kill the underlying agent.
+// This is what makes the auto-reattach in handlePtyExit() below safe and
+// meaningful: if the *attach* connection dies (a real, separately-confirmed
+// node-pty/ConPTY quirk on Windows - killing an attach pty can throw an
+// uncaught "AttachConsole failed" from node-pty's own cleanup code) but the
+// underlying agent is still alive, this reconnects silently instead of
+// telling the user their session ended when it didn't.
+function listBackgroundAgentsSync(shell, spawnEnv) {
+  try {
+    const output = execFileSync(shell, ["agents", "--json", "--all"], { encoding: "utf-8", env: spawnEnv });
+    return JSON.parse(output);
+  } catch (e) {
+    return [];
+  }
+}
+
+// A background agent still has a "pid" field for as long as its OS process
+// is alive, regardless of its turn-by-turn state (idle/blocked/done are all
+// still-running states between turns - only stopped/failed entries drop the
+// pid field). Checking for pid presence is more robust than enumerating
+// state strings, which Anthropic could add more of later.
+function findAliveBackgroundAgent(shell, spawnEnv, sessionCwd) {
+  const agents = listBackgroundAgentsSync(shell, spawnEnv);
+  const target = path.resolve(sessionCwd);
+  return agents.find((a) => a.kind === "background" && a.pid && path.resolve(a.cwd || "") === target);
+}
+
+// Dispatches a fresh background agent for this cwd and returns its id.
+// --continue is passed whenever a prior session exists, same condition
+// hasPriorSession() already used for the old direct-spawn path - --bg
+// --continue with no prompt dispatches idle, "send a prompt to start",
+// which matches this app's own "reopen an agent to an empty, ready-to-type
+// box" UX exactly (confirmed directly before writing this).
+function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
+  const args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
+  const output = execFileSync(shell, args, { cwd: sessionCwd, encoding: "utf-8", env: spawnEnv });
+  const match = output.match(/backgrounded\s*[Â·Â·]\s*([a-f0-9]+)/i);
+  if (!match) {
+    throw new Error("Could not parse background agent id from dispatch output: " + output);
+  }
+  return match[1];
+}
+
+function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
+  const existing = findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+  if (existing) return existing.id;
+  return dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+}
+
+// Deleting an Agent Desktop agent must also stop its real native background
+// agent process, not just whatever attach pty happens to be viewing it right
+// now - the two are decoupled by design (see the backend comment above), so
+// closing/killing the attach alone leaves the underlying `claude --bg`
+// process orphaned, still running against a cwd whose folder is about to be
+// deleted out from under it. Looked up by cwd (not by a live ptySessions
+// entry) so this also catches an agent that was dispatched in an earlier
+// app run and never reattached in this one - ptySessions only knows about
+// sessions opened since the app last started.
+function stopBackgroundAgentForCwd(sessionCwd) {
+  try {
+    const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
+    const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" };
+    const agent = findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+    if (agent) {
+      execFileSync(shell, ["stop", agent.id], { encoding: "utf-8", env: spawnEnv });
+    }
+  } catch (e) {
+    /* best-effort - a stray still-running background process is not worth failing the delete over */
+  }
+}
+// --- end native background-agent backend helpers ---------------------------
 // Shared by proc.onExit() below (the normal path) and the terminal-input/
 // terminal-resize catch blocks further down (the "we only found out the
 // process was dead because touching it just threw" path) - factored out so
@@ -233,7 +313,13 @@ const ARCHIVE_SYNC_INTERVAL_MS = 30000;
 // notice) if onExit is ever slow to fire relative to a failed write/resize.
 // Safe to call twice for the same agentPath - ptySessions.delete() makes
 // the second call's ptySessions.get() return undefined and no-op.
-function handlePtyExit(agentPath) {
+//
+// 2026-08-21: now checks whether the underlying background agent is still
+// alive before declaring the session dead - see the native background-agent
+// backend comment above. Attempts exactly one silent re-attach; if that
+// itself fails or exits immediately, falls through to the normal notice
+// rather than risking a retry loop.
+function handlePtyExit(agentPath, isReattachAttempt = false) {
   const session = ptySessions.get(agentPath);
   if (!session) return;
   clearInterval(session.archiveTimer);
@@ -241,44 +327,43 @@ function handlePtyExit(agentPath) {
     syncArchive(agentPath, session.sessionCwd);
   } catch (e) {}
   ptySessions.delete(agentPath);
+
+  if (!isReattachAttempt && session.shell && session.spawnEnv) {
+    const stillAlive = findAliveBackgroundAgent(session.shell, session.spawnEnv, session.sessionCwd);
+    if (stillAlive) {
+      try {
+        startTerminalSession(agentPath, session.sessionCwd, session.cols, session.rows, stillAlive.id, /* isReattach */ true);
+        return; // reconnected silently, don't notify the renderer
+      } catch (e) {
+        /* fall through to the normal "session ended" notice below */
+      }
+    }
+  }
+
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("terminal-exit", { agentPath });
   }
 }
 
-ipcMain.handle("start-terminal", (event, { agentPath, cols, rows }) => {
-  if (ptySessions.has(agentPath)) {
-    return { alreadyRunning: true };
-  }
-
-  // --continue resumes this agent's most recent conversation in its own folder,
-  // so reopening an agent's chat picks up where you left off. Only passed when
-  // a prior session actually exists though - Claude Code exits immediately with
-  // "No conversation found to continue" rather than falling back to a fresh
-  // session when there's nothing to resume, which would otherwise skip the
-  // fresh-session CLAUDE.md handoff read entirely on an agent's very first open.
-  const sessionCwd = sessionCwdFor(agentPath);
-  const args = hasPriorSession(sessionCwd) ? ["--continue"] : [];
+// Core session-connection logic, shared by the start-terminal IPC handler
+// (a fresh open) and handlePtyExit's own silent-reattach path above. When
+// knownAgentId is omitted, finds or dispatches a background agent for this
+// cwd first; when provided (the reattach path), skips straight to attaching
+// since the caller already confirmed it's alive.
+function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt = false) {
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
-  const proc = pty.spawn(shell, args, {
+  // See the CLAUDE_CODE_FORCE_SESSION_PERSISTENCE comment further up this
+  // file - same reasoning applies to background-dispatched agents.
+  const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" };
+
+  const agentId = knownAgentId || findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+
+  const proc = pty.spawn(shell, ["attach", agentId], {
     name: "xterm-color",
     cols: cols || 80,
     rows: rows || 30,
     cwd: sessionCwd,
-    // Each agent here is a real, long-lived, user-facing session - not a
-    // disposable nested call - but Agent Desktop's own process already
-    // carries CLAUDE_CODE_CHILD_SESSION=1 (inherited from however it was
-    // itself launched), and Claude Code's CLI silently turns off transcript
-    // persistence for any child session by default, to avoid polluting
-    // --resume/--continue history from throwaway nested calls. Without this
-    // override, an agent can do real, visible work (confirmed live: a full
-    // auto-triggered /compact) that never gets written to its own JSONL
-    // transcript at all - the exact cause of the "Chat View shows nothing
-    // even though Raw Terminal shows real activity" blind spot documented
-    // elsewhere in this file. Confirmed 2026-08-20 (only discovered because
-    // an old/large Testing agent session's own CLI printed the fix inline:
-    // "restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE...").
-    env: { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" },
+    env: spawnEnv,
   });
 
   proc.onData((data) => {
@@ -296,9 +381,27 @@ ipcMain.handle("start-terminal", (event, { agentPath, cols, rows }) => {
     } catch (e) {}
   }, ARCHIVE_SYNC_INTERVAL_MS);
 
-  proc.onExit(() => handlePtyExit(agentPath));
+  proc.onExit(() => {
+    handlePtyExit(agentPath, isReattachAttempt);
+  });
 
-  ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer });
+  ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows });
+}
+
+ipcMain.handle("start-terminal", (event, { agentPath, cols, rows }) => {
+  if (ptySessions.has(agentPath)) {
+    return { alreadyRunning: true };
+  }
+
+  // --continue resumes this agent's most recent conversation in its own folder,
+  // so reopening an agent's chat picks up where you left off. Only passed when
+  // a prior session actually exists though - Claude Code exits immediately with
+  // "No conversation found to continue" rather than falling back to a fresh
+  // session when there's nothing to resume, which would otherwise skip the
+  // fresh-session CLAUDE.md handoff read entirely on an agent's very first open.
+  // (dispatchBackgroundAgent() applies this same condition internally now.)
+  const sessionCwd = sessionCwdFor(agentPath);
+  startTerminalSession(agentPath, sessionCwd, cols, rows);
   return { alreadyRunning: false };
 });
 
