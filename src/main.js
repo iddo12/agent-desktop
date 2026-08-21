@@ -386,7 +386,21 @@ const ARCHIVE_SYNC_INTERVAL_MS = 30000;
 // isn't something this app's own code can diagnose further or fix at the
 // source - only retried for this specific, known-transient error message,
 // not any other spawn failure.
-function spawnPtyWithRetry(shell, args, options, attempts = 4, delayMs = 300) {
+//
+// 2026-08-21, widened from 4x300ms (~1s total) to 10x500ms (~5s total):
+// the original short budget did NOT clear the error live on Iddo's real
+// machine (same "File not found" surfaced to the user even with retries
+// active), yet an isolated reproduction attempt using the exact same
+// wscript.exe -> cmd.exe -> node -> pty.spawn(claude.cmd) chain Launch.vbs
+// itself uses succeeded immediately, on the first try, no retry needed -
+// so this either takes longer than ~1s to clear on whatever is actually
+// happening, or is specific to being launched via Explorer.exe (a real
+// double-click) rather than a script-launched child process, which
+// wasn't (and couldn't easily be) replicated in that isolated test.
+// Widening the budget is a cheap, safe hedge either way; if this still
+// doesn't clear it, the cause is more likely the latter (Explorer-launch-
+// specific), not simply "needs longer to retry."
+function spawnPtyWithRetry(shell, args, options, attempts = 10, delayMs = 500) {
   return new Promise((resolve, reject) => {
     function attempt(i) {
       try {
