@@ -355,56 +355,57 @@ const ARCHIVE_SYNC_INTERVAL_MS = 30000;
 // telling the user their session ended when it didn't.
 //
 // child_process's execFileSync/spawnSync turns out to be structurally
-// unreliable in this app's own launch context (via the hidden VBS wrapper):
-// confirmed directly, live, three escalating ways - "spawnSync ...\claude.cmd
-// EINVAL" (a .cmd batch file isn't independently executable without cmd.exe
-// to interpret it), then "spawnSync cmd.exe ENOENT" (bare-name PATH lookup
-// failing), then "spawnSync C:\Windows\system32\cmd.exe ENOENT" even against
-// that fully-qualified, unquestionably-real system path. That last one rules
-// out a PATH or .cmd-shim problem - it's the same unexplained fs/spawn-layer
-// quirk resolveClaudeExecutable()'s own comment above already documents for
-// fs.existsSync in this exact process. node-pty's spawn uses a different,
-// lower-level Windows API path and is unaffected - already relied on
-// throughout this file for the actual attach pty - so one-shot CLI calls
-// (agents/--bg/stop) are run through it too rather than child_process,
-// collecting output until the process exits instead of returning it
-// synchronously.
-// node-pty's own native addon does a synchronous file-existence pre-check
-// via a raw Win32 GetFileAttributesW call (see conpty.cc's file_exists()) -
-// completely separate from Node's own fs module or child_process, before
-// ever attempting the actual spawn. Confirmed directly, live, on Iddo's
-// real machine through this app's real launch path (Launch.vbs) rather
-// than this project's own Playwright-driven test harness (which never
-// exercises that exact path, so a whole class of bugs specific to it went
-// uncaught all night): it threw "File not found: C:\Users\...\claude.cmd"
-// for a path independently confirmed to exist and work - `where`, a
-// direct `ls`, and a direct `claude --version` invocation all succeeded
-// immediately afterward. Same broad class of quirk resolveClaudeExecutable()'s
-// own comment documents for fs.existsSync in this app's launch context,
-// just surfacing inside node-pty's native code instead of Node's fs layer.
-// Retried rather than fully explained, since the underlying OS-level cause
-// isn't something this app's own code can diagnose further or fix at the
-// source - only retried for this specific, known-transient error message,
-// not any other spawn failure.
+// unreliable in this app's own launch context (via the hidden VBS wrapper) -
+// confirmed directly, live: "spawnSync ...\claude.cmd EINVAL", "spawnSync
+// cmd.exe ENOENT", and "spawnSync C:\Windows\system32\cmd.exe ENOENT" even
+// against that fully-qualified, unquestionably-real system path. node-pty's
+// spawn uses a different, lower-level Windows API path and is unaffected -
+// already relied on throughout this file for the actual attach pty - so
+// one-shot CLI calls (agents/--bg/stop) are run through it too rather than
+// child_process, collecting output until the process exits instead of
+// returning it synchronously.
 //
-// 2026-08-21, widened from 4x300ms (~1s total) to 10x500ms (~5s total):
-// the original short budget did NOT clear the error live on Iddo's real
-// machine (same "File not found" surfaced to the user even with retries
-// active), yet an isolated reproduction attempt using the exact same
-// wscript.exe -> cmd.exe -> node -> pty.spawn(claude.cmd) chain Launch.vbs
-// itself uses succeeded immediately, on the first try, no retry needed -
-// so this either takes longer than ~1s to clear on whatever is actually
-// happening, or is specific to being launched via Explorer.exe (a real
-// double-click) rather than a script-launched child process, which
-// wasn't (and couldn't easily be) replicated in that isolated test.
-// Widening the budget is a cheap, safe hedge either way; if this still
-// doesn't clear it, the cause is more likely the latter (Explorer-launch-
-// specific), not simply "needs longer to retry."
+// Two more layers of the same "this app's real launch chain behaves
+// differently from any directly-launched process" problem, diagnosed live
+// on 2026-08-21 and both worked around below:
+//
+// 1. node-pty's native Windows spawn path does its own file-existence
+//    pre-check via raw GetFileAttributesW on the exact path *before*
+//    attempting to launch it (see conpty.cc's file_exists()), and even
+//    cmd.exe's own CreateProcess-level resolution failed the same way -
+//    reproducibly, only through this app's real launch chain (WScript.Shell
+//    -> hidden cmd.exe -> npm start -> electron.exe), never once through a
+//    directly-launched process (Playwright, manual CLI, isolated scripts).
+//    Ruled out directly: Electron's ASAR-patched fs (original-fs agrees),
+//    a symlink/junction at the npm folder (fsutil confirms plain
+//    directory), Windows Defender Controlled Folder Access (write-only, no
+//    matching block event), and Malwarebytes malware/PUP scanning (folder
+//    excluded, no change). What's left and specific to this app's own
+//    spawning mechanism: node-pty defaults to the newer ConPTY backend on
+//    Windows 10 1809+, which has known quirks with GUI-subsystem processes
+//    (Electron.exe always is one) launched through a fully console-detached
+//    chain like this one's hidden WScript.Shell.Run. Forcing the older
+//    winpty backend (spawnOptions.useConpty = false below) sidesteps
+//    ConPTY entirely and resolved it live.
+// 2. Separately, `shell` here is a .cmd file, which node-pty can't spawn
+//    directly on Windows without going through a real shell - toCmdShellSpawn
+//    routes it through cmd.exe's own `/c` rather than the bare path.
+function toCmdShellSpawn(shell, args) {
+  if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(shell)) {
+    return { shell, args };
+  }
+  const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+  return { shell: comspec, args: ["/d", "/c", shell, ...args] };
+}
+
 function spawnPtyWithRetry(shell, args, options, attempts = 10, delayMs = 500) {
   return new Promise((resolve, reject) => {
     function attempt(i) {
+      const { shell: spawnFile, args: spawnArgs } = toCmdShellSpawn(shell, args);
+      const spawnOptions = process.platform === "win32" ? { ...options, useConpty: false } : options;
       try {
-        resolve(pty.spawn(shell, args, options));
+        const proc = pty.spawn(spawnFile, spawnArgs, spawnOptions);
+        resolve(proc);
       } catch (e) {
         if (i >= attempts - 1 || !/^File not found:/.test(e.message)) {
           reject(e);
@@ -417,7 +418,48 @@ function spawnPtyWithRetry(shell, args, options, attempts = 10, delayMs = 500) {
   });
 }
 
-async function runClaudeCommand(shell, args, options) {
+// Confirmed live, 2026-08-21: whatever intermittently makes this process
+// unable to see the npm-global claude.cmd (see toCmdShellSpawn's comment
+// above) doesn't always show up as node-pty's own synchronous spawn-time
+// exception - cmd.exe can also launch fine itself and only fail *inside*
+// its own run, printing its native "'<path>' is not recognized as an
+// internal or external command..." to the pty's output stream instead of
+// throwing. spawnPtyWithRetry's retry loop never sees that case (from its
+// point of view, the spawn succeeded), so it was passing through as a
+// silent bad result. Retrying the whole run (not just the spawn) whenever
+// the output matches this exact failure signature closes that gap -
+// confirmed non-deterministic (same code failed once, then succeeded
+// immediately after on an unchanged retry), consistent with transient
+// external interference rather than a real, permanent problem with the
+// path.
+const CMD_NOT_RECOGNIZED_RE = /is not recognized as an internal or external command/i;
+
+// Diagnosed live, 2026-08-21, the actual cause of messages appearing "sent"
+// but never going anywhere: `output` here is captured straight off a real
+// ConPTY - it's genuinely a terminal stream, not plain text, and comes
+// full of terminal control codes (color/cursor-position/clear-screen CSI
+// sequences, OSC window-title sequences, per-line erase-to-end-of-line
+// redraw artifacts). dispatchBackgroundAgent()'s own id-extraction regex
+// and listBackgroundAgents()'s JSON.parse() were both written and tested
+// against clean text and silently broke once the real CLI's output
+// started actually carrying these codes - dispatch regex fails closed
+// (throws "Could not parse..."), so the subsequent attach that would give
+// the user a live, working session never happens; JSON.parse() fails
+// closed even more silently the OTHER way, via listBackgroundAgents()'s
+// own catch-and-return-[] - meaning every open silently failed to find the
+// agent it just dispatched, then dispatched ANOTHER new one instead of
+// reusing it. Confirmed directly against a real captured multi-KB listing
+// output: stripping these two families (OSC first, since an OSC sequence
+// can itself contain characters a CSI-only strip would misparse) recovers
+// clean, valid JSON every time. Centralized here (not at each call site)
+// so every caller - present and future - gets clean text automatically.
+function stripTerminalCodes(s) {
+  return s
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "") // OSC (window title, etc.)
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""); // CSI (color/cursor/clear/erase)
+}
+
+async function runClaudeCommandOnce(shell, args, options) {
   const proc = await spawnPtyWithRetry(shell, args, {
     name: "xterm-color",
     cols: 240,
@@ -435,8 +477,20 @@ async function runClaudeCommand(shell, args, options) {
     proc.onData((data) => {
       output += data;
     });
-    proc.onExit(() => resolve(output));
+    proc.onExit(() => {
+      resolve(stripTerminalCodes(output));
+    });
   });
+}
+
+async function runClaudeCommand(shell, args, options, attempts = 5, delayMs = 500) {
+  for (let i = 0; i < attempts; i++) {
+    const output = await runClaudeCommandOnce(shell, args, options);
+    if (!CMD_NOT_RECOGNIZED_RE.test(output) || i === attempts - 1) {
+      return output;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
 }
 
 async function listBackgroundAgents(shell, spawnEnv) {

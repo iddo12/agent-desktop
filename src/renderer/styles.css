@@ -456,6 +456,26 @@ html, body {
   height: 100%;
 }
 
+/* xterm.js's own scrollable viewport renders Chromium's default scrollbar
+   when unstyled - much wider/more opaque than this app's own scrollbars
+   elsewhere, wide enough to sit over the last few characters of any line
+   that reaches the right edge (reported live: covering part of an error
+   message). Thinned and matched to the app's existing dark palette instead
+   of just left at the browser default. */
+#terminal-container .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+#terminal-container .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+#terminal-container .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--bg-hover);
+  border-radius: 4px;
+}
+#terminal-container .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-active);
+}
+
 /* Claude Code's own CLI draws a native input-prompt box at the bottom of
    whatever terminal size it's given (border lines + placeholder text) - it's
    pixels rendered onto xterm's canvas by the CLI itself, not a DOM element,
