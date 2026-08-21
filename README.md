@@ -6,11 +6,11 @@ If you've ever ended up with five terminal windows each running `claude` for a d
 
 ## What it does
 
-- **A sidebar of agents.** Each agent is just a folder on disk. Add one, and Agent Desktop launches a real `claude` CLI session in it — the actual CLI, not a reimplementation.
+- **A sidebar of agents.** Each agent is just a folder on disk. Add one, and Agent Desktop dispatches a real, native Claude Code background agent (`claude --bg`) for it — the actual CLI's own multi-agent system, not a reimplementation.
 - **A chat view, not a raw terminal.** Messages, tool calls, and responses are parsed out of the session's own transcript and shown as a normal chat thread. A "Raw Terminal" toggle drops back to the literal terminal when you want it.
 - **Status at a glance.** Each agent can maintain its own `master_state.md` (status / health / recent tasks) that shows up as a one-line summary in the sidebar, so you can tell what's going on without opening every agent.
 - **Conversation archive.** Sessions get archived to per-day markdown files, browsable without digging through raw JSONL.
-- **Runs the real CLI.** No wrapper reimplementation of Claude Code — Agent Desktop spawns and drives the actual `claude` binary via [node-pty](https://github.com/microsoft/node-pty), so anything the CLI can do, an agent here can do.
+- **Runs the real CLI, on Claude Code's own infrastructure.** No wrapper reimplementation of Claude Code — Agent Desktop dispatches each agent as a genuine Claude Code background agent and just `attach`es a [node-pty](https://github.com/microsoft/node-pty) view onto it, so anything the CLI's own background-agent system can do, an agent here can do. Because the agent is a real Anthropic-side background agent rather than a process Agent Desktop directly owns, it keeps running independent of whatever's currently attached to it - closing Agent Desktop (or losing the attach connection) doesn't kill the agent's work.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ Selecting the agent starts a real `claude` session with that folder as its worki
 
 ## Architecture, briefly
 
-- `src/main.js` — Electron main process: window management, spawning/tearing down each agent's `claude` process via node-pty, IPC handlers.
+- `src/main.js` — Electron main process: window management, dispatching each agent as a native Claude Code background agent (`claude --bg`) and attaching a node-pty view to it (`claude attach`), IPC handlers. One-shot CLI calls (listing agents, dispatching, stopping) go through node-pty rather than `child_process`, since the latter has proven unreliable in some launch contexts on Windows.
 - `src/agents.js` — agent folder CRUD (create/list/update/delete).
 - `src/archive.js` — reads each agent's live JSONL transcript and turns it into the chat view's message blocks, plus the per-day markdown archive.
 - `src/fsRetry.js` — retry-with-backoff wrapper for file operations, since cloud-synced folders (Dropbox, OneDrive, etc.) and antivirus/security software can transiently lock files mid-write.
@@ -51,7 +51,7 @@ Selecting the agent starts a real `claude` session with that folder as its worki
 
 - Windows-first: paths and the hidden-launch script (`Launch.vbs`) assume Windows conventions.
 - Only one Agent Desktop window should run at a time per machine (enforced via Electron's single-instance lock) — a second launch just focuses the first.
-- A message sent within the first second or two of opening a freshly-created agent can be silently dropped if the underlying `claude` process hasn't finished attaching its own input yet. If a fresh agent seems to ignore your first message, just send it again. The Raw Terminal toggle is useful for confirming what's actually happening at the process level.
+- Deleting an agent shows a mandatory 30-second countdown before the delete button becomes clickable. This isn't just friction for its own sake: `claude --bg` dispatch spawns a separate, longer-lived daemon helper process that can keep a handle on the agent's folder for a while after the agent session itself is stopped, and deleting too soon can otherwise fail with a Windows "resource busy" error. The countdown gives that daemon time to release it.
 
 ## Troubleshooting: Windows Defender Controlled Folder Access
 
