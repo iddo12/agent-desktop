@@ -369,26 +369,54 @@ const ARCHIVE_SYNC_INTERVAL_MS = 30000;
 // (agents/--bg/stop) are run through it too rather than child_process,
 // collecting output until the process exits instead of returning it
 // synchronously.
-function runClaudeCommand(shell, args, options) {
+// node-pty's own native addon does a synchronous file-existence pre-check
+// via a raw Win32 GetFileAttributesW call (see conpty.cc's file_exists()) -
+// completely separate from Node's own fs module or child_process, before
+// ever attempting the actual spawn. Confirmed directly, live, on Iddo's
+// real machine through this app's real launch path (Launch.vbs) rather
+// than this project's own Playwright-driven test harness (which never
+// exercises that exact path, so a whole class of bugs specific to it went
+// uncaught all night): it threw "File not found: C:\Users\...\claude.cmd"
+// for a path independently confirmed to exist and work - `where`, a
+// direct `ls`, and a direct `claude --version` invocation all succeeded
+// immediately afterward. Same broad class of quirk resolveClaudeExecutable()'s
+// own comment documents for fs.existsSync in this app's launch context,
+// just surfacing inside node-pty's native code instead of Node's fs layer.
+// Retried rather than fully explained, since the underlying OS-level cause
+// isn't something this app's own code can diagnose further or fix at the
+// source - only retried for this specific, known-transient error message,
+// not any other spawn failure.
+function spawnPtyWithRetry(shell, args, options, attempts = 4, delayMs = 300) {
   return new Promise((resolve, reject) => {
-    let proc;
-    try {
-      proc = pty.spawn(shell, args, {
-        name: "xterm-color",
-        cols: 240,
-        rows: 50,
-        // node-pty's native binding turns an explicit `cwd: undefined` into
-        // a real invalid path rather than defaulting sanely - confirmed
-        // directly: callers that don't care about cwd (listing/stopping,
-        // as opposed to dispatching) hit "Cannot create process, error
-        // code: 267" (Windows ERROR_DIRECTORY) every time without this.
-        cwd: options.cwd || process.cwd(),
-        env: options.env,
-      });
-    } catch (e) {
-      reject(e);
-      return;
+    function attempt(i) {
+      try {
+        resolve(pty.spawn(shell, args, options));
+      } catch (e) {
+        if (i >= attempts - 1 || !/^File not found:/.test(e.message)) {
+          reject(e);
+          return;
+        }
+        setTimeout(() => attempt(i + 1), delayMs);
+      }
     }
+    attempt(0);
+  });
+}
+
+async function runClaudeCommand(shell, args, options) {
+  const proc = await spawnPtyWithRetry(shell, args, {
+    name: "xterm-color",
+    cols: 240,
+    rows: 50,
+    // node-pty's native binding turns an explicit `cwd: undefined` into
+    // a real invalid path rather than defaulting sanely - confirmed
+    // directly: callers that don't care about cwd (listing/stopping,
+    // as opposed to dispatching) hit "Cannot create process, error
+    // code: 267" (Windows ERROR_DIRECTORY) every time without this.
+    cwd: options.cwd || process.cwd(),
+    env: options.env,
+  });
+  return new Promise((resolve) => {
     let output = "";
     proc.onData((data) => {
       output += data;
@@ -562,7 +590,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
 
   let proc;
   try {
-    proc = pty.spawn(shell, ["attach", agentId], {
+    proc = await spawnPtyWithRetry(shell, ["attach", agentId], {
       name: "xterm-color",
       cols: cols || 80,
       rows: rows || 30,
