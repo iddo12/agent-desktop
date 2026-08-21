@@ -184,6 +184,25 @@ function selectAgent(agent) {
   refreshUsageWindows();
 }
 
+// A resize call reaches the underlying Claude Code process as a real pty
+// resize (node-pty's ConPTY resize on Windows) - the same effect a terminal
+// emulator's SIGWINCH has. Confirmed independently on a public bug report
+// (anthropics/claude-code#25286): Claude Code's renderer does a full
+// screen repaint on every resize signal it receives, and a burst of
+// redundant ones (dragging a window, a resize event that doesn't actually
+// change the computed cols/rows) can push it into a stuck 100%-writes
+// render loop it never recovers from - exactly the failure mode this app's
+// own drag-to-resize compose box and window-resize listener could trigger,
+// since neither previously checked whether the size had actually changed
+// before sending. Only sending when cols/rows genuinely differ from the
+// last value actually sent closes that gap.
+function sendResizeIfChanged(session, agentPath, cols, rows) {
+  if (session.lastSentCols === cols && session.lastSentRows === rows) return;
+  session.lastSentCols = cols;
+  session.lastSentRows = rows;
+  window.api.resizeTerminal(agentPath, cols, rows);
+}
+
 function showTerminalFor(agent) {
   terminalContainerEl.innerHTML = "";
 
@@ -230,6 +249,9 @@ function showTerminalFor(agent) {
       // Cache of the last successful rebuildChatView() read, reused by
       // submitToAgent() for its synchronous optimistic render (see there).
       lastBlocks: [],
+      // Last cols/rows actually sent to the pty - see sendResizeIfChanged().
+      lastSentCols: null,
+      lastSentRows: null,
     };
     terminals.set(agent.path, session);
 
@@ -249,6 +271,8 @@ function showTerminalFor(agent) {
 
     if (!session.started) {
       session.started = true;
+      session.lastSentCols = cols;
+      session.lastSentRows = rows;
       window.api
         .startTerminal(agent.path, cols, rows)
         .catch((err) => {
@@ -256,7 +280,7 @@ function showTerminalFor(agent) {
           session.started = false;
         });
     } else {
-      window.api.resizeTerminal(agent.path, cols, rows);
+      sendResizeIfChanged(session, agent.path, cols, rows);
     }
 
     // Populate the chat view immediately rather than waiting for the next
@@ -277,7 +301,7 @@ function refitActiveTerminal() {
   if (!session) return;
   session.fitAddon.fit();
   const { cols, rows } = session.term;
-  window.api.resizeTerminal(activeAgentPath, cols, rows);
+  sendResizeIfChanged(session, activeAgentPath, cols, rows);
 }
 
 window.addEventListener("resize", refitActiveTerminal);
