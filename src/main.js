@@ -1,7 +1,7 @@
 ﻿const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const { execSync, execFileSync } = require("child_process");
+const { execSync } = require("child_process");
 const pty = require("node-pty");
 const { listAgents, createAgent, updateAgent, deleteAgent } = require("./agents");
 const { syncArchive, listArchivedDays, readArchivedDay, encodeProjectPath, getLatestUsage, getUsageWindows, getLiveTranscriptBlocks } = require("./archive");
@@ -177,7 +177,7 @@ ipcMain.handle("delete-agent", async (event, { agentPath }) => {
       setTimeout(finish, 2000);
     });
   }
-  stopBackgroundAgentForCwd(sessionCwdFor(agentPath));
+  await stopBackgroundAgentForCwd(sessionCwdFor(agentPath));
   await deleteAgentWithRetry(agentPath);
   return { ok: true };
 });
@@ -240,9 +240,53 @@ const ARCHIVE_SYNC_INTERVAL_MS = 30000;
 // uncaught "AttachConsole failed" from node-pty's own cleanup code) but the
 // underlying agent is still alive, this reconnects silently instead of
 // telling the user their session ended when it didn't.
-function listBackgroundAgentsSync(shell, spawnEnv) {
+//
+// child_process's execFileSync/spawnSync turns out to be structurally
+// unreliable in this app's own launch context (via the hidden VBS wrapper):
+// confirmed directly, live, three escalating ways - "spawnSync ...\claude.cmd
+// EINVAL" (a .cmd batch file isn't independently executable without cmd.exe
+// to interpret it), then "spawnSync cmd.exe ENOENT" (bare-name PATH lookup
+// failing), then "spawnSync C:\Windows\system32\cmd.exe ENOENT" even against
+// that fully-qualified, unquestionably-real system path. That last one rules
+// out a PATH or .cmd-shim problem - it's the same unexplained fs/spawn-layer
+// quirk resolveClaudeExecutable()'s own comment above already documents for
+// fs.existsSync in this exact process. node-pty's spawn uses a different,
+// lower-level Windows API path and is unaffected - already relied on
+// throughout this file for the actual attach pty - so one-shot CLI calls
+// (agents/--bg/stop) are run through it too rather than child_process,
+// collecting output until the process exits instead of returning it
+// synchronously.
+function runClaudeCommand(shell, args, options) {
+  return new Promise((resolve, reject) => {
+    let proc;
+    try {
+      proc = pty.spawn(shell, args, {
+        name: "xterm-color",
+        cols: 240,
+        rows: 50,
+        // node-pty's native binding turns an explicit `cwd: undefined` into
+        // a real invalid path rather than defaulting sanely - confirmed
+        // directly: callers that don't care about cwd (listing/stopping,
+        // as opposed to dispatching) hit "Cannot create process, error
+        // code: 267" (Windows ERROR_DIRECTORY) every time without this.
+        cwd: options.cwd || process.cwd(),
+        env: options.env,
+      });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    let output = "";
+    proc.onData((data) => {
+      output += data;
+    });
+    proc.onExit(() => resolve(output));
+  });
+}
+
+async function listBackgroundAgents(shell, spawnEnv) {
   try {
-    const output = execFileSync(shell, ["agents", "--json", "--all"], { encoding: "utf-8", env: spawnEnv });
+    const output = await runClaudeCommand(shell, ["agents", "--json", "--all"], { env: spawnEnv });
     return JSON.parse(output);
   } catch (e) {
     return [];
@@ -254,8 +298,8 @@ function listBackgroundAgentsSync(shell, spawnEnv) {
 // still-running states between turns - only stopped/failed entries drop the
 // pid field). Checking for pid presence is more robust than enumerating
 // state strings, which Anthropic could add more of later.
-function findAliveBackgroundAgent(shell, spawnEnv, sessionCwd) {
-  const agents = listBackgroundAgentsSync(shell, spawnEnv);
+async function findAliveBackgroundAgent(shell, spawnEnv, sessionCwd) {
+  const agents = await listBackgroundAgents(shell, spawnEnv);
   const target = path.resolve(sessionCwd);
   return agents.find((a) => a.kind === "background" && a.pid && path.resolve(a.cwd || "") === target);
 }
@@ -266,18 +310,21 @@ function findAliveBackgroundAgent(shell, spawnEnv, sessionCwd) {
 // --continue with no prompt dispatches idle, "send a prompt to start",
 // which matches this app's own "reopen an agent to an empty, ready-to-type
 // box" UX exactly (confirmed directly before writing this).
-function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
+async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
   const args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
-  const output = execFileSync(shell, args, { cwd: sessionCwd, encoding: "utf-8", env: spawnEnv });
-  const match = output.match(/backgrounded\s*[Â·Â·]\s*([a-f0-9]+)/i);
+  const output = await runClaudeCommand(shell, args, { cwd: sessionCwd, env: spawnEnv });
+  // Real dispatch output (confirmed byte-for-byte via a live test dispatch):
+  // "backgrounded \xC2\xB7 5467abbc (idle ...)" - a single U+00B7 MIDDLE DOT,
+  // not a literal "." or multiple dots.
+  const match = output.match(/backgrounded\s*·\s*([a-f0-9]+)/i);
   if (!match) {
     throw new Error("Could not parse background agent id from dispatch output: " + output);
   }
   return match[1];
 }
 
-function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
-  const existing = findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+async function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
+  const existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
   if (existing) return existing.id;
   return dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
 }
@@ -291,13 +338,13 @@ function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
 // entry) so this also catches an agent that was dispatched in an earlier
 // app run and never reattached in this one - ptySessions only knows about
 // sessions opened since the app last started.
-function stopBackgroundAgentForCwd(sessionCwd) {
+async function stopBackgroundAgentForCwd(sessionCwd) {
   try {
     const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
     const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" };
-    const agent = findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+    const agent = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
     if (agent) {
-      execFileSync(shell, ["stop", agent.id], { encoding: "utf-8", env: spawnEnv });
+      await runClaudeCommand(shell, ["stop", agent.id], { env: spawnEnv });
     }
   } catch (e) {
     /* best-effort - a stray still-running background process is not worth failing the delete over */
@@ -319,9 +366,17 @@ function stopBackgroundAgentForCwd(sessionCwd) {
 // backend comment above. Attempts exactly one silent re-attach; if that
 // itself fails or exits immediately, falls through to the normal notice
 // rather than risking a retry loop.
-function handlePtyExit(agentPath, isReattachAttempt = false) {
+async function handlePtyExit(agentPath, isReattachAttempt = false) {
   const session = ptySessions.get(agentPath);
   if (!session) return;
+  // A "starting" placeholder (see start-terminal below) isn't a dead session
+  // to tear down - it's one that hasn't finished being created yet. A write/
+  // resize landing in that brief dispatch window would otherwise throw on
+  // session.proc being undefined, land here, and delete the placeholder out
+  // from under the in-flight startTerminalSession call that's about to fill
+  // it in - producing a false "[session ended]" notice for a session that
+  // never actually started. Nothing to clean up here; just drop the signal.
+  if (session.starting) return;
   clearInterval(session.archiveTimer);
   try {
     syncArchive(agentPath, session.sessionCwd);
@@ -329,10 +384,10 @@ function handlePtyExit(agentPath, isReattachAttempt = false) {
   ptySessions.delete(agentPath);
 
   if (!isReattachAttempt && session.shell && session.spawnEnv) {
-    const stillAlive = findAliveBackgroundAgent(session.shell, session.spawnEnv, session.sessionCwd);
+    const stillAlive = await findAliveBackgroundAgent(session.shell, session.spawnEnv, session.sessionCwd);
     if (stillAlive) {
       try {
-        startTerminalSession(agentPath, session.sessionCwd, session.cols, session.rows, stillAlive.id, /* isReattach */ true);
+        await startTerminalSession(agentPath, session.sessionCwd, session.cols, session.rows, stillAlive.id, /* isReattach */ true);
         return; // reconnected silently, don't notify the renderer
       } catch (e) {
         /* fall through to the normal "session ended" notice below */
@@ -350,25 +405,66 @@ function handlePtyExit(agentPath, isReattachAttempt = false) {
 // knownAgentId is omitted, finds or dispatches a background agent for this
 // cwd first; when provided (the reattach path), skips straight to attaching
 // since the caller already confirmed it's alive.
-function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt = false) {
+async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt = false) {
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   // See the CLAUDE_CODE_FORCE_SESSION_PERSISTENCE comment further up this
   // file - same reasoning applies to background-dispatched agents.
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" };
 
-  const agentId = knownAgentId || findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+  let agentId;
+  try {
+    agentId = knownAgentId || (await findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd));
+  } catch (e) {
+    throw new Error("[find/dispatch stage] " + e.message);
+  }
 
-  const proc = pty.spawn(shell, ["attach", agentId], {
-    name: "xterm-color",
-    cols: cols || 80,
-    rows: rows || 30,
-    cwd: sessionCwd,
-    env: spawnEnv,
-  });
+  let proc;
+  try {
+    proc = pty.spawn(shell, ["attach", agentId], {
+      name: "xterm-color",
+      cols: cols || 80,
+      rows: rows || 30,
+      cwd: sessionCwd,
+      env: spawnEnv,
+    });
+  } catch (e) {
+    throw new Error("[attach stage, agentId=" + agentId + "] " + e.message);
+  }
+
+  // Anything typed while this was still a "starting" placeholder (see the
+  // terminal-input handler's own comment) needs replaying once the real
+  // proc exists - but the pty object existing isn't the same as the actual
+  // Claude Code process behind it being ready to read stdin. Confirmed
+  // directly, live, twice: flushing right after pty.spawn() returns loses
+  // the input every time, even staggered 80ms apart - the CLI is still mid-
+  // boot (rendering its "Welcome back" banner takes real seconds) and isn't
+  // listening yet, so the write lands before anything is there to read it.
+  // Gating the flush on the pty's own output actually going quiet - the
+  // same idle-detection renderer.js already uses (IDLE_TIMEOUT_MS there) to
+  // know when a *running* session is done responding and ready for the next
+  // message - reuses that same signal for "ready for the first message."
+  const FLUSH_IDLE_MS = 900;
+  const priorSession = ptySessions.get(agentPath);
+  const pendingInput = priorSession && priorSession.pendingInput;
+  let flushIdleTimer = null;
+
+  function flushPendingInput() {
+    if (!pendingInput || !pendingInput.length) return;
+    pendingInput.forEach((data, i) => {
+      // Still staggered, not blasted as one synchronous burst - see
+      // submitToAgent() in renderer.js for why a composed message and its
+      // trailing "\r" must land as two separately-timed writes.
+      setTimeout(() => proc.write(data), i * 80);
+    });
+  }
 
   proc.onData((data) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("terminal-data", { agentPath, data });
+    }
+    if (pendingInput && pendingInput.length) {
+      clearTimeout(flushIdleTimer);
+      flushIdleTimer = setTimeout(flushPendingInput, FLUSH_IDLE_MS);
     }
   });
 
@@ -382,16 +478,24 @@ function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId, i
   }, ARCHIVE_SYNC_INTERVAL_MS);
 
   proc.onExit(() => {
+    clearTimeout(flushIdleTimer);
     handlePtyExit(agentPath, isReattachAttempt);
   });
 
   ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows });
 }
 
-ipcMain.handle("start-terminal", (event, { agentPath, cols, rows }) => {
+ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows }) => {
   if (ptySessions.has(agentPath)) {
     return { alreadyRunning: true };
   }
+  // Dispatching is now async (see startTerminalSession below), so a second
+  // start-terminal call for the same agent could otherwise race past this
+  // has() check before the first call's real session lands, dispatching a
+  // duplicate background agent for the same folder. Claiming the slot with
+  // a placeholder synchronously, before any await, closes that window - the
+  // real session object overwrites it once startTerminalSession finishes.
+  ptySessions.set(agentPath, { starting: true, pendingInput: [] });
 
   // --continue resumes this agent's most recent conversation in its own folder,
   // so reopening an agent's chat picks up where you left off. Only passed when
@@ -401,7 +505,12 @@ ipcMain.handle("start-terminal", (event, { agentPath, cols, rows }) => {
   // fresh-session CLAUDE.md handoff read entirely on an agent's very first open.
   // (dispatchBackgroundAgent() applies this same condition internally now.)
   const sessionCwd = sessionCwdFor(agentPath);
-  startTerminalSession(agentPath, sessionCwd, cols, rows);
+  try {
+    await startTerminalSession(agentPath, sessionCwd, cols, rows);
+  } catch (e) {
+    ptySessions.delete(agentPath);
+    throw e;
+  }
   return { alreadyRunning: false };
 });
 
@@ -447,12 +556,24 @@ ipcMain.handle("get-usage-windows", () => getUsageWindows());
 // arrives first wins, and calling it twice is safe (see its own comment).
 ipcMain.on("terminal-input", (event, { agentPath, data }) => {
   const session = ptySessions.get(agentPath);
-  if (session) {
-    try {
-      session.proc.write(data);
-    } catch (e) {
-      handlePtyExit(agentPath);
-    }
+  if (!session) return;
+  // A "starting" placeholder has no real proc yet (background-agent dispatch
+  // is async now - see start-terminal below). Confirmed directly, live: a
+  // message sent right after opening an agent can land in this brief window
+  // and, before this queue existed, was silently dropped - session.proc.write
+  // threw on undefined, handlePtyExit() correctly no-op'd on the placeholder
+  // (see its own comment) so there was no false "[session ended]" notice
+  // either, but the typed message just vanished with zero feedback. Queuing
+  // it here and flushing in startTerminalSession() once the real proc exists
+  // fixes that without reintroducing the false-notice problem.
+  if (session.starting) {
+    session.pendingInput.push(data);
+    return;
+  }
+  try {
+    session.proc.write(data);
+  } catch (e) {
+    handlePtyExit(agentPath);
   }
 });
 
