@@ -144,7 +144,18 @@ ipcMain.handle("update-agent", (event, { agentPath, name, role, avatarPath }) =>
 // against /EBUSY|EPERM|EACCES/ and never matched ENOENT, despite ENOENT
 // being live-confirmed (same session) as a real, reproducible transient
 // error in this exact project folder.
-async function deleteAgentWithRetry(agentPath, attempts = 5, delayMs = 400) {
+// 2026-08-21: widened from 5x400ms (2s total) to 12x500ms (6s total) - a
+// native background agent's dispatch also spawns a separate, longer-lived
+// "daemon" helper process (confirmed directly, live: `claude daemon run
+// --origin transient --spawned-by {...cwd...}`) that `claude stop <id>`
+// does not necessarily terminate promptly. It still holds its own handle
+// on this same folder, so even after stopBackgroundAgentForCwd above has
+// confirmed the *agent* session itself has exited, rmdir can still hit a
+// real "EBUSY: resource busy or locked" until that separate daemon process
+// also finishes exiting and releases it - the original 2s budget (sized
+// for the unrelated attach-pty-kill case elsewhere in this file) wasn't
+// enough headroom for that.
+async function deleteAgentWithRetry(agentPath, attempts = 12, delayMs = 500) {
   await withFsRetryAsync(() => deleteAgent(agentPath), { attempts, delayMs });
 }
 
@@ -339,13 +350,42 @@ async function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
 // app run and never reattached in this one - ptySessions only knows about
 // sessions opened since the app last started.
 async function stopBackgroundAgentForCwd(sessionCwd) {
-  try {
+  async function attempt() {
     const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
     const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" };
     const agent = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
     if (agent) {
       await runClaudeCommand(shell, ["stop", agent.id], { env: spawnEnv });
+      // `claude stop` returning just means the stop request was issued, not
+      // that the target background process has actually exited and released
+      // its own handles yet - its cwd IS this same sessionCwd, unlike the
+      // "stop" command's own pty process. Confirmed directly, live: deleting
+      // right after stop resolved hit "EBUSY: resource busy or locked,
+      // rmdir ...\.claude-session" even after deleteAgentWithRetry's own
+      // 2-second retry window - that process was still holding it. Polling
+      // here for the pid to actually disappear (same alive-check used
+      // everywhere else in this file) closes that gap properly instead of
+      // just widening the existing retry window and hoping.
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const stillAlive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+        if (!stillAlive) break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
     }
+  }
+  try {
+    // Confirmed directly, live: this whole sequence can occasionally hang
+    // well past its own internal 3s poll budget (root cause not fully
+    // pinned down - isolated outside the app, the same pty-based `claude
+    // stop` call reliably completes in under 2s, so something about this
+    // app's own concurrent process/env state is implicated, not the
+    // mechanism itself). A hard outer timeout means a flaky stop-detection
+    // can never block the delete indefinitely - deleteAgentWithRetry's own
+    // EBUSY-retry loop right after this is the real safety net either way,
+    // so falling through to it (agent possibly still alive) is strictly
+    // better than the delete just hanging forever with no feedback.
+    await Promise.race([attempt(), new Promise((resolve) => setTimeout(resolve, 5000))]);
   } catch (e) {
     /* best-effort - a stray still-running background process is not worth failing the delete over */
   }
@@ -450,7 +490,18 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
 
   function flushPendingInput() {
     if (!pendingInput || !pendingInput.length) return;
-    pendingInput.forEach((data, i) => {
+    // splice() both copies the queued items AND empties pendingInput in
+    // place (it's a reference into the placeholder's own array) - without
+    // this, the queue was never actually drained: proc.onData() below fires
+    // again on the CLI's very next output chunk, and since a streaming
+    // response has output gaps >= FLUSH_IDLE_MS constantly (between tokens,
+    // around tool calls), the idle timer kept re-firing and replaying the
+    // same already-sent input over and over. Confirmed directly, live: one
+    // Enter press became 53 duplicate submissions of the same message
+    // before this fix, visible as 53 near-identical entries in the
+    // session's own JSONL transcript.
+    const toSend = pendingInput.splice(0, pendingInput.length);
+    toSend.forEach((data, i) => {
       // Still staggered, not blasted as one synchronous burst - see
       // submitToAgent() in renderer.js for why a composed message and its
       // trailing "\r" must land as two separately-timed writes.
