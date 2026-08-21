@@ -907,26 +907,57 @@ const deleteAgentConfirmInputEl = document.getElementById("delete-agent-confirm-
 const confirmDeleteAgentBtn = document.getElementById("confirm-delete-agent-btn");
 let deletingAgent = null;
 
+// A `claude --bg` dispatch also spawns a separate, longer-lived "daemon"
+// helper process that can keep its own handle on the agent's folder for a
+// while after the agent session itself has been stopped - confirmed
+// directly, live: deleting right after actually using an agent could hit
+// "EBUSY: resource busy or locked" even with main.js's own retry logic
+// already widened to ~11s. Rather than keep guessing at exact timings
+// server-side, this makes the wait visible and unconditional instead -
+// simpler and more honest than a silent background retry that might still
+// occasionally surface a scary error. 30s is a starting estimate, not a
+// measured minimum - bump it if it still proves too short in practice.
+const DELETE_AGENT_COUNTDOWN_SECONDS = 30;
+let deleteAgentCountdownTimer = null;
+let deleteAgentCountdownRemaining = 0;
+
+function updateDeleteAgentButtonState() {
+  if (deleteAgentCountdownRemaining > 0) {
+    confirmDeleteAgentBtn.disabled = true;
+    confirmDeleteAgentBtn.textContent = `Delete permanently (${deleteAgentCountdownRemaining}s)`;
+    return;
+  }
+  confirmDeleteAgentBtn.textContent = "Delete permanently";
+  confirmDeleteAgentBtn.disabled = !deletingAgent || deleteAgentConfirmInputEl.value.trim() !== deletingAgent.displayName;
+}
+
 function openDeleteAgentModal(agent) {
   deletingAgent = agent;
   deleteAgentWarningEl.textContent =
     `This permanently deletes "${agent.displayName}" and its entire conversation history/archive. This cannot be undone.`;
   deleteAgentConfirmInputEl.value = "";
-  confirmDeleteAgentBtn.disabled = true;
   deleteAgentModalEl.classList.remove("hidden");
   deleteAgentConfirmInputEl.focus();
+
+  clearInterval(deleteAgentCountdownTimer);
+  deleteAgentCountdownRemaining = DELETE_AGENT_COUNTDOWN_SECONDS;
+  updateDeleteAgentButtonState();
+  deleteAgentCountdownTimer = setInterval(() => {
+    deleteAgentCountdownRemaining -= 1;
+    if (deleteAgentCountdownRemaining <= 0) clearInterval(deleteAgentCountdownTimer);
+    updateDeleteAgentButtonState();
+  }, 1000);
 }
 
 document.getElementById("cancel-delete-agent-btn").addEventListener("click", () => {
+  clearInterval(deleteAgentCountdownTimer);
   deleteAgentModalEl.classList.add("hidden");
   deletingAgent = null;
 });
 
 // Exact-match, case-sensitive - deliberate extra friction for a genuinely
 // irreversible action, not just a click-through confirm dialog.
-deleteAgentConfirmInputEl.addEventListener("input", () => {
-  confirmDeleteAgentBtn.disabled = !deletingAgent || deleteAgentConfirmInputEl.value.trim() !== deletingAgent.displayName;
-});
+deleteAgentConfirmInputEl.addEventListener("input", updateDeleteAgentButtonState);
 
 confirmDeleteAgentBtn.addEventListener("click", async () => {
   if (!deletingAgent) return;
