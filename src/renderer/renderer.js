@@ -1491,3 +1491,37 @@ resetSessionBtn.addEventListener("click", () => {
 });
 
 loadAgents();
+
+// --------------------------------------------------- Claude Code updates --
+//
+// Checked once on startup, not polled repeatedly - a stale "update
+// available" state for the rest of a running session is a fine tradeoff
+// against hitting the npm registry on some recurring timer, especially
+// since this app already gets fully relaunched often anyway (no
+// auto-reload for its own code changes either). Only shown at all when an
+// update is genuinely available - stays hidden entirely otherwise.
+const updateAvailableBtn = document.getElementById("update-available-btn");
+
+async function checkForClaudeCodeUpdate() {
+  const { current, latest, updateAvailable } = await window.api.checkClaudeCodeUpdate();
+  if (!updateAvailable) return;
+  updateAvailableBtn.textContent = `Update available: Claude Code ${current || "?"} → ${latest}`;
+  updateAvailableBtn.title = "Click to update the Claude Code CLI this app dispatches agents through (npm install -g @anthropic-ai/claude-code@latest)";
+  updateAvailableBtn.classList.remove("hidden");
+}
+
+updateAvailableBtn.addEventListener("click", async () => {
+  updateAvailableBtn.disabled = true;
+  updateAvailableBtn.textContent = "Updating Claude Code...";
+  try {
+    const { current } = await window.api.updateClaudeCode();
+    updateAvailableBtn.textContent = `Updated to Claude Code ${current || "latest"}`;
+    setTimeout(() => updateAvailableBtn.classList.add("hidden"), 4000);
+  } catch (e) {
+    updateAvailableBtn.disabled = false;
+    updateAvailableBtn.textContent = "Update failed - click to retry";
+    updateAvailableBtn.title = e.message;
+  }
+});
+
+checkForClaudeCodeUpdate();

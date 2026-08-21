@@ -70,6 +70,20 @@ html, body {
 }
 #new-agent-btn:hover { filter: brightness(1.1); }
 
+#update-available-btn {
+  margin: 0 16px 12px;
+  background: var(--bg-hover);
+  border: 1px solid var(--accent-2);
+  color: var(--text);
+  font-size: 0.78rem;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#update-available-btn:hover { filter: brightness(1.15); }
+#update-available-btn:disabled { cursor: default; filter: brightness(0.85); }
+
 #agent-list {
   flex: 1;
   overflow-y: auto;

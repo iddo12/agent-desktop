@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld("api", {
   getUsageWindows: () => ipcRenderer.invoke("get-usage-windows"),
   getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),
 
+  checkClaudeCodeUpdate: () => ipcRenderer.invoke("check-claude-code-update"),
+  updateClaudeCode: () => ipcRenderer.invoke("update-claude-code"),
+
   onTerminalData: (callback) => {
     ipcRenderer.on("terminal-data", (event, payload) => callback(payload));
   },

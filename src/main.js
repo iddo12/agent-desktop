@@ -1,6 +1,7 @@
 ﻿const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const https = require("https");
 const { execSync } = require("child_process");
 const pty = require("node-pty");
 const { listAgents, createAgent, updateAgent, deleteAgent } = require("./agents");
@@ -32,6 +33,107 @@ function resolveClaudeExecutable() {
   }
   throw new Error("Could not resolve claude.cmd - not on PATH and APPDATA is unset");
 }
+
+// npm itself lives alongside node.exe (wherever Node.js was installed), not
+// in the same folder as globally-installed packages like claude.cmd above -
+// same PATH-lookup-then-hardcoded-fallback pattern, since `where` can fail
+// silently in this app's own launch context the same way it does for
+// claude.cmd. `C:\Program Files\nodejs\npm.cmd` is the standard default
+// location for a Windows Node.js install (confirmed on this machine).
+function resolveNpmExecutable() {
+  try {
+    const found = execSync("where npm.cmd", { encoding: "utf-8" }).split("\n")[0].trim();
+    if (found) return found;
+  } catch (e) {
+    /* PATH lookup unavailable in this process's environment - fall back below */
+  }
+  return "C:\\Program Files\\nodejs\\npm.cmd";
+}
+
+// ---------------------------------------------------- Claude Code updates --
+//
+// Agent Desktop depends on a completely separate Claude Code CLI install
+// from the one the Claude Desktop app itself bundles/updates (confirmed
+// directly, live: two independent `claude.exe` installs on this machine,
+// different versions, different update mechanisms). resolveClaudeExecutable()
+// above always resolves to the npm-global one - this section checks whether
+// *that specific* install is behind the latest published version, and can
+// update it, since nothing else on this machine does that automatically.
+
+// The installed version is read directly from the package's own
+// package.json rather than via `claude --version` - no process spawn
+// needed at all for a simple version string, and avoids relying on
+// child_process/pty exec just to answer this one question.
+function getInstalledClaudeCodeVersion() {
+  try {
+    const claudeCmdPath = resolveClaudeExecutable();
+    const pkgPath = path.join(path.dirname(claudeCmdPath), "node_modules", "@anthropic-ai", "claude-code", "package.json");
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    return pkg.version || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Queries the npm registry directly over HTTPS rather than shelling out to
+// `npm view` - a plain network request needs neither child_process (proven
+// unreliable in this app's launch context) nor node-pty, and is simpler for
+// a read-only version check than spawning a CLI process either way.
+function getLatestClaudeCodeVersion() {
+  return new Promise((resolve) => {
+    const req = https.get(
+      "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
+      { headers: { "User-Agent": "agent-desktop" }, timeout: 8000 },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(body).version || null);
+          } catch (e) {
+            resolve(null);
+          }
+        });
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+// Plain numeric x.y.z comparison - both versions here always come from real
+// npm-published semver (package.json / the registry's own "latest" tag), so
+// this doesn't need to handle prerelease tags or other semver edge cases.
+function isVersionNewer(latest, current) {
+  if (!latest || !current) return false;
+  const a = latest.split(".").map(Number);
+  const b = current.split(".").map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const diff = (a[i] || 0) - (b[i] || 0);
+    if (diff !== 0) return diff > 0;
+  }
+  return false;
+}
+
+ipcMain.handle("check-claude-code-update", async () => {
+  const current = getInstalledClaudeCodeVersion();
+  const latest = await getLatestClaudeCodeVersion();
+  return { current, latest, updateAvailable: isVersionNewer(latest, current) };
+});
+
+ipcMain.handle("update-claude-code", async () => {
+  const npmPath = process.platform === "win32" ? resolveNpmExecutable() : "npm";
+  // Routed through the same pty-based runner as the native-agent backend
+  // calls below rather than child_process directly, for the same reason:
+  // execFileSync/spawnSync are confirmed unreliable in this app's launch
+  // context on Windows.
+  await runClaudeCommand(npmPath, ["install", "-g", "@anthropic-ai/claude-code@latest"], { env: process.env });
+  const current = getInstalledClaudeCodeVersion();
+  return { current };
+});
 
 function createWindow() {
   mainWindow = new BrowserWindow({
