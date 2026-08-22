@@ -8,9 +8,9 @@
     "start": "electron ."
   },
   "dependencies": {
-    "node-pty": "^1.0.0",
+    "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
-    "@xterm/addon-fit": "^0.10.0"
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "electron": "^33.0.0"

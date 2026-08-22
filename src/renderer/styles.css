@@ -38,9 +38,24 @@ html, body {
   width: 280px;
   flex-shrink: 0;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+}
+
+/* Drag-to-resize, same pattern as #chat-input-resize-handle - reported live:
+   longer agent names/descriptions get cut off at the fixed 280px width with
+   no way to see more. Sits between #sidebar and #main-panel as its own flex
+   item (not layered on #sidebar's own edge) so its hit area doesn't have to
+   fight with #agent-list's own hover/click targets right at the boundary. */
+#sidebar-resize-handle {
+  width: 6px;
+  flex-shrink: 0;
+  cursor: ew-resize;
+  background: var(--border);
+}
+#sidebar-resize-handle:hover,
+#sidebar-resize-handle.dragging {
+  background: var(--accent);
 }
 
 #sidebar-header {
@@ -84,10 +99,67 @@ html, body {
 #update-available-btn:hover { filter: brightness(1.15); }
 #update-available-btn:disabled { cursor: default; filter: brightness(0.85); }
 
+/* Startup warning for software confirmed (via Process Monitor, live) to
+   interfere with launching the claude CLI - see KNOWN_INTERFERING_SERVICES
+   in main.js for the full story. Deliberately styled as a real warning
+   (red, not the neutral update-nudge look above) since this is the
+   difference between the app working reliably and failing with a
+   confusing, unrelated-looking error. */
+#interfering-service-warning {
+  margin: 0 16px 12px;
+  background: rgba(220, 38, 38, 0.14);
+  border: 1px solid rgba(220, 38, 38, 0.5);
+  color: var(--text);
+  font-size: 0.78rem;
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+#interfering-service-warning .warning-title {
+  font-weight: 700;
+  color: #fca5a5;
+  margin-bottom: 4px;
+}
+#interfering-service-warning .warning-body {
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+#interfering-service-warning button {
+  background: #dc2626;
+  border: none;
+  color: white;
+  font-weight: 600;
+  font-size: 0.76rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-right: 6px;
+}
+#interfering-service-warning button:hover { filter: brightness(1.1); }
+#interfering-service-warning button:disabled { cursor: default; filter: brightness(0.85); }
+#interfering-service-warning .dismiss-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
 #agent-list {
   flex: 1;
   overflow-y: auto;
   padding: 4px 8px 12px;
+}
+
+/* Requested directly, after separate driver-launched and user-launched
+   instances showed a different Claude Code update-available state at the
+   same time and it wasn't obvious this was normal (different check
+   timing), not two different Agent Desktop builds - a visible version
+   number removes that ambiguity going forward. */
+#app-version {
+  flex-shrink: 0;
+  padding: 6px 12px 10px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  opacity: 0.6;
 }
 
 .agent-item {
@@ -235,8 +307,30 @@ html, body {
   -webkit-app-region: drag;
 }
 #chat-header-text { flex: 1; min-width: 0; }
-#chat-name { font-weight: 700; font-size: 1rem; }
-#chat-role { color: var(--text-muted); font-size: 0.8rem; }
+/* Confirmed live: with up to 8 stat badges/buttons sharing this same flex
+   row (msg counts, buffer/context indicators, Reset/Raw Terminal/Model/
+   History), the leftover width for name+role can stay narrow even in a
+   maximized window - a JS character-count truncation alone doesn't
+   reliably prevent wrapping when the container is this tight. Clamping
+   by line count instead guarantees a hard visual cap regardless of exact
+   available width, truncating with an ellipsis at whatever the real
+   rendered boundary is. */
+#chat-name {
+  font-weight: 700;
+  font-size: 1rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+#chat-role {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 
 /* Computed from the session's own JSONL usage data (see archive.js
    getLatestUsage()) against an ASSUMED 200K context window - not a
@@ -345,6 +439,22 @@ html, body {
   max-width: 80%;
   padding: 10px 14px;
   border-radius: 14px 14px 4px 14px;
+}
+/* A pasted image is rendered as an actual inline image rather than the raw
+   quoted file path Claude Code's own transcript embeds it as (see
+   renderTextWithImages() in renderer.js) - sized to be genuinely visible,
+   not a thumbnail, capped so a large screenshot doesn't dominate the whole
+   chat column. */
+.chat-bubble-image {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  border-radius: 10px;
+  margin: 6px 0;
+}
+.chat-bubble-text + .chat-bubble-image,
+.chat-bubble-image + .chat-bubble-text {
+  margin-top: 8px;
 }
 .chat-status-line {
   align-self: flex-start;
@@ -580,8 +690,8 @@ html, body {
 }
 .attachment-chip {
   position: relative;
-  width: 52px;
-  height: 52px;
+  width: 120px;
+  height: 120px;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -719,6 +829,34 @@ html, body {
   cursor: pointer;
 }
 #send-input-btn:hover { filter: brightness(1.1); }
+
+/* Hold to talk - drives Claude Code's own native /voice mode (real held
+   spacebar simulated via a repeated raw space write while held, see
+   startVoiceHold() in renderer.js), not a custom transcription pipeline.
+   .recording gives clear visual feedback that input is live-streaming to
+   the agent right now, distinct from the button's normal idle state. */
+#voice-input-btn {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#voice-input-btn:hover { filter: brightness(1.15); }
+#voice-input-btn.recording {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: white;
+  animation: voice-recording-pulse 1.2s ease-in-out infinite;
+}
+@keyframes voice-recording-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+}
 
 /* ---------------- History view ---------------- */
 

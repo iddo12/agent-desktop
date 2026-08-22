@@ -47,6 +47,25 @@ function avatarColor(name) {
   return AVATAR_PALETTE[sum % AVATAR_PALETTE.length];
 }
 
+// Requested directly: a long role/description (LensVid Business Context's
+// own is a good example) was wrapping across several lines in the chat
+// header, pushing the actual action buttons down and making the header
+// look broken rather than just descriptive. Truncates to a single
+// readable line instead - the full text is never lost, just moved to the
+// title tooltip, so hovering still shows it in full.
+const CHAT_ROLE_MAX_CHARS = 48;
+
+function setChatRoleText(el, role) {
+  const text = role || "";
+  if (text.length <= CHAT_ROLE_MAX_CHARS) {
+    el.textContent = text;
+    el.removeAttribute("title");
+  } else {
+    el.textContent = text.slice(0, CHAT_ROLE_MAX_CHARS).trimEnd() + "...";
+    el.title = text;
+  }
+}
+
 function initials(name) {
   const parts = name.trim().split(/\s+/).slice(0, 2);
   return parts.map((p) => p[0].toUpperCase()).join("") || "?";
@@ -173,7 +192,7 @@ function selectAgent(agent) {
   chatAvatarSlotEl.innerHTML = "";
   chatAvatarSlotEl.appendChild(renderAvatarEl(agent));
   chatNameEl.textContent = agent.displayName;
-  chatRoleEl.textContent = agent.role || "";
+  setChatRoleText(chatRoleEl, agent.role);
 
   setHistoryMode(false);
   showTerminalFor(agent);
@@ -306,6 +325,44 @@ function refitActiveTerminal() {
 
 window.addEventListener("resize", refitActiveTerminal);
 
+// Drag-to-resize the sidebar - same pattern as the chat-input resize handle
+// above, but horizontal. Reported live: longer agent names/descriptions get
+// cut off at the fixed 280px width with no way to see more.
+const sidebarEl = document.getElementById("sidebar");
+const sidebarResizeHandleEl = document.getElementById("sidebar-resize-handle");
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 560;
+let sidebarDragStartX = null;
+let sidebarDragStartWidth = null;
+
+function setSidebarWidth(px) {
+  const clamped = Math.max(SIDEBAR_MIN_WIDTH, Math.min(px, SIDEBAR_MAX_WIDTH));
+  sidebarEl.style.width = clamped + "px";
+  // Same reasoning as setChatInputHeight() above - the terminal doesn't
+  // redraw on its own just because a neighboring element resized.
+  refitActiveTerminal();
+}
+
+sidebarResizeHandleEl.addEventListener("mousedown", (e) => {
+  sidebarDragStartX = e.clientX;
+  sidebarDragStartWidth = sidebarEl.getBoundingClientRect().width;
+  sidebarResizeHandleEl.classList.add("dragging");
+  e.preventDefault();
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (sidebarDragStartX === null) return;
+  const delta = e.clientX - sidebarDragStartX;
+  setSidebarWidth(sidebarDragStartWidth + delta);
+});
+
+window.addEventListener("mouseup", () => {
+  if (sidebarDragStartX === null) return;
+  sidebarDragStartX = null;
+  sidebarDragStartWidth = null;
+  sidebarResizeHandleEl.classList.remove("dragging");
+});
+
 // ---------------------------------------------------- chat message view --
 
 // The live chat view is built from Claude Code's own JSONL transcript file
@@ -373,6 +430,53 @@ function formatBlockTime(timestamp) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+// A pasted/attached image isn't a distinct structured block in Claude
+// Code's own JSONL transcript - the CLI substitutes it with a quoted local
+// file path (saved to a temp file) embedded right in the message's plain
+// text, for the agent to Read like any other file. Rendering that quoted
+// path as an actual inline image - rather than leaving it as raw path text
+// - matches how images the user shares elsewhere in this app's own
+// ecosystem already display, and was reported live as looking wrong
+// (tiny/unrendered) by comparison. Only matches an absolute Windows path
+// (drive letter + backslashes) ending in a known image extension, quoted -
+// deliberately narrow so a message that just happens to mention an
+// unrelated file path isn't misrendered.
+const IMAGE_PATH_RE = /"([A-Za-z]:\\[^"]+\.(?:png|jpe?g|gif|webp|bmp))"/gi;
+
+function renderTextWithImages(container, text) {
+  IMAGE_PATH_RE.lastIndex = 0;
+  let lastIndex = 0;
+  let match;
+  let foundAny = false;
+  while ((match = IMAGE_PATH_RE.exec(text))) {
+    foundAny = true;
+    const before = text.slice(lastIndex, match.index).trim();
+    if (before) {
+      const p = document.createElement("div");
+      p.className = "chat-bubble-text";
+      p.textContent = before;
+      container.appendChild(p);
+    }
+    const img = document.createElement("img");
+    img.className = "chat-bubble-image";
+    img.src = "file:///" + encodeURI(match[1].replace(/\\/g, "/"));
+    img.alt = match[1].split(/[\\/]/).pop();
+    container.appendChild(img);
+    lastIndex = IMAGE_PATH_RE.lastIndex;
+  }
+  if (!foundAny) {
+    container.textContent = text; // textContent, not innerHTML - inherently safe against injection
+    return;
+  }
+  const after = text.slice(lastIndex).trim();
+  if (after) {
+    const p = document.createElement("div");
+    p.className = "chat-bubble-text";
+    p.textContent = after;
+    container.appendChild(p);
+  }
+}
+
 function renderChatBlocks(blocks, pendingSent) {
   chatMessagesViewEl.innerHTML = "";
   for (const block of blocks) {
@@ -398,7 +502,7 @@ function renderChatBlocks(blocks, pendingSent) {
     }
     const el = document.createElement("div");
     el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role;
-    el.textContent = text; // textContent, not innerHTML - inherently safe against injection
+    renderTextWithImages(el, text);
     if (block.timestamp) {
       const timeEl = document.createElement("span");
       timeEl.className = "chat-block-time";
@@ -416,7 +520,7 @@ function renderChatBlocks(blocks, pendingSent) {
   for (const pending of pendingSent || []) {
     const el = document.createElement("div");
     el.className = "chat-bubble chat-bubble-user chat-bubble-pending";
-    el.textContent = pending.text;
+    renderTextWithImages(el, pending.text);
     chatMessagesViewEl.appendChild(el);
   }
   chatMessagesViewEl.scrollTop = chatMessagesViewEl.scrollHeight;
@@ -517,6 +621,36 @@ function scheduleRebuildChatView(agentPath) {
     if (agentPath === activeAgentPath) rebuildChatView(agentPath);
   }, CHAT_VIEW_REBUILD_DEBOUNCE_MS);
 }
+
+// Diagnosed 2026-08-22: scheduleRebuildChatView() above is the *only*
+// thing that ever triggers a rebuild, and it only ever fires from real pty
+// output (onTerminalData below). That's fine as long as this agent's own
+// attach is actually alive and streaming - but separately confirmed live
+// the same day that main.js's ptySessions entry for an agent can go stale
+// (its stored pty handle no longer corresponds to the session's real
+// current background process - e.g. after that session was stopped and
+// redispatched from outside this app's own IPC flow, which is genuinely
+// how it happened live: `claude stop <id>` run directly from a terminal,
+// bypassing this app's own stop-and-redispatch flow entirely) without any
+// onExit ever firing to signal it - confirmed directly that zero live
+// `claude attach` processes existed system-wide for an agent Agent Desktop
+// still showed as active. When that happens, no more onTerminalData events
+// arrive for that agent, so no more rebuilds ever happen - the Chat View
+// would freeze on its last render forever even once new content exists.
+// (Note: the specific blank-Chat-View incident that prompted this same
+// day turned out to have a different, unrelated root cause - a project-
+// directory encoding bug, see archive.js's encodeProjectPath() comment -
+// so this exact poll wasn't what fixed that one. Kept anyway as a real,
+// independently-confirmed gap worth covering.) A slow periodic poll for
+// the active agent only is a low-risk, purely additive safety net for
+// that stale-attach gap specifically - rebuildChatView()
+// already no-ops cheaply when there's nothing new to show, so polling
+// something that hasn't changed costs one IPC round-trip, not a visible
+// re-render.
+const CHAT_VIEW_STALE_POLL_MS = 4000;
+setInterval(() => {
+  if (activeAgentPath && !rawTerminalMode) rebuildChatView(activeAgentPath);
+}, CHAT_VIEW_STALE_POLL_MS);
 
 // Raw terminal is the fallback/advanced view for anything that genuinely
 // needs real keystroke-level interaction (the Model picker's arrow keys, a
@@ -913,7 +1047,7 @@ createAgentBtn.addEventListener("click", async () => {
       const updated = agents.find((a) => a.path === activeAgentPath);
       if (updated) {
         chatNameEl.textContent = updated.displayName;
-        chatRoleEl.textContent = updated.role || "";
+        setChatRoleText(chatRoleEl, updated.role);
         chatAvatarSlotEl.innerHTML = "";
         chatAvatarSlotEl.appendChild(renderAvatarEl(updated));
       }
@@ -1168,6 +1302,73 @@ chatInputEl.addEventListener("keydown", (e) => {
 });
 
 sendInputBtn.addEventListener("click", sendChatInput);
+
+// Hold-to-talk drives Claude Code's own native /voice mode (Anthropic
+// shipped this directly in the CLI - see "type /voice, then hold spacebar"
+// in its docs) rather than a custom speech-to-text pipeline. This button
+// exists only to make that gesture reachable without a physical keyboard
+// (mobile is the main reason - typing is painful there), not to reimplement
+// speech recognition.
+//
+// Diagnosed live, 2026-08-21: the first version of this sent "/voice"
+// through submitToAgent(), the same path the Model-picker button uses for
+// its own slash command - but that path always follows with an automatic
+// \r (Enter), and confirmed live, that's wrong specifically for /voice: it
+// showed up as a normal SENT CHAT MESSAGE (a yellow user bubble reading
+// "/voice"), not as the CLI entering voice mode. /voice has to stay
+// sitting UNCOMMITTED in the prompt line - the held spacebar that follows
+// is what actually triggers it, not a completed line. So /voice itself is
+// now written directly via window.api.sendInput with no trailing \r, same
+// as the held-spacebar simulation that follows it - both bypass
+// submitToAgent() entirely for this one gesture. The held spacebar itself
+// is a raw terminal input concept with no equivalent in this app's normal
+// compose-a-line-and-hit-Enter flow, so it's simulated by writing literal
+// space bytes straight to the pty at roughly a physical keyboard's OS
+// auto-repeat rate, for as long as the button stays held - matching what a
+// real held key actually produces on the wire, character by character,
+// rather than one line sent all at once.
+const voiceInputBtn = document.getElementById("voice-input-btn");
+const VOICE_HOLD_REPEAT_MS = 40;
+// Give the CLI a moment to actually enter voice mode before the simulated
+// held spacebar starts, rather than racing the two - matches the
+// documented usage (type /voice, THEN hold spacebar) instead of sending
+// both at once.
+const VOICE_MODE_ARM_DELAY_MS = 300;
+let voiceHeld = false;
+let voiceHoldInterval = null;
+
+function startVoiceHold() {
+  if (!activeAgentPath || voiceHeld) return;
+  voiceHeld = true;
+  voiceInputBtn.classList.add("recording");
+  // No trailing \r on purpose - see the comment above. Submitting /voice
+  // as a complete line (Enter) sends it as a literal chat message instead
+  // of arming voice mode.
+  window.api.sendInput(activeAgentPath, "/voice");
+  setTimeout(() => {
+    if (!voiceHeld) return; // released again before /voice had time to register
+    voiceHoldInterval = setInterval(() => {
+      window.api.sendInput(activeAgentPath, " ");
+    }, VOICE_HOLD_REPEAT_MS);
+  }, VOICE_MODE_ARM_DELAY_MS);
+}
+
+function stopVoiceHold() {
+  voiceHeld = false;
+  voiceInputBtn.classList.remove("recording");
+  if (voiceHoldInterval) {
+    clearInterval(voiceHoldInterval);
+    voiceHoldInterval = null;
+  }
+}
+
+voiceInputBtn.addEventListener("mousedown", startVoiceHold);
+voiceInputBtn.addEventListener("mouseup", stopVoiceHold);
+// Dragging off the button without releasing the mouse button first (a real,
+// common gesture) must still stop the hold - otherwise it silently keeps
+// "talking" into the session with no visible way to stop it short of
+// clicking the button again, which mouseup alone doesn't catch.
+voiceInputBtn.addEventListener("mouseleave", stopVoiceHold);
 
 // Pure visual reminder/shortcut - just prefills the compose box, doesn't
 // send anything itself. Prepends rather than overwrites so it still works
@@ -1492,6 +1693,10 @@ resetSessionBtn.addEventListener("click", () => {
 
 loadAgents();
 
+window.api.getAppVersion().then((v) => {
+  document.getElementById("app-version").textContent = `Agent Desktop v${v}`;
+});
+
 // --------------------------------------------------- Claude Code updates --
 //
 // Checked once on startup, not polled repeatedly - a stale "update
@@ -1525,3 +1730,70 @@ updateAvailableBtn.addEventListener("click", async () => {
 });
 
 checkForClaudeCodeUpdate();
+
+// -------------------------------------- known-interfering-software check --
+//
+// See KNOWN_INTERFERING_SERVICES in main.js for the full diagnosis story -
+// this is the UI half: a real warning (not the neutral update-nudge look
+// above) since the whole point is that this failure mode looks completely
+// unrelated (a confusing "File not found"/"not recognized" error from the
+// claude CLI itself) unless you already know to suspect it. textContent
+// throughout, not innerHTML - the service label/explanation ultimately
+// comes from this app's own source (KNOWN_INTERFERING_SERVICES), not user
+// input, but there's no reason to open an injection surface for it anyway.
+const interferingServiceWarningEl = document.getElementById("interfering-service-warning");
+
+async function checkForInterferingServices() {
+  let services;
+  try {
+    services = await window.api.checkInterferingServices();
+  } catch (e) {
+    return; // best-effort - never block the app opening over this check itself failing
+  }
+  if (!services || !services.length) return;
+
+  interferingServiceWarningEl.innerHTML = "";
+  for (const svc of services) {
+    const title = document.createElement("div");
+    title.className = "warning-title";
+    title.textContent = "⚠ " + svc.label + " may cause failures";
+    interferingServiceWarningEl.appendChild(title);
+
+    const body = document.createElement("div");
+    body.className = "warning-body";
+    body.textContent = svc.explanation;
+    interferingServiceWarningEl.appendChild(body);
+
+    const fixBtn = document.createElement("button");
+    fixBtn.textContent = "Disable it (asks for admin permission)";
+    fixBtn.addEventListener("click", async () => {
+      fixBtn.disabled = true;
+      fixBtn.textContent = "Disabling (approve the Windows prompt)...";
+      try {
+        const result = await window.api.disableInterferingService(svc.matchedServiceName);
+        if (result.ok) {
+          fixBtn.textContent = "Disabled - restart Agent Desktop to confirm";
+        } else {
+          fixBtn.disabled = false;
+          fixBtn.textContent = "Failed - click to retry";
+          fixBtn.title = result.error || "";
+        }
+      } catch (e) {
+        fixBtn.disabled = false;
+        fixBtn.textContent = "Failed - click to retry";
+        fixBtn.title = e.message;
+      }
+    });
+    interferingServiceWarningEl.appendChild(fixBtn);
+  }
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "dismiss-btn";
+  dismissBtn.textContent = "Dismiss for now";
+  dismissBtn.addEventListener("click", () => interferingServiceWarningEl.classList.add("hidden"));
+  interferingServiceWarningEl.appendChild(dismissBtn);
+
+  interferingServiceWarningEl.classList.remove("hidden");
+}
+
+checkForInterferingServices();

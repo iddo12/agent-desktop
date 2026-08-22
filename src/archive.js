@@ -9,8 +9,21 @@ const path = require("path");
 const os = require("os");
 const { withFsRetry } = require("./fsRetry");
 
+// Diagnosed 2026-08-22, the real root cause behind a whole day of "the
+// Chat View just shows nothing" reports for one specific agent (LensVid
+// Business Context, folder name "LensVid_Master_Context"): Claude Code
+// CLI's own project-directory encoding also turns underscores into
+// hyphens, not just colons/backslashes/spaces/dots - confirmed directly
+// by listing the real ~/.claude/projects folder, where this agent's
+// actual directory is "...LensVid-Master-Context--claude-session" (dashes
+// throughout) while this function was producing "...LensVid_Master_Context--
+// claude-session" (underscores preserved) for the exact same cwd. Every
+// other agent folder in this workspace happens to have no underscore in
+// its name, which is why this sat unnoticed - findJsonlFiles() was quietly
+// scanning a directory that never existed, always returning zero files,
+// for this one agent only.
 function encodeProjectPath(cwd) {
-  return cwd.replace(/[:\\/ .]/g, "-");
+  return cwd.replace(/[:\\/ ._]/g, "-");
 }
 
 function projectDirFor(cwd) {

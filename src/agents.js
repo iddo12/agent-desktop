@@ -110,11 +110,31 @@ function avatarDataUrl(agentDir, config) {
   return `data:image/png;base64,${buf.toString("base64")}`;
 }
 
+// A denylist alone isn't enough - any folder ROOT happens to contain (a
+// saved document, a random project, anything not explicitly excluded)
+// showed up in the sidebar as if it were a real agent, confirmed live: a
+// folder holding nothing but a stray .docx rendered as "No work plan yet"
+// with a truncated folder name for a title. Requiring agent_config.json
+// alone was the first fix tried, but broke live: this app's own oldest
+// agents (Security among them) predate that file existing at all and have
+// never had one, relying only on master_state.md/sessions/.claude-session.
+// Any ONE of these four markers is what actually distinguishes a set-up
+// agent from an arbitrary folder - none of them being present is what a
+// stray folder (like the .docx one) actually looks like.
+function looksLikeAgentFolder(agentDir) {
+  return (
+    fs.existsSync(path.join(agentDir, CONFIG_FILENAME)) ||
+    fs.existsSync(path.join(agentDir, STATE_FILENAME)) ||
+    fs.existsSync(path.join(agentDir, SESSIONS_DIRNAME)) ||
+    fs.existsSync(path.join(agentDir, ".claude-session"))
+  );
+}
+
 function listAgents() {
   if (!fs.existsSync(ROOT)) return [];
   const entries = fs
     .readdirSync(ROOT, { withFileTypes: true })
-    .filter((e) => e.isDirectory() && !EXCLUDED_FOLDERS.has(e.name))
+    .filter((e) => e.isDirectory() && !EXCLUDED_FOLDERS.has(e.name) && looksLikeAgentFolder(path.join(ROOT, e.name)))
     .sort((a, b) => a.name.localeCompare(b.name));
 
   return entries.map((entry) => {

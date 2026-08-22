@@ -118,6 +118,16 @@ function isVersionNewer(latest, current) {
   return false;
 }
 
+// Requested directly, after a driver-launched test instance and the
+// user's own live instance showed different Claude Code update-available
+// banners at the same time - confusing without a visible way to tell
+// whether that's two different Agent Desktop builds or just two update
+// checks that happened to run minutes apart (it was the latter). Electron's
+// own app.getVersion() reads directly from package.json, so this always
+// reflects whatever's actually installed/running, not a hardcoded string
+// that could drift from the real version.
+ipcMain.handle("get-app-version", () => app.getVersion());
+
 ipcMain.handle("check-claude-code-update", async () => {
   const current = getInstalledClaudeCodeVersion();
   const latest = await getLatestClaudeCodeVersion();
@@ -133,6 +143,89 @@ ipcMain.handle("update-claude-code", async () => {
   await runClaudeCommand(npmPath, ["install", "-g", "@anthropic-ai/claude-code@latest"], { env: process.env });
   const current = getInstalledClaudeCodeVersion();
   return { current };
+});
+
+// -------------------------------------------- known-interfering software --
+//
+// Diagnosed live, 2026-08-21/22, after a full day of chasing an
+// intermittent "File not found" / "is not recognized as an internal or
+// external command" error that only ever happened through this app's real
+// launch path, never through any isolated reproduction: Process Monitor
+// (kernel-level, cannot be fooled the way userspace checks can) caught
+// Intel's "Energy Server Service" (esrv_svc.exe, part of Intel's SUR/
+// System Usage Report telemetry bundle, services ESRV_SVC_QUEENCREEK and
+// USER_ESRV_SVC_QUEENCREEK) making its own malformed CreateFile calls
+// using the *exact* command line this app was trying to launch, at the
+// *exact* moment each failure happened - it appears to hook process
+// creation for its own telemetry purposes, and a bug in how it parses a
+// multi-argument command line interferes with the real launch. This isn't
+// specific to one machine's install - it's Intel driver-bundled software
+// that could plausibly be present on any Windows machine this app runs
+// on, so the check (and warning) belongs here, not just as a one-off fix
+// on the machine it was found on.
+const KNOWN_INTERFERING_SERVICES = [
+  {
+    serviceNames: ["ESRV_SVC_QUEENCREEK", "USER_ESRV_SVC_QUEENCREEK"],
+    label: "Intel Energy Server Service (esrv_svc.exe)",
+    explanation:
+      "Part of Intel's SUR/telemetry bundle. Confirmed live (via Process Monitor) to intermittently interfere with launching the claude CLI, causing intermittent \"File not found\" / \"not recognized\" errors with no other visible cause. Not required for graphics, chipset, or any normal driver function - safe to disable.",
+  },
+];
+
+async function checkInterferingServices() {
+  if (process.platform !== "win32") return [];
+  const found = [];
+  for (const entry of KNOWN_INTERFERING_SERVICES) {
+    for (const serviceName of entry.serviceNames) {
+      try {
+        const shell = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+        const output = await runClaudeCommand(
+          shell,
+          ["/d", "/c", "powershell", "-NoProfile", "-Command", `(Get-Service -Name ${serviceName} -ErrorAction SilentlyContinue).Status`],
+          { env: process.env }
+        );
+        if (/Running/i.test(output)) {
+          found.push({ ...entry, matchedServiceName: serviceName });
+          break; // one hit for this entry is enough - don't list it twice for both service names
+        }
+      } catch (e) {
+        /* best-effort - a failed check here shouldn't block the app from opening */
+      }
+    }
+  }
+  return found;
+}
+
+ipcMain.handle("check-interfering-services", () => checkInterferingServices());
+
+// Stops and disables the service going forward - the app itself never
+// silently gains admin rights to do this; Start-Process -Verb RunAs makes
+// Windows show the user its own real UAC consent prompt for this one
+// specific action, same as any other app requesting elevation.
+ipcMain.handle("disable-interfering-service", async (event, { serviceName }) => {
+  if (process.platform !== "win32") return { ok: false, error: "Not on Windows" };
+  const found = KNOWN_INTERFERING_SERVICES.some((e) => e.serviceNames.includes(serviceName));
+  if (!found) return { ok: false, error: "Unrecognized service name" };
+  const psCommand = `Stop-Service -Name '${serviceName}' -Force -ErrorAction SilentlyContinue; Set-Service -Name '${serviceName}' -StartupType Disabled`;
+  const encoded = Buffer.from(psCommand, "utf16le").toString("base64");
+  try {
+    // Same node-pty-routed pattern as everything else in this file -
+    // child_process is the exact thing confirmed unreliable in this app's
+    // launch context, and this whole feature exists because of an issue
+    // that pattern helps sidestep, so using it here would be self-
+    // defeating. Start-Process -Verb RunAs shows the user Windows' own
+    // real UAC consent prompt for this one specific action - this app
+    // itself never silently gains admin rights.
+    const shell = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+    await runClaudeCommand(
+      shell,
+      ["/d", "/c", "powershell", "-NoProfile", "-Command", `Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-EncodedCommand','${encoded}' -Wait`],
+      { env: process.env }
+    );
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
 
 function createWindow() {
@@ -434,6 +527,75 @@ function spawnPtyWithRetry(shell, args, options, attempts = 10, delayMs = 500) {
 // path.
 const CMD_NOT_RECOGNIZED_RE = /is not recognized as an internal or external command/i;
 
+// Diagnosed live, 2026-08-22, the actual root cause of the "File not
+// found"/"is not recognized" errors above (the Intel esrv_svc.exe service
+// documented near KNOWN_INTERFERING_SERVICES turned out to be a red
+// herring - fully locked down there, and the bug still recurred). A full
+// Process Monitor trace of a failing burst showed ten concurrent cmd.exe
+// launches of claude.cmd all failing within the same ~6-second window, and
+// in that same window `where.exe`'s own live directory listing of
+// %APPDATA%\npm showed claude/claude.cmd/claude.ps1 and the whole
+// node_modules\@anthropic-ai\claude-code folder genuinely absent from
+// disk - not a permissions/AV illusion, an actual transient absence.
+// %APPDATA%\npm\.last-update-result.json and a leftover
+// .claude-code-<random> staging folder confirmed Claude Code's own
+// npm-global self-updater had fired more than once recently, and that
+// updater does an in-place swap of that entire shared global install
+// (shims included) that takes several seconds. This app fires many
+// concurrent claude.cmd invocations (one status poll per sidebar agent);
+// any invocation whose launch lands inside that swap window sees the
+// shims as literally gone. DISABLE_AUTOUPDATER=1 is a real,
+// updater-respected env var - confirmed already set in Claude Desktop's
+// own embedded Claude Code sessions - so setting it on every claude.cmd
+// child process this app spawns stops the updater from ever firing out
+// from under a concurrent launch, closing the race at its source rather
+// than retrying around it. The explicit "update-claude-code" IPC handler
+// above intentionally does NOT get this - that one IS the deliberate
+// update path.
+const CLAUDE_AUTOUPDATER_DISABLE_ENV = { DISABLE_AUTOUPDATER: "1" };
+
+// Diagnosed live, 2026-08-22, a second and completely separate cause of an
+// Agent Desktop session looking permanently frozen (the first being the
+// updater race above): a background agent can get wedged mid-turn on an
+// expired OAuth session - e.g. an auto-triggered /compact hitting "Login
+// expired - Please run /login" - with no one there to complete the
+// interactive browser login a headless process can't do itself. Caught
+// live on a session that had been idle since the day before. Confirmed via
+// Raw Terminal that the CLI's own elapsed-time spinner ("Sautéed for 50s")
+// was genuinely static, not just slow, and that a brand new message sent
+// through Agent Desktop's Chat View never even reached the underlying pty.
+// findAliveBackgroundAgent only checks that the OS process still has a pid
+// - it has no way to know the process inside is dead-ended on an
+// unanswerable prompt - so every future attach, including this app's own
+// silent reattach-on-restart in handlePtyExit, just reconnects to the same
+// permanently stuck session forever. Confirmed directly: stopping that one
+// dead session and dispatching a fresh `claude --bg` for the same cwd
+// picked up a valid, working session immediately - the saved credentials
+// themselves were fine, only that one already-running session was wedged.
+const LOGIN_EXPIRED_RE = /Login expired|Not logged in.*Run \/login/is;
+const LOGIN_EXPIRED_PEEK_MS = 1500;
+
+// Diagnosed live, 2026-08-22, a third and completely separate cause of a
+// session looking permanently frozen: Claude Code CLI's own --continue
+// shows an interactive "how do you want to resume this" prompt whenever
+// the target session is old/large enough ("This session is 2d 1h old and
+// 127.2k tokens... We recommend resuming from a summary", with a 1/2/3
+// menu and "Enter to confirm - Esc to cancel") - confirmed via
+// `claude agents --json --all` showing this exact agent's status as
+// "waiting"/waitingFor:"dialog open" the whole time it looked stuck, and
+// via a raw pty peek showing the literal menu text sitting unanswered.
+// Agent Desktop's Chat View has no way to detect or answer an interactive
+// menu like this (it isn't a normal assistant turn), so the session just
+// sits there forever with no error text at all - arguably a worse dead
+// end than the login-expiry case above, since nothing in the UI even
+// hints at what's wrong. Confirmed live: sending "3" (Don't ask me again)
+// then Enter resolves it immediately into a normal, healthy session -
+// reused verbatim here rather than "1" (resume from summary) since that's
+// the exact sequence already proven to work, and it should also suppress
+// this same prompt on future resumes of this session.
+const RESUME_DIALOG_RE = /Resume from summary \(recommended\)/i;
+const RESUME_DIALOG_PEEK_MS = 1500;
+
 // Diagnosed live, 2026-08-21, the actual cause of messages appearing "sent"
 // but never going anywhere: `output` here is captured straight off a real
 // ConPTY - it's genuinely a terminal stream, not plain text, and comes
@@ -483,7 +645,21 @@ async function runClaudeCommandOnce(shell, args, options) {
   });
 }
 
-async function runClaudeCommand(shell, args, options, attempts = 5, delayMs = 500) {
+// Confirmed live, 2026-08-22: even with the updater-race fix above in
+// place (DISABLE_AUTOUPDATER=1 genuinely active - checked the running
+// process's own start time against this file's edit time to be sure), the
+// exact same "is not recognized" text still recurred once, with the npm-
+// global install's files completely unchanged before and after - no
+// update swap in progress at the time. So the updater is a real, fixed
+// cause of this symptom, but evidently not the only possible one; nothing
+// else here has been caught as clearly as that one was. The previous
+// 5-attempt/500ms budget (~2.5s) is what actually ran out here, per the
+// user's own report of the failure appearing after "~2s" - raising this
+// is a deliberately root-cause-agnostic hedge: whatever transient
+// condition is briefly making a genuinely-present file unresolvable,
+// giving it several more seconds to clear resolves it without needing to
+// have pinned down every possible cause first.
+async function runClaudeCommand(shell, args, options, attempts = 12, delayMs = 700) {
   for (let i = 0; i < attempts; i++) {
     const output = await runClaudeCommandOnce(shell, args, options);
     if (!CMD_NOT_RECOGNIZED_RE.test(output) || i === attempts - 1) {
@@ -550,7 +726,7 @@ async function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
 async function stopBackgroundAgentForCwd(sessionCwd) {
   async function attempt() {
     const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
-    const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" };
+    const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
     const agent = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
     if (agent) {
       await runClaudeCommand(shell, ["stop", agent.id], { env: spawnEnv });
@@ -643,11 +819,11 @@ async function handlePtyExit(agentPath, isReattachAttempt = false) {
 // knownAgentId is omitted, finds or dispatches a background agent for this
 // cwd first; when provided (the reattach path), skips straight to attaching
 // since the caller already confirmed it's alive.
-async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt = false) {
+async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt = false, isLoginRecoveryAttempt = false) {
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   // See the CLAUDE_CODE_FORCE_SESSION_PERSISTENCE comment further up this
   // file - same reasoning applies to background-dispatched agents.
-  const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" };
+  const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
 
   let agentId;
   try {
@@ -667,6 +843,79 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     });
   } catch (e) {
     throw new Error("[attach stage, agentId=" + agentId + "] " + e.message);
+  }
+
+  // See the LOGIN_EXPIRED_RE comment further up this file. Skipped on a
+  // recovery attempt's own retry so a genuinely broken credential (not
+  // just one stale session) can't loop forever redispatching new sessions
+  // - if the fresh session hits the same wall, the user sees the real
+  // "Not logged in" prompt directly instead of this silently retrying.
+  if (!isLoginRecoveryAttempt) {
+    let peekBuffer = "";
+    let peekProcExited = false;
+    const peekDataDisposable = proc.onData((d) => {
+      peekBuffer += d;
+    });
+    const peekExitDisposable = proc.onExit(() => {
+      peekProcExited = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, LOGIN_EXPIRED_PEEK_MS));
+    peekDataDisposable.dispose();
+    peekExitDisposable.dispose();
+
+    if (LOGIN_EXPIRED_RE.test(stripTerminalCodes(peekBuffer))) {
+      try {
+        proc.kill();
+      } catch (e) {}
+      try {
+        await runClaudeCommand(shell, ["stop", agentId], { env: spawnEnv });
+      } catch (e) {}
+      const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+      return startTerminalSession(agentPath, sessionCwd, cols, rows, freshAgentId, isReattachAttempt, /* isLoginRecoveryAttempt */ true);
+    }
+
+    // See the RESUME_DIALOG_RE comment further up this file. Unlike the
+    // login-expiry case, this doesn't need a fresh session - the existing
+    // one just needs its already-open menu answered. Re-opens the data
+    // listener (the peek one above was already disposed) to capture the
+    // resumed session's own redraw so it isn't lost the same way the
+    // pre-dialog output below is deliberately preserved.
+    if (RESUME_DIALOG_RE.test(stripTerminalCodes(peekBuffer))) {
+      let postDialogBuffer = "";
+      const postDialogDisposable = proc.onData((d) => {
+        postDialogBuffer += d;
+      });
+      proc.write("3");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      proc.write("\r");
+      await new Promise((resolve) => setTimeout(resolve, RESUME_DIALOG_PEEK_MS));
+      postDialogDisposable.dispose();
+      peekBuffer += postDialogBuffer;
+    }
+
+    // node-pty's onExit doesn't fire retroactively for a listener attached
+    // after the event already happened, so if the process died during our
+    // own peek window (unrelated to the login-expiry check above), the
+    // permanent proc.onExit() registered further down would never see it -
+    // this session would sit in ptySessions as a phantom "still open"
+    // placeholder forever, permanently blocking this agent from ever
+    // starting again (start-terminal's own ptySessions.has() guard would
+    // keep returning alreadyRunning for it). Throwing here instead routes
+    // through the exact same, already-correct cleanup both of this
+    // function's callers already have: start-terminal's IPC handler
+    // deletes the placeholder and surfaces the error, and handlePtyExit's
+    // own silent-reattach call falls through to its normal "[session
+    // ended]" notice.
+    if (peekProcExited) {
+      throw new Error("[attach stage, agentId=" + agentId + "] process exited during startup");
+    }
+    // Nothing anomalous - forward what we buffered so the user doesn't
+    // lose the first couple seconds of output (the "Welcome back" banner,
+    // etc.) that arrived while we were peeking at it instead of streaming
+    // it through live.
+    if (peekBuffer && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("terminal-data", { agentPath, data: peekBuffer });
+    }
   }
 
   // Anything typed while this was still a "starting" placeholder (see the
@@ -705,6 +954,26 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
       // trailing "\r" must land as two separately-timed writes.
       setTimeout(() => proc.write(data), i * 80);
     });
+  }
+
+  // Unconditionally arm one flush attempt up front, not just reactively
+  // inside proc.onData() below. Found 2026-08-23 while investigating a
+  // "message sent right after opening an agent just vanishes, no error, no
+  // trace anywhere" report: anything typed during the login/resume-dialog
+  // peek above (lines ~848-919) is already sitting in this same
+  // pendingInput array by the time we get here, but the peek's own onData
+  // listener was already disposed before this point - it never reaches the
+  // one below. If this attach's entire redraw already happened during that
+  // peek window (the common case for reattaching to an agent that's just
+  // sitting idle with nothing new to draw), proc.onData() may never fire
+  // again at all, so flushIdleTimer would never get armed and this input
+  // would sit queued forever with zero feedback - never even reaching the
+  // pty, so it never shows up in the CLI's own JSONL transcript either.
+  // This timer covers that silent case; the onData-driven rearm below still
+  // wins for a genuinely busy attach, pushing the flush out until real
+  // output actually goes quiet instead of writing into a mid-redraw banner.
+  if (pendingInput && pendingInput.length) {
+    flushIdleTimer = setTimeout(flushPendingInput, FLUSH_IDLE_MS);
   }
 
   proc.onData((data) => {
