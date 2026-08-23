@@ -406,13 +406,23 @@ function getConfirmedRateLimits() {
     return { fiveHour: null, sevenDay: null };
   }
   const nowSec = Date.now() / 1000;
+  // How long ago statusline.cjs last wrote this cache - surfaced so the UI
+  // can show real freshness instead of implying a live figure. Found to
+  // matter directly, 2026-08-23: Iddo saw a 69% badge at the same moment
+  // Claude's own native app was already showing "approaching weekly
+  // limit" - not a wrong number, a ~20-minute-stale one (the cache only
+  // updated on real interactive turns before RATE_LIMIT_REFRESH_INTERVAL_
+  // SECONDS was added in main.js). That refresh interval now bounds the
+  // worst case going forward, but showing the age directly means Iddo
+  // never has to just trust it.
+  const ageSeconds = cache.updatedAt ? Math.max(0, Math.round(nowSec - new Date(cache.updatedAt).getTime() / 1000)) : null;
   const fiveHour =
     typeof cache.fiveHourUsedPct === "number" && !(cache.fiveHourResetsAt && cache.fiveHourResetsAt < nowSec)
-      ? { usedPct: cache.fiveHourUsedPct, resetsAt: cache.fiveHourResetsAt || null }
+      ? { usedPct: cache.fiveHourUsedPct, resetsAt: cache.fiveHourResetsAt || null, ageSeconds }
       : null;
   const sevenDay =
     typeof cache.sevenDayUsedPct === "number" && !(cache.sevenDayResetsAt && cache.sevenDayResetsAt < nowSec)
-      ? { usedPct: cache.sevenDayUsedPct, resetsAt: cache.sevenDayResetsAt || null }
+      ? { usedPct: cache.sevenDayUsedPct, resetsAt: cache.sevenDayResetsAt || null, ageSeconds }
       : null;
   return { fiveHour, sevenDay };
 }
@@ -519,23 +529,27 @@ function getUsageWindows() {
     // community-sourced message-count guess.
     fiveHourConfirmed: confirmed.fiveHour,
     sevenDayConfirmed: confirmed.sevenDay,
-    monthly: buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now),
+    monthly: buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now, confirmed.sevenDay, messagesInLast7d),
   };
 }
 
-// Deliberately real numbers and a labeled projection, not a percentage -
-// unlike the 5h/7d windows, Anthropic doesn't publish any monthly cap for
-// Claude subscriptions to compute a percentage against (the two real caps
-// are the rolling 5-hour window and the rolling 7-day/weekly one, both
-// already covered above). Inventing a monthly percentage against a made-up
-// denominator would be exactly the "wrong, not just imprecise" mistake
-// this project's own history (see CLAUDE.md's "Second badge" section, the
-// original total_tokens_reminder mislabeling) already learned the hard way
-// not to repeat. What's genuinely useful and honest instead: how much
-// you've actually used this calendar month, your daily pace, and a plain
-// linear projection of where that pace lands by month's end - all real,
-// derived from the same account-wide message counts as the 5h/7d windows.
-function buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now) {
+// Real numbers (messages/pace/projection) plus one labeled ESTIMATED
+// percentage - researched first, not guessed: checked the most
+// sophisticated community tool in this space (Claude Code Usage Monitor /
+// claude-monitor, the one with ML burn-rate predictions) directly against
+// its own docs, and confirmed even it explicitly scopes itself to the 5h/
+// weekly windows only and states monthly percentages aren't calculated,
+// "because there's no monthly limit in Claude Code's architecture to
+// calculate one against." Same story with ccusage - its "monthly" view is
+// raw token/cost totals, never a percentage. Nobody has solved this
+// because Anthropic doesn't publish a monthly cap to solve it against - so
+// estimatedMonthlyCapacityPct below is exactly that, an estimate, built by
+// extrapolating the one real number that DOES exist (the confirmed 7-day
+// percentage) across a month's worth of weeks, not a claim about a real
+// limit. Iddo explicitly asked for this after being shown the research and
+// the alternative (wait for real month-over-month comparison data) -
+// chose "build the best available estimate now."
+function buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now, sevenDayConfirmed, messagesInLast7d) {
   const nowDate = new Date(now);
   const year = nowDate.getFullYear();
   const month = nowDate.getMonth(); // 0-indexed
@@ -563,6 +577,22 @@ function buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now) {
     }
   }
 
+  // Derive an implied "messages per 100% of the weekly cap" from the one
+  // real data point available (the confirmed 7-day percentage and the real
+  // message count behind it), then scale by weeks-per-month to get an
+  // implied monthly-equivalent capacity - anchored to Anthropic's own real
+  // figure rather than invented outright, but still fundamentally an
+  // extrapolation, not a fact. Guarded against sevenDayUsedPct being 0
+  // (division by zero) and against a missing confirmed figure entirely
+  // (falls back to null - no estimate shown rather than a wrong one).
+  let estimatedMonthlyCapacityPct = null;
+  if (sevenDayConfirmed && sevenDayConfirmed.usedPct > 0 && messagesInLast7d > 0) {
+    const impliedMessagesPerFullWeek = messagesInLast7d / (sevenDayConfirmed.usedPct / 100);
+    const WEEKS_PER_MONTH = daysInMonth / 7;
+    const impliedMonthlyCapacityMessages = impliedMessagesPerFullWeek * WEEKS_PER_MONTH;
+    estimatedMonthlyCapacityPct = Math.round((messagesThisMonth / impliedMonthlyCapacityMessages) * 100);
+  }
+
   return {
     messagesThisMonth,
     daysElapsedThisMonth: dayOfMonth,
@@ -574,6 +604,7 @@ function buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now) {
     // shown, not a claim about a real limit.
     projectedMonthTotal: dayOfMonth > 0 ? Math.round((messagesThisMonth / dayOfMonth) * daysInMonth) : 0,
     messagesLastMonth,
+    estimatedMonthlyCapacityPct,
   };
 }
 

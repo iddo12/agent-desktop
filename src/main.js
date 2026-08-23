@@ -113,18 +113,42 @@ function resolveNodeExecutable() {
 // statusLine configured, this leaves it completely alone rather than
 // clobbering something he may have set up himself - the usage badges simply
 // keep using the heuristic in that case, same as before this feature existed.
+// Iddo caught a real bug 2026-08-23: the 7-day badge read 69% while
+// Claude's own native app was already showing "Approaching weekly usage
+// limit" - not a wrong figure, a STALE one. Without this, the cache only
+// updates when an interactive session's own turn completes, which can
+// leave it many minutes behind at exactly the moment it matters most (near
+// the top of a window). refreshInterval is a real statusLine feature
+// (confirmed against the official docs before using it) that re-runs the
+// script on a fixed timer in addition to the normal event-driven updates.
+const RATE_LIMIT_REFRESH_INTERVAL_SECONDS = 60;
+
 function ensureRateLimitStatusLine() {
   const settingsPath = path.join(app.getPath("home"), ".claude", "settings.json");
+  const ourScriptPath = path.join(__dirname, "statusline.cjs");
   try {
     let settings = {};
     if (fs.existsSync(settingsPath)) {
       settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
     }
-    if (settings.statusLine) return;
-    settings.statusLine = {
+    const existing = settings.statusLine;
+    // Respect a genuinely different, user-configured statusLine untouched -
+    // only ever install or upgrade our own. Detected by command containing
+    // our own script's path (not just "does a statusLine exist"), so a
+    // fresh install still upgrades an OLDER install of our own script
+    // (e.g. one from before refreshInterval existed) rather than treating
+    // it as "someone else's, leave it alone" forever.
+    const isOurs = existing && existing.type === "command" && typeof existing.command === "string" && existing.command.includes(ourScriptPath);
+    if (existing && !isOurs) return;
+
+    const desired = {
       type: "command",
-      command: `"${resolveNodeExecutable()}" "${path.join(__dirname, "statusline.cjs")}"`,
+      command: `"${resolveNodeExecutable()}" "${ourScriptPath}"`,
+      refreshInterval: RATE_LIMIT_REFRESH_INTERVAL_SECONDS,
     };
+    if (isOurs && existing.command === desired.command && existing.refreshInterval === desired.refreshInterval) return;
+
+    settings.statusLine = desired;
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   } catch (e) {
     // Non-critical - the usage badges just keep using the heuristic if this

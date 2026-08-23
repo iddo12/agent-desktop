@@ -383,7 +383,6 @@ html, body {
 #five-hour-usage,
 #weekly-usage,
 #monthly-usage,
-#plan-tokens-remaining,
 #context-usage {
   -webkit-app-region: no-drag;
   font-size: 0.76rem;
@@ -400,6 +399,15 @@ html, body {
 #context-usage.critical,
 #five-hour-usage.critical,
 #weekly-usage.critical { color: var(--health-critical); border-color: var(--health-critical); }
+/* Visible marker for a badge that hasn't refreshed recently - a dashed
+   border rather than a color change, so it doesn't fight with the
+   warning/critical coloring above (a badge can be both critical AND
+   stale at once, and both need to stay visible). See formatAge() in
+   renderer.js for the threshold and the incident that motivated this. */
+#five-hour-usage.stale,
+#weekly-usage.stale { border-style: dashed; }
+#five-hour-usage.stale::after,
+#weekly-usage.stale::after { content: " \231B"; opacity: 0.7; }
 #reset-session-btn,
 #raw-terminal-toggle-btn,
 #model-picker-btn,

@@ -32,7 +32,6 @@ const chatAttachmentsEl = document.getElementById("chat-attachments");
 const chatQueueEl = document.getElementById("chat-queue");
 const chatThinkingIndicatorEl = document.getElementById("chat-thinking-indicator");
 const contextUsageEl = document.getElementById("context-usage");
-const planTokensRemainingEl = document.getElementById("plan-tokens-remaining");
 const fiveHourUsageEl = document.getElementById("five-hour-usage");
 const weeklyUsageEl = document.getElementById("weekly-usage");
 const monthlyUsageEl = document.getElementById("monthly-usage");
@@ -756,41 +755,33 @@ function setSelectedPlanId(planId) {
   localStorage.setItem(PLAN_STORAGE_KEY, planId);
 }
 
+// Must match RATE_LIMIT_REFRESH_INTERVAL_SECONDS in main.js - only used
+// here for the tooltip's own wording, not for any real timing logic.
+const RATE_LIMIT_REFRESH_SECONDS = 60;
+// A badge reading "stale" gets a visible marker (not just a tooltip you
+// have to hover to find) once it's meaningfully older than the refresh
+// interval - found necessary directly, 2026-08-23: Iddo saw a 69% badge
+// at the same moment Claude's own app already said "approaching weekly
+// limit," and the badge gave no visual hint it might be out of date.
+const STALE_THRESHOLD_SECONDS = RATE_LIMIT_REFRESH_SECONDS * 3;
+
+function formatAge(ageSeconds) {
+  if (ageSeconds === null || ageSeconds === undefined) return { text: "an unknown time", stale: false };
+  const stale = ageSeconds > STALE_THRESHOLD_SECONDS;
+  if (ageSeconds < 60) return { text: `${ageSeconds}s`, stale };
+  const minutes = Math.round(ageSeconds / 60);
+  if (minutes < 60) return { text: `${minutes}m`, stale };
+  const hours = Math.round(minutes / 60);
+  return { text: `${hours}h`, stale };
+}
+
 async function refreshUsageWindows() {
   const windows = await window.api.getUsageWindows();
   if (!activeAgentPath) {
     fiveHourUsageEl.classList.add("hidden");
     weeklyUsageEl.classList.add("hidden");
     monthlyUsageEl.classList.add("hidden");
-    planTokensRemainingEl.classList.add("hidden");
     return;
-  }
-
-  // Moved here from refreshContextUsage() the same day the user asked "this
-  // buffer, is that the specific agent's buffer?" - it was, and shouldn't
-  // have been. The underlying throttle is realistically account-wide
-  // (Claude's rate limiting operates per account, not per conversation),
-  // so it belongs in the same account-wide scan as the message counts
-  // below, not scoped to one agent's own files. planTokenBufferPct
-  // compares the current value against the highest value ever observed
-  // (the empirical ceiling, not an officially documented one) - "how full
-  // is the buffer right now," not a claim about plan-wide budget. Because
-  // it refills within minutes of a burst, it reads at-or-near 100% almost
-  // all the time by design - the "at rest" state says so directly in the
-  // badge text (not just a tooltip), since the user reasonably asked whether a
-  // steady 100% meant it was stuck.
-  if (typeof windows.planTokenBufferPct === "number") {
-    planTokensRemainingEl.textContent =
-      windows.planTokenBufferPct >= 99 ? "Buffer: full" : `Buffer: ${windows.planTokenBufferPct}%`;
-    planTokensRemainingEl.title =
-      `${windows.planTokenBufferRemaining.toLocaleString()} of an observed ceiling of ` +
-      `${windows.planTokenBufferCeiling.toLocaleString()} (highest value ever seen across ALL Claude Code ` +
-      `sessions on this machine, not an officially documented limit). Account-wide, not scoped to this agent - a ` +
-      `burst in a different agent's conversation affects this too. Refills within minutes of a heavy burst, so it ` +
-      `reads "full" almost all the time by design - that's expected, not a sign it's stuck. Not your overall plan budget.`;
-    planTokensRemainingEl.classList.remove("hidden");
-  } else {
-    planTokensRemainingEl.classList.add("hidden");
   }
 
   // Prefer windows.fiveHourConfirmed/sevenDayConfirmed - Anthropic's own
@@ -806,13 +797,17 @@ async function refreshUsageWindows() {
   // be actively wrong, not just imprecise).
   if (windows.fiveHourConfirmed) {
     const pct = Math.round(windows.fiveHourConfirmed.usedPct);
+    const age = formatAge(windows.fiveHourConfirmed.ageSeconds);
     fiveHourUsageEl.textContent = `${pct}% (5h)`;
     fiveHourUsageEl.title =
       `${pct}% of your 5-hour rate limit window used, reported directly by Anthropic (rate_limits.five_hour), ` +
-      `not estimated. Resets ${windows.fiveHourConfirmed.resetsAt ? new Date(windows.fiveHourConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}.`;
-    fiveHourUsageEl.classList.remove("hidden", "warning", "critical");
+      `not estimated - as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while any ` +
+      `Claude Code session is open, so it can lag reality by more than that if nothing's currently open. ` +
+      `Resets ${windows.fiveHourConfirmed.resetsAt ? new Date(windows.fiveHourConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}.`;
+    fiveHourUsageEl.classList.remove("hidden", "warning", "critical", "stale");
     if (pct >= 90) fiveHourUsageEl.classList.add("critical");
     else if (pct >= 70) fiveHourUsageEl.classList.add("warning");
+    if (age.stale) fiveHourUsageEl.classList.add("stale");
   } else {
     const plan = PLAN_FIVE_HOUR_ESTIMATES[getSelectedPlanId()];
     const fivePct = Math.min(100, Math.round((windows.messagesInLast5h / plan.fiveHourMessages) * 100));
@@ -832,14 +827,19 @@ async function refreshUsageWindows() {
   const dailyAvg = (windows.messagesInLast7d / 7).toFixed(1);
   if (windows.sevenDayConfirmed) {
     const pct = Math.round(windows.sevenDayConfirmed.usedPct);
+    const age = formatAge(windows.sevenDayConfirmed.ageSeconds);
     weeklyUsageEl.textContent = `${pct}% (7d)`;
     weeklyUsageEl.title =
-      `${pct}% of your weekly rate limit used, reported directly by Anthropic (rate_limits.seven_day), not estimated. ` +
+      `${pct}% of your weekly rate limit used, reported directly by Anthropic (rate_limits.seven_day), not estimated ` +
+      `- as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while any Claude Code session ` +
+      `is open, so it can lag reality by more than that if nothing's currently open (this is exactly what happened ` +
+      `once already: a 69% badge sat stale for ~20 minutes while real usage climbed past it). ` +
       `Resets ${windows.sevenDayConfirmed.resetsAt ? new Date(windows.sevenDayConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}. ` +
       `For reference, ${windows.messagesInLast7d} messages sent across all sessions on this machine in the trailing 7 days (~${dailyAvg}/day).`;
-    weeklyUsageEl.classList.remove("hidden", "warning", "critical");
+    weeklyUsageEl.classList.remove("hidden", "warning", "critical", "stale");
     if (pct >= 90) weeklyUsageEl.classList.add("critical");
     else if (pct >= 70) weeklyUsageEl.classList.add("warning");
+    if (age.stale) weeklyUsageEl.classList.add("stale");
   } else {
     // Deliberately no percentage against Claude's real weekly cap in this
     // fallback path - it's measured in "active compute hours," not messages,
@@ -864,28 +864,35 @@ async function refreshUsageWindows() {
 
 // "This month" badge - Iddo asked for a short/medium/long-term view
 // (next few hours / this week / this month) alongside the existing 5h/7d
-// badges above. Unlike those two, there's no real monthly cap Anthropic
-// publishes to compute a percentage against, so this shows real numbers
-// and a plainly-labeled linear projection instead of a fabricated
-// percentage - see buildMonthlyUsage()'s own comment in archive.js for why
-// that line wasn't crossed here the way it was, and then corrected, for
-// the very first version of the plan-token-buffer badge.
+// badges above, then specifically asked for a best-effort percentage after
+// being shown the research confirming no community tool has solved this
+// (see buildMonthlyUsage()'s own comment in archive.js). Shows real
+// numbers first, then the labeled estimate percentage when one can be
+// computed (needs a confirmed 7-day figure to extrapolate from - see
+// archive.js) - never a bare, unlabeled "%" that could be mistaken for
+// something Anthropic actually reports.
 function refreshMonthlyUsage(monthly) {
   if (!monthly) {
     monthlyUsageEl.classList.add("hidden");
     return;
   }
-  monthlyUsageEl.textContent = `${monthly.messagesThisMonth} msgs (mo, ~${monthly.projectedMonthTotal} proj.)`;
+  const pctText = monthly.estimatedMonthlyCapacityPct !== null ? `, ~${monthly.estimatedMonthlyCapacityPct}% est.` : "";
+  monthlyUsageEl.textContent = `${monthly.messagesThisMonth} msgs (mo${pctText})`;
   const comparison =
     monthly.messagesLastMonth !== null
       ? ` Last month: ${monthly.messagesLastMonth} total.`
       : " Not enough history yet for a last-month comparison.";
+  const pctExplanation =
+    monthly.estimatedMonthlyCapacityPct !== null
+      ? `Estimated ~${monthly.estimatedMonthlyCapacityPct}% of a monthly-equivalent capacity used - NOT an Anthropic-reported figure ` +
+        `(no monthly cap exists to report). Derived by extrapolating your real, confirmed 7-day rate-limit percentage across a ` +
+        `month's worth of weeks - anchored to real data, but still an estimate, not a fact. Researched first: even the most ` +
+        `sophisticated community usage-tracking tools don't compute this, because the same underlying limit doesn't exist for them either.`
+      : `No percentage available yet - needs a confirmed 7-day rate-limit figure to extrapolate from (see the 7d badge above).`;
   monthlyUsageEl.title =
     `${monthly.messagesThisMonth} messages sent across ALL Claude Code sessions on this machine so far this calendar ` +
     `month (day ${monthly.daysElapsedThisMonth} of ${monthly.daysInMonth}), averaging ${monthly.dailyAverageThisMonth}/day. ` +
-    `Projected total by month end if this pace holds: ~${monthly.projectedMonthTotal}.${comparison} No percentage shown - ` +
-    `Anthropic doesn't publish a monthly cap for Claude subscriptions the way it does for the 5-hour and 7-day windows above, ` +
-    `so there's no real ceiling to compute one against.`;
+    `Projected total by month end if this pace holds: ~${monthly.projectedMonthTotal}.${comparison} ${pctExplanation}`;
   monthlyUsageEl.classList.remove("hidden");
 }
 
