@@ -806,9 +806,11 @@ async function refreshUsageWindows() {
     fiveHourUsageEl.textContent = `${pct}% (5h)`;
     fiveHourUsageEl.title =
       `${pct}% of your 5-hour rate limit window used, reported directly by Anthropic (rate_limits.five_hour), ` +
-      `not estimated - as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while any ` +
-      `Claude Code session is open, so it can lag reality by more than that if nothing's currently open. ` +
-      `Resets ${windows.fiveHourConfirmed.resetsAt ? new Date(windows.fiveHourConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}.`;
+      `not estimated - as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while an ` +
+      `INTERACTIVE terminal Claude Code session is open (this app's own attached agents, or a real terminal) - ` +
+      `a session running through Claude Desktop's own native/embedded agent mode does NOT refresh this, even ` +
+      `while actively burning real usage, since it never renders a statusLine. Can lag reality if nothing ` +
+      `interactive is currently open. Resets ${windows.fiveHourConfirmed.resetsAt ? new Date(windows.fiveHourConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}.`;
     fiveHourUsageEl.classList.remove("hidden", "warning", "critical", "stale");
     if (pct >= 90) fiveHourUsageEl.classList.add("critical");
     else if (pct >= 70) fiveHourUsageEl.classList.add("warning");
@@ -836,10 +838,12 @@ async function refreshUsageWindows() {
     weeklyUsageEl.textContent = `${pct}% (7d)`;
     weeklyUsageEl.title =
       `${pct}% of your weekly rate limit used, reported directly by Anthropic (rate_limits.seven_day), not estimated ` +
-      `- as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while any Claude Code session ` +
-      `is open, so it can lag reality by more than that if nothing's currently open (this is exactly what happened ` +
-      `once already: a 69% badge sat stale for ~20 minutes while real usage climbed past it). ` +
-      `Resets ${windows.sevenDayConfirmed.resetsAt ? new Date(windows.sevenDayConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}. ` +
+      `- as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while an INTERACTIVE terminal ` +
+      `Claude Code session is open (this app's own attached agents, or a real terminal) - a session running through ` +
+      `Claude Desktop's own native/embedded agent mode does NOT refresh this, even while actively burning real usage, ` +
+      `since it never renders a statusLine. This is exactly what happened once already (a 69% badge sat stale for ` +
+      `~20 minutes while real usage climbed past it), and again 2026-08-23 (badge stuck at ~93% while an embedded ` +
+      `session actually hit the 5h cap). Resets ${windows.sevenDayConfirmed.resetsAt ? new Date(windows.sevenDayConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}. ` +
       `For reference, ${windows.messagesInLast7d} messages sent across all sessions on this machine in the trailing 7 days (~${dailyAvg}/day).`;
     weeklyUsageEl.classList.remove("hidden", "warning", "critical", "stale");
     if (pct >= 90) weeklyUsageEl.classList.add("critical");
@@ -1405,83 +1409,137 @@ chatInputEl.addEventListener("keydown", (e) => {
 
 sendInputBtn.addEventListener("click", sendChatInput);
 
-// Hold-to-talk drives Claude Code's own native /voice mode (Anthropic
-// shipped this directly in the CLI - see "type /voice, then hold spacebar"
-// in its docs) rather than a custom speech-to-text pipeline. This button
-// exists only to make that gesture reachable without a physical keyboard
-// (mobile is the main reason - typing is painful there), not to reimplement
-// speech recognition.
+// Drives Claude Code's own native /voice dictation (Anthropic shipped this
+// directly in the CLI, https://code.claude.com/docs/en/voice-dictation)
+// rather than a custom speech-to-text pipeline. This button exists only to
+// make that gesture reachable without a physical keyboard (mobile is the
+// main reason - typing is painful there), not to reimplement speech
+// recognition.
 //
-// Diagnosed live, 2026-08-21: the first version of this sent "/voice"
-// through submitToAgent(), the same path the Model-picker button uses for
-// its own slash command - but that path always follows with an automatic
-// \r (Enter), and confirmed live, that's wrong specifically for /voice: it
-// showed up as a normal SENT CHAT MESSAGE (a yellow user bubble reading
-// "/voice"), not as the CLI entering voice mode. /voice has to stay
-// sitting UNCOMMITTED in the prompt line - the held spacebar that follows
-// is what actually triggers it, not a completed line. So /voice itself is
-// now written directly via window.api.sendInput with no trailing \r, same
-// as the held-spacebar simulation that follows it - both bypass
-// submitToAgent() entirely for this one gesture. The held spacebar itself
-// is a raw terminal input concept with no equivalent in this app's normal
-// compose-a-line-and-hit-Enter flow, so it's simulated by writing literal
-// space bytes straight to the pty at roughly a physical keyboard's OS
-// auto-repeat rate, for as long as the button stays held - matching what a
-// real held key actually produces on the wire, character by character,
-// rather than one line sent all at once.
+// Rebuilt from scratch 2026-08-23 after live-diagnosing why it did nothing
+// even after fixing an earlier click-vs-hold bug (see the click listener
+// below) - the whole hold-simulation design this used to be was wrong, not
+// just the event wiring. Root-caused via the CLI's own real docs, not
+// guessed:
+//
+// 1. Bare "/voice" (what this used to send) is documented as "toggle on or
+//    off, KEEP THE CURRENT MODE" - not "enable it." Voice dictation state
+//    persists across CLI sessions (it's a real setting,
+//    voice.enabled/voice.mode), so sending bare "/voice" on every button
+//    press is a coin flip: exactly as likely to silently DISABLE dictation
+//    as to arm it, depending on whatever state a previous press left it
+//    in. This alone explains "sometimes/never works."
+// 2. Confirmed live, by reading the real pty buffer through this app's own
+//    driver skill: after arming and waiting past the old warmup delay, the
+//    buffer showed literal accumulated space CHARACTERS, not a live
+//    waveform. The CLI's own troubleshooting docs name this exact symptom
+//    verbatim: "If spaces keep accumulating, voice dictation is likely
+//    off." That's a direct, documented match, not a guess.
+// 3. The old design also tried to fake a REAL held key via a JS setInterval
+//    blasting literal space bytes at the pty - conceptually shaky even
+//    when dictation was correctly on, since Claude Code's hold-mode
+//    warmup/finalization behavior is tuned around genuine OS key-repeat
+//    timing, an extra source of flakiness worth avoiding entirely rather
+//    than tuning around.
+//
+// Fix: use `/voice tap` explicitly instead of bare `/voice` - this SETS
+// tap mode outright rather than blindly toggling, so it can't accidentally
+// disable dictation the way bare "/voice" could. Tap mode
+// (https://code.claude.com/docs/en/voice-dictation#tap-to-record-and-send)
+// needs no held-key simulation at all: "tap once to start... tap again to
+// stop," with zero warmup - a single space keystroke each way, which maps
+// directly onto this button's existing click-to-toggle UI with no interval
+// needed. The CLI auto-submits the transcript once stopped (3+ words), so
+// there's nothing further for this button to do once the second tap goes
+// out.
+//
+// A second round of live testing (same night, via this app's own driver
+// skill against the real running app) found one more wrong assumption on
+// top of the "bare /voice toggles" one above: NEITHER "/voice" NOR
+// "/voice tap" self-executes just by being typed. Both need a real Enter to
+// actually select/run them from the CLI's own live autocomplete dropdown -
+// directly contradicting the original 2026-08-21 finding that Enter always
+// turns "/voice" into a literal chat message instead. That finding was
+// evidently true for whatever CLI version was live back then and isn't true
+// for this one (v2.1.241) - re-tested it directly: typing "/voice tap" then
+// Enter as the very first interaction of a session DOES get sent as a
+// literal chat message (confirmed live - the agent visibly started a real
+// turn on it), but the exact same "/voice tap" + Enter DOES correctly
+// execute once a prior bare "/voice" + Enter has happened first in that
+// session. Rather than chase why, built the sequence around it being safe
+// regardless: bare "/voice" TOGGLES (unpredictable net effect on its own)
+// but "/voice tap" SETS the mode outright, so sending both in sequence -
+// "/voice"+Enter then "/voice tap"+Enter - deterministically ends in tap
+// mode enabled no matter what state dictation started in, since the second,
+// mode-setting command always wins. Live-verified this exact 4-step
+// sequence end to end through the real app: it produced the CLI's own
+// genuine "● REC · tap to send" indicator on the first tap, and "No speech
+// detected" (the documented response to real captured silence, not an
+// error) on the second - full pipeline confirmed working, real audio
+// round-tripped to Anthropic's transcription service and back.
 const voiceInputBtn = document.getElementById("voice-input-btn");
-const VOICE_HOLD_REPEAT_MS = 40;
-// Give the CLI a moment to actually enter voice mode before the simulated
-// held spacebar starts, rather than racing the two - matches the
-// documented usage (type /voice, THEN hold spacebar) instead of sending
-// both at once.
-const VOICE_MODE_ARM_DELAY_MS = 300;
-// Safety net for the click-to-toggle model below - if Iddo forgets to click
-// stop, this auto-stops rather than spamming space bytes into a live pty
-// indefinitely in the background.
+// Delay between each step below - gives the CLI's own live autocomplete
+// matcher a moment to catch up before the next input lands, rather than
+// racing consecutive writes into the same pty.
+const VOICE_STEP_DELAY_MS = 300;
+// Safety net - if Iddo forgets to click stop, auto-stop rather than leaving
+// a live mic recording into a background pty indefinitely. Recording also
+// auto-stops after 15s of silence or 2 minutes per the CLI's own docs, so
+// this is a backstop on top of that, not the primary limit.
 const VOICE_MAX_HOLD_MS = 90000;
 let voiceHeld = false;
-let voiceHoldInterval = null;
 let voiceMaxHoldTimer = null;
+let voiceArmToken = 0; // bumped on every stop, so a stale delayed step from a prior click can't fire late
 
-// Diagnosed live, 2026-08-23: this used to be mousedown/mouseup (real
-// hold-to-talk), and Iddo hit it exactly as designed - a normal click is
-// mousedown immediately followed by mouseup, both firing well under
-// VOICE_MODE_ARM_DELAY_MS (300ms). mouseup's stopVoiceHold() set
-// voiceHeld = false before the delayed check below ever ran, so the
-// spacebar-repeat interval - the part that actually makes the CLI's /voice
-// mode capture anything - never started. "/voice" sat uncommitted in the
-// CLI's prompt line and nothing happened, with no visible error anywhere
-// since the .recording pulse itself flashed on and off within
-// milliseconds, too fast to see. A hold-for-the-entire-sentence gesture
-// also just isn't what a mic button trains anyone to expect - every
-// mainstream voice-input UI (Google, Siri, WhatsApp) is click-to-start,
-// click-to-stop, not walkie-talkie style. Switched to that model instead
-// of trying to make hold-to-talk more forgiving.
-function startVoiceHold() {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Diagnosed live, 2026-08-23 (earlier the same investigation): this used to
+// be mousedown/mouseup (real hold-to-talk), and Iddo hit it exactly as
+// designed - a normal click is mousedown immediately followed by mouseup,
+// both firing well under the old arm-delay, so the simulated held-key
+// signal never started. A hold-for-the-entire-sentence gesture also isn't
+// what a mic button trains anyone to expect - every mainstream voice-input
+// UI (Google, Siri, WhatsApp) is click-to-start/click-to-stop. Switched to
+// that model, which (per the tap-mode rebuild above) now also happens to
+// be the objectively more correct way to drive the CLI's own tap mode.
+async function startVoiceHold() {
   if (!activeAgentPath || voiceHeld) return;
   voiceHeld = true;
   voiceInputBtn.classList.add("recording");
-  // No trailing \r on purpose - see the comment above. Submitting /voice
-  // as a complete line (Enter) sends it as a literal chat message instead
-  // of arming voice mode.
-  window.api.sendInput(activeAgentPath, "/voice");
-  setTimeout(() => {
-    if (!voiceHeld) return; // stopped again before /voice had time to register
-    voiceHoldInterval = setInterval(() => {
-      window.api.sendInput(activeAgentPath, " ");
-    }, VOICE_HOLD_REPEAT_MS);
-  }, VOICE_MODE_ARM_DELAY_MS);
+  const agentPath = activeAgentPath;
+  const token = voiceArmToken;
   voiceMaxHoldTimer = setTimeout(stopVoiceHold, VOICE_MAX_HOLD_MS);
+
+  // Each step bails if stopped (or a newer click superseded this one) in
+  // the meantime, rather than continuing to poke a session nobody's
+  // waiting on anymore.
+  const stillArming = () => voiceHeld && token === voiceArmToken;
+
+  window.api.sendInput(agentPath, "/voice");
+  await sleep(VOICE_STEP_DELAY_MS);
+  if (!stillArming()) return;
+  window.api.sendInput(agentPath, "\r");
+  await sleep(VOICE_STEP_DELAY_MS);
+  if (!stillArming()) return;
+  window.api.sendInput(agentPath, "/voice tap");
+  await sleep(VOICE_STEP_DELAY_MS);
+  if (!stillArming()) return;
+  window.api.sendInput(agentPath, "\r");
+  await sleep(VOICE_STEP_DELAY_MS);
+  if (!stillArming()) return;
+  window.api.sendInput(agentPath, " "); // first tap - starts recording
 }
 
 function stopVoiceHold() {
+  if (!voiceHeld) return;
   voiceHeld = false;
+  voiceArmToken++;
   voiceInputBtn.classList.remove("recording");
-  if (voiceHoldInterval) {
-    clearInterval(voiceHoldInterval);
-    voiceHoldInterval = null;
-  }
+  // Second tap - stops recording and auto-submits if the transcript is 3+
+  // words (documented behavior, nothing more for this button to do).
+  if (activeAgentPath) window.api.sendInput(activeAgentPath, " ");
   if (voiceMaxHoldTimer) {
     clearTimeout(voiceMaxHoldTimer);
     voiceMaxHoldTimer = null;

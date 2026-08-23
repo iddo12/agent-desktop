@@ -407,7 +407,21 @@ html, body {
 #five-hour-usage.stale,
 #weekly-usage.stale { border-style: dashed; }
 #five-hour-usage.stale::after,
-#weekly-usage.stale::after { content: " \231B"; opacity: 0.7; }
+#weekly-usage.stale::after {
+  content: " \231B";
+  opacity: 1;
+  /* Bumped from a static 0.7-opacity glyph (2026-08-23) - found live that a
+     dashed border alone is too easy to miss on a quick glance, which is
+     exactly the failure mode that let a stale 93% sit unnoticed while real
+     usage had already hit the account-wide cap. A slow pulse (not the
+     mic button's fast recording pulse - this isn't urgent/live, just
+     "don't fully trust this number") draws the eye without being alarming. */
+  animation: stale-badge-pulse 2s ease-in-out infinite;
+}
+@keyframes stale-badge-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
 #reset-session-btn,
 #raw-terminal-toggle-btn,
 #model-picker-btn,
