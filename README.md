@@ -55,6 +55,34 @@ Selecting the agent starts a real `claude` session with that folder as its worki
 - Only one Agent Desktop window should run at a time per machine (enforced via Electron's single-instance lock) — a second launch just focuses the first.
 - Deleting an agent shows a mandatory 30-second countdown before the delete button becomes clickable. This isn't just friction for its own sake: `claude --bg` dispatch spawns a separate, longer-lived daemon helper process that can keep a handle on the agent's folder for a while after the agent session itself is stopped, and deleting too soon can otherwise fail with a Windows "resource busy" error. The countdown gives that daemon time to release it.
 
+## Troubleshooting: "File not found" / "is not recognized" launching an agent
+
+If opening or messaging an agent fails with an error mentioning `claude.cmd`
+— e.g. `'C:\Users\<you>\AppData\Roaming\npm\claude.cmd' is not recognized as
+an internal or external command` — and this keeps happening rather than
+being a one-off blip, the real cause on a machine with the Claude Desktop
+app installed is almost always this: **`%APPDATA%\npm\claude.cmd` is not an
+independent file, it's a symlink into Claude Desktop's own packaged app
+storage**, and that symlink is not reliably resolvable from every process's
+security context. Confirm it in one command:
+```powershell
+Get-Item "$env:APPDATA\npm\claude.cmd" | Select-Object LinkType, Target
+```
+If `LinkType` shows anything (e.g. `SymbolicLink`) and `Target` points into
+`...\Packages\Claude_<id>\LocalCache\...`, that's it — some processes will
+be able to resolve that target reliably and others won't, depending on
+their own relationship to Claude Desktop's app-package identity, which
+produces exactly this kind of "works sometimes, fails other times, no
+obvious pattern" symptom.
+
+This app's own `resolveClaudeExecutable()` (`src/main.js`) already works
+around it by resolving straight to the real target path instead of through
+the symlink — if you're hitting this in your own tooling that shells out to
+`claude`, the fix is the same: resolve
+`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\npm\claude.cmd`
+directly (glob for the `Claude_*` folder, since the exact suffix is
+per-install) rather than trusting the PATH/`%APPDATA%`-based symlink.
+
 ## Troubleshooting: Windows Defender Controlled Folder Access
 
 If file edits or agent sessions fail or hang for no visible reason on Windows, check whether Controlled Folder Access is silently blocking Node, git, or `claude.exe` itself from writing to your agents' folder:
