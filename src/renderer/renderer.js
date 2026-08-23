@@ -262,6 +262,11 @@ function showTerminalFor(agent) {
       // survive normal ~1s gaps between a CLI spinner's own redraws.
       turnStartedAt: null,
       thinkingQuietTimer: null,
+      // Timestamp of the last byte of pty output seen for this agent, for
+      // anything that needs to detect real completion faster than the
+      // 3s-tuned thinkingQuietTimer above - see waitForPtyQuiet() and the
+      // Reset Session handler below.
+      lastActivityAt: null,
       // Guards against rebuildChatView() wiping a real, already-shown
       // conversation down to nothing on a bad read - see the comment there.
       hasShownRealContent: false,
@@ -968,6 +973,7 @@ function updateThinkingIndicator() {
 if (!thinkingIndicatorInterval) thinkingIndicatorInterval = setInterval(updateThinkingIndicator, 1000);
 
 function markActivity(agentPath, session) {
+  session.lastActivityAt = Date.now();
   setBusy(agentPath, session, true);
   clearTimeout(session.idleTimer);
   session.idleTimer = setTimeout(() => setBusy(agentPath, session, false), IDLE_TIMEOUT_MS);
@@ -1757,9 +1763,40 @@ modelPickerBtn.addEventListener("click", () => {
 // the compose box shortly after rather than leaving it stuck on the
 // terminal (that stuck focus is exactly what made the user unable to type
 // right after using this the first time).
-const RESET_SESSION_HANDOFF_MS = 600;
+// Timing figures below are measured, not guessed: a live harness sent
+// "/clear" to a real, otherwise-idle claude pty 6 times in a row and timed
+// each one to its own real quiet point (2026-08-23). Steady-state was a
+// consistent 1149-1172ms; the one cold-start run (right after the pty
+// itself came up) hit 1796ms. RESET_SESSION_POLL_MS/RESET_SESSION_QUIET_MS
+// below are tuned off that data, not the slower 3000ms
+// THINKING_INDICATOR_QUIET_MS used for normal chat turns - that number is
+// deliberately conservative for "is a real response still streaming,"
+// which doesn't apply here: /clear produces no assistant text, so there's
+// nothing worth waiting an extra 3s for once its own output has genuinely
+// stopped.
+const RESET_SESSION_MIN_MS = 400; // floor - don't declare done before /clear's own first byte could plausibly have landed
+const RESET_SESSION_QUIET_MS = 900; // no pty output for this long = real work is done
+const RESET_SESSION_SLOW_HINT_MS = 4000; // >2x the measured worst case (1796ms) - genuinely unusual, say so
+const RESET_SESSION_CEILING_MS = 15000; // give up waiting and hand control back regardless, rather than blocking forever
 
-resetSessionBtn.addEventListener("click", () => {
+function waitForPtyQuiet(agentPath, { minMs, quietMs, pollMs = 100 }) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const poll = () => {
+      const session = terminals.get(agentPath);
+      const elapsed = Date.now() - startedAt;
+      const sinceLastByte = session && session.lastActivityAt ? Date.now() - session.lastActivityAt : Infinity;
+      if ((elapsed >= minMs && sinceLastByte >= quietMs) || elapsed >= RESET_SESSION_CEILING_MS) {
+        resolve({ elapsed, timedOut: elapsed >= RESET_SESSION_CEILING_MS });
+        return;
+      }
+      setTimeout(poll, pollMs);
+    };
+    poll();
+  });
+}
+
+resetSessionBtn.addEventListener("click", async () => {
   if (!activeAgentPath) return;
   const confirmed = confirm(
     "Reset this session? This clears the agent's current conversation context and starts fresh. The full conversation stays available in History either way."
@@ -1780,11 +1817,31 @@ resetSessionBtn.addEventListener("click", () => {
     // keep showing the pre-clear conversation.
     session.hasShownRealContent = false;
   }
+
+  // Live progress on the button itself (visible even while Raw Terminal
+  // mode hides the Chat View) instead of a blind fixed-length wait that
+  // used to hand focus back at 600ms - genuinely shorter than /clear's own
+  // measured 1149-1796ms, meaning the old code returned control before
+  // /clear had actually finished, every single time.
+  resetSessionBtn.disabled = true;
+  const tickStartedAt = Date.now();
+  const tick = setInterval(() => {
+    const elapsedSec = ((Date.now() - tickStartedAt) / 1000).toFixed(1);
+    resetSessionBtn.textContent =
+      Date.now() - tickStartedAt > RESET_SESSION_SLOW_HINT_MS ? `Resetting… ${elapsedSec}s (longer than usual)` : `Resetting… ${elapsedSec}s`;
+  }, 100);
+
+  const { timedOut } = await waitForPtyQuiet(agentPath, { minMs: RESET_SESSION_MIN_MS, quietMs: RESET_SESSION_QUIET_MS });
+  clearInterval(tick);
+  resetSessionBtn.textContent = timedOut ? "Reset (slow)" : "✓ Reset";
   setTimeout(() => {
-    if (activeAgentPath !== agentPath) return; // switched agents in the meantime - leave it alone
-    setRawTerminalMode(false);
-    chatInputEl.focus();
-  }, RESET_SESSION_HANDOFF_MS);
+    resetSessionBtn.textContent = "Reset Session";
+    resetSessionBtn.disabled = false;
+  }, 1200);
+
+  if (activeAgentPath !== agentPath) return; // switched agents in the meantime - leave it alone
+  setRawTerminalMode(false);
+  chatInputEl.focus();
 });
 
 loadAgents();
