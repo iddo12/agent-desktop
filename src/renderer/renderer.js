@@ -1436,9 +1436,28 @@ const VOICE_HOLD_REPEAT_MS = 40;
 // documented usage (type /voice, THEN hold spacebar) instead of sending
 // both at once.
 const VOICE_MODE_ARM_DELAY_MS = 300;
+// Safety net for the click-to-toggle model below - if Iddo forgets to click
+// stop, this auto-stops rather than spamming space bytes into a live pty
+// indefinitely in the background.
+const VOICE_MAX_HOLD_MS = 90000;
 let voiceHeld = false;
 let voiceHoldInterval = null;
+let voiceMaxHoldTimer = null;
 
+// Diagnosed live, 2026-08-23: this used to be mousedown/mouseup (real
+// hold-to-talk), and Iddo hit it exactly as designed - a normal click is
+// mousedown immediately followed by mouseup, both firing well under
+// VOICE_MODE_ARM_DELAY_MS (300ms). mouseup's stopVoiceHold() set
+// voiceHeld = false before the delayed check below ever ran, so the
+// spacebar-repeat interval - the part that actually makes the CLI's /voice
+// mode capture anything - never started. "/voice" sat uncommitted in the
+// CLI's prompt line and nothing happened, with no visible error anywhere
+// since the .recording pulse itself flashed on and off within
+// milliseconds, too fast to see. A hold-for-the-entire-sentence gesture
+// also just isn't what a mic button trains anyone to expect - every
+// mainstream voice-input UI (Google, Siri, WhatsApp) is click-to-start,
+// click-to-stop, not walkie-talkie style. Switched to that model instead
+// of trying to make hold-to-talk more forgiving.
 function startVoiceHold() {
   if (!activeAgentPath || voiceHeld) return;
   voiceHeld = true;
@@ -1448,11 +1467,12 @@ function startVoiceHold() {
   // of arming voice mode.
   window.api.sendInput(activeAgentPath, "/voice");
   setTimeout(() => {
-    if (!voiceHeld) return; // released again before /voice had time to register
+    if (!voiceHeld) return; // stopped again before /voice had time to register
     voiceHoldInterval = setInterval(() => {
       window.api.sendInput(activeAgentPath, " ");
     }, VOICE_HOLD_REPEAT_MS);
   }, VOICE_MODE_ARM_DELAY_MS);
+  voiceMaxHoldTimer = setTimeout(stopVoiceHold, VOICE_MAX_HOLD_MS);
 }
 
 function stopVoiceHold() {
@@ -1462,15 +1482,16 @@ function stopVoiceHold() {
     clearInterval(voiceHoldInterval);
     voiceHoldInterval = null;
   }
+  if (voiceMaxHoldTimer) {
+    clearTimeout(voiceMaxHoldTimer);
+    voiceMaxHoldTimer = null;
+  }
 }
 
-voiceInputBtn.addEventListener("mousedown", startVoiceHold);
-voiceInputBtn.addEventListener("mouseup", stopVoiceHold);
-// Dragging off the button without releasing the mouse button first (a real,
-// common gesture) must still stop the hold - otherwise it silently keeps
-// "talking" into the session with no visible way to stop it short of
-// clicking the button again, which mouseup alone doesn't catch.
-voiceInputBtn.addEventListener("mouseleave", stopVoiceHold);
+voiceInputBtn.addEventListener("click", () => {
+  if (voiceHeld) stopVoiceHold();
+  else startVoiceHold();
+});
 
 // Pure visual reminder/shortcut - just prefills the compose box, doesn't
 // send anything itself. Prepends rather than overwrites so it still works
