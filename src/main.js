@@ -21,7 +21,43 @@ const ptySessions = new Map(); // agentPath -> { proc, sessionCwd, archiveTimer 
 // lower-level Windows API path than fs does, so it's used directly here without
 // a broken pre-check gate; if the path is genuinely wrong, spawn itself will
 // fail with its own clear error instead.
+// Root-caused live, 2026-08-23, the actual explanation behind every earlier
+// round of "File not found"/"is not recognized" theorized in this file
+// (updater races, Defender, ConPTY quirks - all real contributing factors
+// for OTHER incidents, but not the fundamental one): `%APPDATA%\npm\
+// claude.cmd` is not an independent file at all - `Get-Item` reveals it's a
+// reparse point (symlink) into Claude Desktop's own MSIX/UWP app-package
+// storage (`%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\npm\
+// claude.cmd`), created by Claude Desktop's own installer as a convenience
+// shortcut. Confirmed directly, live, on Iddo's machine: at the exact same
+// moment, `Test-Path` on the symlinked path returned `False` from a plain
+// PowerShell window (and independently, from Agent Desktop's own process
+// via the cmd-not-recognized.log diagnostics below), while `ls` from a
+// bash session with Claude Desktop's own package trust context saw it
+// fine, and `Test-Path` directly on the REAL target path (bypassing the
+// symlink entirely) returned `True`. Windows' AppContainer-style access
+// control for a packaged app's LocalCache folder is evidently NOT reliably
+// resolvable through that reparse point from every process/security
+// context - exactly the kind of intermittent, context-dependent failure
+// that made this so hard to pin down across three earlier rounds of fixes.
+// Fixed at the actual source: resolve the real target directly, skipping
+// the symlink entirely, rather than continuing to retry through it.
 function resolveClaudeExecutable() {
+  const localAppData = process.env.LOCALAPPDATA || (process.env.USERPROFILE && path.join(process.env.USERPROFILE, "AppData", "Local"));
+  if (localAppData) {
+    try {
+      const packagesDir = path.join(localAppData, "Packages");
+      const claudePkg = fs.readdirSync(packagesDir).find((name) => name.startsWith("Claude_"));
+      if (claudePkg) {
+        const direct = path.join(packagesDir, claudePkg, "LocalCache", "Roaming", "npm", "claude.cmd");
+        if (fs.existsSync(direct)) return direct;
+      }
+    } catch (e) {
+      /* Claude Desktop's package folder isn't where expected - fall back below */
+    }
+  }
+  // Fallback for a machine without Claude Desktop's packaged app (e.g. only
+  // a plain npm-global install) - the original symlink-following resolution.
   try {
     const found = execSync("where claude.cmd", { encoding: "utf-8" }).split("\n")[0].trim();
     if (found) return found;
