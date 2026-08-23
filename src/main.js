@@ -312,6 +312,56 @@ ipcMain.handle("disable-interfering-service", async (event, { serviceName }) => 
   }
 });
 
+// ------------------------------------- claude executable health check --
+//
+// Proactive startup check for "the 2 sec problem" (see CLAUDE.md's own
+// top-of-file section by that name) and anything else that would produce
+// the identical symptom - rather than waiting for Iddo to hit a cryptic
+// mid-conversation failure and someone reverse-engineering it live (as
+// happened once, at real length, on 2026-08-23), actually try running
+// `claude --version` once at startup and surface a clear, specific banner
+// immediately if it fails, instead of a per-agent "[failed to start
+// session]" error that only shows up once you've already tried to use one.
+async function checkClaudeExecutableHealth() {
+  if (process.platform !== "win32") return { healthy: true };
+
+  let resolvedPath;
+  try {
+    resolvedPath = resolveClaudeExecutable();
+  } catch (e) {
+    return { healthy: false, reason: "not-resolved", detail: e.message };
+  }
+
+  let viaSymlink = false;
+  try {
+    viaSymlink = fs.lstatSync(resolvedPath).isSymbolicLink();
+  } catch (e) {
+    /* not fatal - just means we can't report whether this specific path is a symlink */
+  }
+
+  if (!fs.existsSync(resolvedPath)) {
+    return { healthy: false, reason: "missing", detail: resolvedPath, viaSymlink };
+  }
+
+  // A real, live smoke test - existence alone isn't sufficient proof it
+  // actually runs, which is exactly what made "the 2 sec problem" so
+  // confusing (the file existed the whole time, from most vantage points).
+  // Deliberately a short retry budget here (not runClaudeCommand's usual
+  // 20x900ms=~18s), so a genuine problem is reported within a few seconds
+  // at startup rather than making every normal launch feel slow.
+  try {
+    const output = await runClaudeCommand(resolvedPath, ["--version"], { env: process.env }, 3, 500);
+    if (CMD_NOT_RECOGNIZED_RE.test(output)) {
+      return { healthy: false, reason: "not-recognized", detail: resolvedPath, viaSymlink };
+    }
+    return { healthy: true, resolvedPath, viaSymlink };
+  } catch (e) {
+    return { healthy: false, reason: "spawn-failed", detail: e.message, viaSymlink };
+  }
+}
+
+ipcMain.handle("check-claude-executable-health", () => checkClaudeExecutableHealth());
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,

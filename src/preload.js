@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("api", {
 
   checkInterferingServices: () => ipcRenderer.invoke("check-interfering-services"),
   disableInterferingService: (serviceName) => ipcRenderer.invoke("disable-interfering-service", { serviceName }),
+  checkClaudeExecutableHealth: () => ipcRenderer.invoke("check-claude-executable-health"),
 
   onTerminalData: (callback) => {
     ipcRenderer.on("terminal-data", (event, payload) => callback(payload));

@@ -105,7 +105,12 @@ html, body {
    (red, not the neutral update-nudge look above) since this is the
    difference between the app working reliably and failing with a
    confusing, unrelated-looking error. */
-#interfering-service-warning {
+/* Shared by #interfering-service-warning and #claude-cli-warning - both
+   are the same "something will keep this app from working, here's what
+   and how to fix it" startup banner shape, just for different underlying
+   checks. */
+#interfering-service-warning,
+#claude-cli-warning {
   margin: 0 16px 12px;
   background: rgba(220, 38, 38, 0.14);
   border: 1px solid rgba(220, 38, 38, 0.5);
@@ -114,17 +119,20 @@ html, body {
   padding: 10px 12px;
   border-radius: 8px;
 }
-#interfering-service-warning .warning-title {
+#interfering-service-warning .warning-title,
+#claude-cli-warning .warning-title {
   font-weight: 700;
   color: #fca5a5;
   margin-bottom: 4px;
 }
-#interfering-service-warning .warning-body {
+#interfering-service-warning .warning-body,
+#claude-cli-warning .warning-body {
   color: var(--text-muted);
   margin-bottom: 8px;
   line-height: 1.4;
 }
-#interfering-service-warning button {
+#interfering-service-warning button,
+#claude-cli-warning button {
   background: #dc2626;
   border: none;
   color: white;
@@ -135,9 +143,12 @@ html, body {
   cursor: pointer;
   margin-right: 6px;
 }
-#interfering-service-warning button:hover { filter: brightness(1.1); }
-#interfering-service-warning button:disabled { cursor: default; filter: brightness(0.85); }
-#interfering-service-warning .dismiss-btn {
+#interfering-service-warning button:hover,
+#claude-cli-warning button:hover { filter: brightness(1.1); }
+#interfering-service-warning button:disabled,
+#claude-cli-warning button:disabled { cursor: default; filter: brightness(0.85); }
+#interfering-service-warning .dismiss-btn,
+#claude-cli-warning .dismiss-btn {
   background: transparent;
   color: var(--text-muted);
   border: 1px solid var(--border);

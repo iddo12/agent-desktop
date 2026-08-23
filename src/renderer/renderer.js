@@ -1833,3 +1833,79 @@ async function checkForInterferingServices() {
 }
 
 checkForInterferingServices();
+
+// Startup health check for "the 2 sec problem" (see CLAUDE.md's own
+// top-of-file section by that name) and anything else that would keep the
+// `claude` CLI from actually launching - added 2026-08-23 after that exact
+// failure cost a multi-hour live debugging session before being pinned
+// down, precisely because nothing surfaced it until an agent was already
+// being used. This runs a real `claude --version` at startup (main.js's
+// checkClaudeExecutableHealth()) rather than just checking that a file
+// exists, since a file existing was never the reliable signal here.
+const claudeCliWarningEl = document.getElementById("claude-cli-warning");
+
+function claudeCliWarningMessage(result) {
+  if (result.viaSymlink) {
+    return (
+      "The resolved claude.cmd is a symlink into Claude Desktop's own package storage, and it isn't " +
+      "responding right now - this is exactly \"the 2 sec problem\" (see CLAUDE.md or the README's " +
+      "troubleshooting section). Run this in PowerShell to confirm: " +
+      "Get-Item \"$env:APPDATA\\npm\\claude.cmd\" | Select-Object LinkType, Target"
+    );
+  }
+  if (result.reason === "missing" || result.reason === "not-resolved") {
+    return (
+      "Couldn't find the Claude Code CLI" + (result.detail ? ` (looked for it at: ${result.detail})` : "") +
+      ". Make sure Claude Code is installed and you've signed in at least once, then restart Agent Desktop."
+    );
+  }
+  return (
+    "Claude Code CLI was found but didn't respond to a test launch" +
+    (result.detail ? ` (${result.detail})` : "") +
+    ". This may be transient - try Retry below, or check the README's troubleshooting section if it keeps happening."
+  );
+}
+
+async function checkClaudeCliHealth() {
+  let result;
+  try {
+    result = await window.api.checkClaudeExecutableHealth();
+  } catch (e) {
+    return; // best-effort - never block the app opening over this check itself failing
+  }
+  if (!result || result.healthy) {
+    claudeCliWarningEl.classList.add("hidden");
+    return;
+  }
+
+  claudeCliWarningEl.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.className = "warning-title";
+  title.textContent = "⚠ Claude Code CLI isn't launching";
+  claudeCliWarningEl.appendChild(title);
+
+  const body = document.createElement("div");
+  body.className = "warning-body";
+  body.textContent = claudeCliWarningMessage(result);
+  claudeCliWarningEl.appendChild(body);
+
+  const retryBtn = document.createElement("button");
+  retryBtn.textContent = "Retry";
+  retryBtn.addEventListener("click", async () => {
+    retryBtn.disabled = true;
+    retryBtn.textContent = "Checking...";
+    await checkClaudeCliHealth();
+  });
+  claudeCliWarningEl.appendChild(retryBtn);
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "dismiss-btn";
+  dismissBtn.textContent = "Dismiss for now";
+  dismissBtn.addEventListener("click", () => claudeCliWarningEl.classList.add("hidden"));
+  claudeCliWarningEl.appendChild(dismissBtn);
+
+  claudeCliWarningEl.classList.remove("hidden");
+}
+
+checkClaudeCliHealth();
