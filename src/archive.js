@@ -386,6 +386,37 @@ function readArchivedDay(agentPath, dateKey) {
 // ever see a partial picture - bursts from other agents or other sessions
 // on this machine wouldn't register. Tracked in the same account-wide scan
 // as the message counts, for the same reason.
+// Real, Anthropic-reported rate-limit usage, read from the cache file
+// src/statusline.cjs writes every time ANY interactive `claude` session on
+// this machine (this app's own, or a terminal Iddo opens himself) receives
+// an API response - see that file's own comment for why this is
+// account-wide by design, and CLAUDE.md's "Real design flaw found and fixed"
+// section for why the message-count heuristic below has to stay account-wide
+// too. Returns nulls if the statusLine was never installed, has never fired
+// yet (e.g. right after a fresh install, before any session has completed a
+// turn), or - deliberately - if the window it describes has already reset
+// (`resets_at` in the past), since a stale figure from an expired window is
+// actively misleading, not just imprecise.
+function getConfirmedRateLimits() {
+  const cachePath = path.join(os.homedir(), ".claude", "agent-desktop-rate-limits.json");
+  let cache;
+  try {
+    cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+  } catch (e) {
+    return { fiveHour: null, sevenDay: null };
+  }
+  const nowSec = Date.now() / 1000;
+  const fiveHour =
+    typeof cache.fiveHourUsedPct === "number" && !(cache.fiveHourResetsAt && cache.fiveHourResetsAt < nowSec)
+      ? { usedPct: cache.fiveHourUsedPct, resetsAt: cache.fiveHourResetsAt || null }
+      : null;
+  const sevenDay =
+    typeof cache.sevenDayUsedPct === "number" && !(cache.sevenDayResetsAt && cache.sevenDayResetsAt < nowSec)
+      ? { usedPct: cache.sevenDayUsedPct, resetsAt: cache.sevenDayResetsAt || null }
+      : null;
+  return { fiveHour, sevenDay };
+}
+
 function getUsageWindows() {
   const now = Date.now();
   const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
@@ -401,7 +432,13 @@ function getUsageWindows() {
   try {
     projectDirs = fs.readdirSync(projectsRoot, { withFileTypes: true }).filter((e) => e.isDirectory());
   } catch (e) {
-    return { messagesInLast5h: 0, messagesInLast7d: 0, planTokenBufferPct: null };
+    return {
+      messagesInLast5h: 0,
+      messagesInLast7d: 0,
+      planTokenBufferPct: null,
+      fiveHourConfirmed: null,
+      sevenDayConfirmed: null,
+    };
   }
 
   for (const projectDir of projectDirs) {
@@ -451,6 +488,8 @@ function getUsageWindows() {
     }
   }
 
+  const confirmed = getConfirmedRateLimits();
+
   return {
     messagesInLast5h,
     messagesInLast7d,
@@ -460,6 +499,13 @@ function getUsageWindows() {
         : null,
     planTokenBufferRemaining: latestPlanTokens ? latestPlanTokens.remaining : null,
     planTokenBufferCeiling: maxPlanTokensSeen || null,
+    // Real Anthropic-reported figures when available (see
+    // getConfirmedRateLimits() above) - renderer.js prefers these over the
+    // messagesInLast5h/7d heuristic whenever present, since they're an
+    // actual reported percentage rather than an estimate against a
+    // community-sourced message-count guess.
+    fiveHourConfirmed: confirmed.fiveHour,
+    sevenDayConfirmed: confirmed.sevenDay,
   };
 }
 

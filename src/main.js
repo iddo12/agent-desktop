@@ -50,6 +50,54 @@ function resolveNpmExecutable() {
   return "C:\\Program Files\\nodejs\\npm.cmd";
 }
 
+// npm-global claude.cmd calls out to plain `node` for various things, but
+// this app's own launch context has repeatedly proven that bare-command PATH
+// lookups (`where`, a bare `node`/`cmd` invocation via child_process) are not
+// reliable here - same reasoning as resolveClaudeExecutable() above, same
+// resolve-then-hardcoded-fallback pattern.
+function resolveNodeExecutable() {
+  try {
+    const found = execSync("where node.exe", { encoding: "utf-8" }).split("\n")[0].trim();
+    if (found) return found;
+  } catch (e) {
+    /* PATH lookup unavailable in this process's environment - fall back below */
+  }
+  return "C:\\Program Files\\nodejs\\node.exe";
+}
+
+// --------------------------------------------------- Rate-limit statusLine --
+//
+// Installs src/statusline.cjs as Iddo's global Claude Code statusLine, once,
+// on first launch after this feature shipped - see that file's own comment
+// for the full design (it both renders a real status line for any
+// interactive `claude` session and feeds Agent Desktop's own rate-limit
+// badges real, Anthropic-reported figures instead of the message-count
+// heuristic archive.js otherwise has to fall back to). Deliberately
+// idempotent and non-destructive: if Iddo (or a plugin) already has ANY
+// statusLine configured, this leaves it completely alone rather than
+// clobbering something he may have set up himself - the usage badges simply
+// keep using the heuristic in that case, same as before this feature existed.
+function ensureRateLimitStatusLine() {
+  const settingsPath = path.join(app.getPath("home"), ".claude", "settings.json");
+  try {
+    let settings = {};
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    }
+    if (settings.statusLine) return;
+    settings.statusLine = {
+      type: "command",
+      command: `"${resolveNodeExecutable()}" "${path.join(__dirname, "statusline.cjs")}"`,
+    };
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  } catch (e) {
+    // Non-critical - the usage badges just keep using the heuristic if this
+    // never gets installed (e.g. ~/.claude/settings.json is malformed JSON
+    // Iddo would want to know about some other way, not have silently
+    // overwritten here).
+  }
+}
+
 // ---------------------------------------------------- Claude Code updates --
 //
 // Agent Desktop depends on a completely separate Claude Code CLI install
@@ -275,7 +323,10 @@ if (!gotSingleInstanceLock) {
       mainWindow.focus();
     }
   });
-  app.whenReady().then(createWindow);
+  app.whenReady().then(() => {
+    createWindow();
+    ensureRateLimitStatusLine();
+  });
 }
 
 app.on("window-all-closed", () => {

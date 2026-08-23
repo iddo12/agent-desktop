@@ -771,33 +771,69 @@ async function refreshUsageWindows() {
     planTokensRemainingEl.classList.add("hidden");
   }
 
-  const fivePct = Math.min(100, Math.round((windows.messagesInLast5h / PRO_FIVE_HOUR_MESSAGE_ESTIMATE) * 100));
-  fiveHourUsageEl.textContent = `${windows.messagesInLast5h} msgs (~${fivePct}%, 5h)`;
-  fiveHourUsageEl.title =
-    `${windows.messagesInLast5h} messages sent across ALL Claude Code sessions on this machine in the trailing 5 hours, ` +
-    `against an unofficial community estimate of ~${PRO_FIVE_HOUR_MESSAGE_ESTIMATE} messages/5h for Claude Pro. ` +
-    `Not published by Anthropic and known to vary by message complexity/model/demand - a rough compass, not a precise reading. ` +
-    `Doesn't include claude.ai web or Cowork usage, which draw from the same account-wide pool.`;
-  fiveHourUsageEl.classList.remove("hidden", "warning", "critical");
-  if (fivePct >= 90) fiveHourUsageEl.classList.add("critical");
-  else if (fivePct >= 70) fiveHourUsageEl.classList.add("warning");
+  // Prefer windows.fiveHourConfirmed/sevenDayConfirmed - Anthropic's own
+  // reported rate_limits.*.used_percentage, sourced via the statusLine hook
+  // ensureRateLimitStatusLine() installs (see main.js and statusline.cjs) -
+  // over the message-count heuristic below. Falls back to the heuristic
+  // whenever confirmed data isn't available yet: right after this feature's
+  // first install (no interactive session has completed a turn yet to
+  // populate the cache), on a plan the rate_limits field isn't reported for,
+  // or once a window has genuinely reset (statusline.cjs's cache write and
+  // archive.js's getConfirmedRateLimits() both treat an elapsed resets_at as
+  // "no data," not stale data, since a leftover pre-reset percentage would
+  // be actively wrong, not just imprecise).
+  if (windows.fiveHourConfirmed) {
+    const pct = Math.round(windows.fiveHourConfirmed.usedPct);
+    fiveHourUsageEl.textContent = `${pct}% (5h)`;
+    fiveHourUsageEl.title =
+      `${pct}% of your 5-hour rate limit window used, reported directly by Anthropic (rate_limits.five_hour), ` +
+      `not estimated. Resets ${windows.fiveHourConfirmed.resetsAt ? new Date(windows.fiveHourConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}.`;
+    fiveHourUsageEl.classList.remove("hidden", "warning", "critical");
+    if (pct >= 90) fiveHourUsageEl.classList.add("critical");
+    else if (pct >= 70) fiveHourUsageEl.classList.add("warning");
+  } else {
+    const fivePct = Math.min(100, Math.round((windows.messagesInLast5h / PRO_FIVE_HOUR_MESSAGE_ESTIMATE) * 100));
+    fiveHourUsageEl.textContent = `${windows.messagesInLast5h} msgs (~${fivePct}%, 5h)`;
+    fiveHourUsageEl.title =
+      `${windows.messagesInLast5h} messages sent across ALL Claude Code sessions on this machine in the trailing 5 hours, ` +
+      `against an unofficial community estimate of ~${PRO_FIVE_HOUR_MESSAGE_ESTIMATE} messages/5h for Claude Pro. ` +
+      `Not published by Anthropic and known to vary by message complexity/model/demand - a rough compass, not a precise reading. ` +
+      `This estimate is used because no confirmed rate_limits figure is available yet (no interactive Claude Code ` +
+      `session has completed a turn since the statusLine integration was installed, or this account/plan doesn't report it).`;
+    fiveHourUsageEl.classList.remove("hidden", "warning", "critical");
+    if (fivePct >= 90) fiveHourUsageEl.classList.add("critical");
+    else if (fivePct >= 70) fiveHourUsageEl.classList.add("warning");
+  }
 
-  // Deliberately no percentage against Claude's real weekly cap - it's
-  // measured in "active compute hours," not messages, and there's no
-  // reliable way to convert between the two (see getUsageWindows() in
-  // archive.js). A bare count had no context to judge it by though (the user's
-  // reasonable follow-up: "I don't have any indication about the 7 day
-  // number") - a daily average, computed from the same real count, gives a
-  // genuine reference point without inventing a ceiling to compare against.
   const dailyAvg = (windows.messagesInLast7d / 7).toFixed(1);
-  weeklyUsageEl.textContent = `${windows.messagesInLast7d} msgs (7d, ~${dailyAvg}/day)`;
-  weeklyUsageEl.title =
-    `${windows.messagesInLast7d} messages sent across ALL Claude Code sessions on this machine in the trailing 7 days ` +
-    `(~${dailyAvg}/day average). No percentage shown against a ceiling - Claude's real weekly cap is measured in ` +
-    `"active compute hours," not messages, and there's no reliable way to convert between the two, so a percentage ` +
-    `would be a guess dressed up as a number. This is a real, comprehensive count - just not directly comparable to ` +
-    `the actual weekly limit.`;
-  weeklyUsageEl.classList.remove("hidden", "warning", "critical");
+  if (windows.sevenDayConfirmed) {
+    const pct = Math.round(windows.sevenDayConfirmed.usedPct);
+    weeklyUsageEl.textContent = `${pct}% (7d)`;
+    weeklyUsageEl.title =
+      `${pct}% of your weekly rate limit used, reported directly by Anthropic (rate_limits.seven_day), not estimated. ` +
+      `Resets ${windows.sevenDayConfirmed.resetsAt ? new Date(windows.sevenDayConfirmed.resetsAt * 1000).toLocaleString() : "at an unknown time"}. ` +
+      `For reference, ${windows.messagesInLast7d} messages sent across all sessions on this machine in the trailing 7 days (~${dailyAvg}/day).`;
+    weeklyUsageEl.classList.remove("hidden", "warning", "critical");
+    if (pct >= 90) weeklyUsageEl.classList.add("critical");
+    else if (pct >= 70) weeklyUsageEl.classList.add("warning");
+  } else {
+    // Deliberately no percentage against Claude's real weekly cap in this
+    // fallback path - it's measured in "active compute hours," not messages,
+    // and there's no reliable way to convert between the two (see
+    // getUsageWindows() in archive.js). A bare count had no context to judge
+    // it by though (the user's reasonable follow-up: "I don't have any
+    // indication about the 7 day number") - a daily average, computed from
+    // the same real count, gives a genuine reference point without
+    // inventing a ceiling to compare against.
+    weeklyUsageEl.textContent = `${windows.messagesInLast7d} msgs (7d, ~${dailyAvg}/day)`;
+    weeklyUsageEl.title =
+      `${windows.messagesInLast7d} messages sent across ALL Claude Code sessions on this machine in the trailing 7 days ` +
+      `(~${dailyAvg}/day average). No percentage shown against a ceiling - Claude's real weekly cap is measured in ` +
+      `"active compute hours," not messages, and there's no reliable way to convert between the two, so a percentage ` +
+      `would be a guess dressed up as a number. This fallback is used because no confirmed rate_limits figure is ` +
+      `available yet - see the 5h badge's tooltip for why.`;
+    weeklyUsageEl.classList.remove("hidden", "warning", "critical");
+  }
 }
 
 // Some genuinely long waits aren't the agent "thinking" - Claude Code's own
