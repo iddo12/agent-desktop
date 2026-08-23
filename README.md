@@ -55,7 +55,9 @@ Selecting the agent starts a real `claude` session with that folder as its worki
 - Only one Agent Desktop window should run at a time per machine (enforced via Electron's single-instance lock) — a second launch just focuses the first.
 - Deleting an agent shows a mandatory 30-second countdown before the delete button becomes clickable. This isn't just friction for its own sake: `claude --bg` dispatch spawns a separate, longer-lived daemon helper process that can keep a handle on the agent's folder for a while after the agent session itself is stopped, and deleting too soon can otherwise fail with a Windows "resource busy" error. The countdown gives that daemon time to release it.
 
-## Troubleshooting: "File not found" / "is not recognized" launching an agent
+## Troubleshooting: "File not found" / "is not recognized" launching an agent ("the 2 sec problem")
+
+**Check this one first** if an agent won't open or respond — it's the most common cause and the fastest to rule in or out.
 
 If opening or messaging an agent fails with an error mentioning `claude.cmd`
 — e.g. `'C:\Users\<you>\AppData\Roaming\npm\claude.cmd' is not recognized as
