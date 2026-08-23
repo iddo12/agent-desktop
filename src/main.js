@@ -710,10 +710,54 @@ async function runClaudeCommandOnce(shell, args, options) {
 // condition is briefly making a genuinely-present file unresolvable,
 // giving it several more seconds to clear resolves it without needing to
 // have pinned down every possible cause first.
-async function runClaudeCommand(shell, args, options, attempts = 12, delayMs = 700) {
+// Log path for logCmdNotRecognized() below - deliberately NOT one of the
+// "remove after the bug's confirmed fixed" temporary logs this file's own
+// history mentions elsewhere. This failure class has now recurred (2026-08-
+// 23, live, on Iddo's real machine) despite two earlier rounds that each
+// looked like the real fix at the time (DISABLE_AUTOUPDATER, then the
+// 5->12 attempt widening) - clear sign the root cause isn't actually
+// understood yet, just mitigated. Keeping this logging permanently means
+// the NEXT occurrence has real evidence to diagnose from instead of
+// starting over from a screenshot and a guess.
+const CMD_NOT_RECOGNIZED_LOG_PATH = path.join(app.getPath("userData"), "cmd-not-recognized.log");
+
+function logCmdNotRecognized(attemptNum, shell) {
+  try {
+    let npmClaudeExists = "unknown";
+    try {
+      npmClaudeExists = String(fs.existsSync(shell));
+    } catch (e) {}
+    const line = `${new Date().toISOString()} attempt=${attemptNum} shell=${shell} existsOnDisk=${npmClaudeExists}\n`;
+    fs.appendFileSync(CMD_NOT_RECOGNIZED_LOG_PATH, line);
+  } catch (e) {
+    // Logging itself must never be why a real attempt fails.
+  }
+}
+
+// Widened again 2026-08-23 (12x700ms=8.4s -> 20x900ms=18s) after Iddo hit
+// this exact hard failure live - "is not recognized" persisted across
+// EVERY one of the previous 12 attempts, a full 8.4 seconds, meaning
+// whatever transient condition this is can outlast that budget. Checked
+// directly afterward: the npm-global install files were untouched for 21+
+// hours (ruling out an in-progress auto-updater swap for THIS specific
+// occurrence, despite that being the confirmed cause of an earlier round of
+// this same symptom) and 8 back-to-back plain invocations of claude.cmd all
+// succeeded normally minutes later - so whatever this was had already
+// cleared by the time it could be inspected, consistent with something
+// transient but NOT necessarily the same transient cause as before. Rather
+// than chase an already-cleared window further, widened the budget (a
+// blunt but proven-effective hedge for this exact failure class) and added
+// logCmdNotRecognized() above so a future occurrence leaves real evidence -
+// specifically, whether the file existed on disk at the moment of failure -
+// instead of requiring another live-reproduction hunt.
+async function runClaudeCommand(shell, args, options, attempts = 20, delayMs = 900) {
   for (let i = 0; i < attempts; i++) {
     const output = await runClaudeCommandOnce(shell, args, options);
-    if (!CMD_NOT_RECOGNIZED_RE.test(output) || i === attempts - 1) {
+    if (!CMD_NOT_RECOGNIZED_RE.test(output)) {
+      return output;
+    }
+    logCmdNotRecognized(i, shell);
+    if (i === attempts - 1) {
       return output;
     }
     await new Promise((resolve) => setTimeout(resolve, delayMs));
