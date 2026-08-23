@@ -1442,52 +1442,45 @@ sendInputBtn.addEventListener("click", sendChatInput);
 //    timing, an extra source of flakiness worth avoiding entirely rather
 //    than tuning around.
 //
-// Fix: use `/voice tap` explicitly instead of bare `/voice` - this SETS
-// tap mode outright rather than blindly toggling, so it can't accidentally
-// disable dictation the way bare "/voice" could. Tap mode
-// (https://code.claude.com/docs/en/voice-dictation#tap-to-record-and-send)
-// needs no held-key simulation at all: "tap once to start... tap again to
-// stop," with zero warmup - a single space keystroke each way, which maps
-// directly onto this button's existing click-to-toggle UI with no interval
-// needed. The CLI auto-submits the transcript once stopped (3+ words), so
-// there's nothing further for this button to do once the second tap goes
-// out.
+// Round 2, still 2026-08-23: switched the fix above to `/voice tap` because
+// it needs no held-key simulation at all - live-verified end to end through
+// this app's own driver skill (real click, real xterm buffer read), and it
+// genuinely worked there. But Iddo tested the real button afterward and
+// found clicking alone did nothing, while clicking AND ALSO physically
+// holding his own Space bar worked. That's the signature of tap mode never
+// actually landing in his real session (root cause not pinned down - some
+// timing/environment difference between the driver's test session and his
+// real one) and dictation silently sitting in its CLI-default HOLD mode
+// instead, where a single tap is documented to do exactly nothing useful
+// ("A single Space tap still types a space, since hold detection only
+// triggers on rapid repeat") while a REAL held key works precisely because
+// hold-mode detection is pattern-based on repeat timing, which only a
+// genuine physical hold reliably produces.
 //
-// A second round of live testing (same night, via this app's own driver
-// skill against the real running app) found one more wrong assumption on
-// top of the "bare /voice toggles" one above: NEITHER "/voice" NOR
-// "/voice tap" self-executes just by being typed. Both need a real Enter to
-// actually select/run them from the CLI's own live autocomplete dropdown -
-// directly contradicting the original 2026-08-21 finding that Enter always
-// turns "/voice" into a literal chat message instead. That finding was
-// evidently true for whatever CLI version was live back then and isn't true
-// for this one (v2.1.241) - re-tested it directly: typing "/voice tap" then
-// Enter as the very first interaction of a session DOES get sent as a
-// literal chat message (confirmed live - the agent visibly started a real
-// turn on it), but the exact same "/voice tap" + Enter DOES correctly
-// execute once a prior bare "/voice" + Enter has happened first in that
-// session. Rather than chase why, built the sequence around it being safe
-// regardless: bare "/voice" TOGGLES (unpredictable net effect on its own)
-// but "/voice tap" SETS the mode outright, so sending both in sequence -
-// "/voice"+Enter then "/voice tap"+Enter - deterministically ends in tap
-// mode enabled no matter what state dictation started in, since the second,
-// mode-setting command always wins. Live-verified this exact 4-step
-// sequence end to end through the real app: it produced the CLI's own
-// genuine "● REC · tap to send" indicator on the first tap, and "No speech
-// detected" (the documented response to real captured silence, not an
-// error) on the second - full pipeline confirmed working, real audio
-// round-tripped to Anthropic's transcription service and back.
+// Rather than keep chasing why tap mode wasn't landing, rebuilt around
+// hold mode instead - the CLI's own default, and the one just proven to
+// actually work in Iddo's hands. This also happens to be much closer to
+// the very first (2026-08-21) design's instinct that a rapid-repeat
+// interval could stand in for a real held key - that instinct was right,
+// it was just undermined by the two real bugs fixed earlier tonight (no
+// Enter ever sent, and blindly toggling instead of setting the mode).
+// Combined with those fixes, simulating the hold via interval should now
+// actually work.
 const voiceInputBtn = document.getElementById("voice-input-btn");
-// Delay between each step below - gives the CLI's own live autocomplete
+// Delay between each arm step below - gives the CLI's own live autocomplete
 // matcher a moment to catch up before the next input lands, rather than
 // racing consecutive writes into the same pty.
 const VOICE_STEP_DELAY_MS = 300;
+// Matches a physical keyboard's typical OS auto-repeat rate - what hold
+// mode's own detection is watching for ("rapid key-repeat events").
+const VOICE_HOLD_REPEAT_MS = 40;
 // Safety net - if Iddo forgets to click stop, auto-stop rather than leaving
 // a live mic recording into a background pty indefinitely. Recording also
 // auto-stops after 15s of silence or 2 minutes per the CLI's own docs, so
 // this is a backstop on top of that, not the primary limit.
 const VOICE_MAX_HOLD_MS = 90000;
 let voiceHeld = false;
+let voiceHoldInterval = null;
 let voiceMaxHoldTimer = null;
 let voiceArmToken = 0; // bumped on every stop, so a stale delayed step from a prior click can't fire late
 
@@ -1501,9 +1494,9 @@ function sleep(ms) {
 // both firing well under the old arm-delay, so the simulated held-key
 // signal never started. A hold-for-the-entire-sentence gesture also isn't
 // what a mic button trains anyone to expect - every mainstream voice-input
-// UI (Google, Siri, WhatsApp) is click-to-start/click-to-stop. Switched to
-// that model, which (per the tap-mode rebuild above) now also happens to
-// be the objectively more correct way to drive the CLI's own tap mode.
+// UI (Google, Siri, WhatsApp) is click-to-start/click-to-stop. Kept that
+// model - the button still only needs one click to start, one to stop; it's
+// the simulated key underneath that's now a held repeat instead of a tap.
 async function startVoiceHold() {
   if (!activeAgentPath || voiceHeld) return;
   voiceHeld = true;
@@ -1517,19 +1510,32 @@ async function startVoiceHold() {
   // waiting on anymore.
   const stillArming = () => voiceHeld && token === voiceArmToken;
 
+  // Bare "/voice" toggles (unpredictable alone); "/voice hold" SETS hold
+  // mode outright. Sending both in sequence deterministically ends in hold
+  // mode enabled regardless of starting state, same reasoning as the tap-
+  // mode version above, just aimed at the mode that's actually proven to
+  // work. Both need a real Enter to execute (see the long comment above).
   window.api.sendInput(agentPath, "/voice");
   await sleep(VOICE_STEP_DELAY_MS);
   if (!stillArming()) return;
   window.api.sendInput(agentPath, "\r");
   await sleep(VOICE_STEP_DELAY_MS);
   if (!stillArming()) return;
-  window.api.sendInput(agentPath, "/voice tap");
+  window.api.sendInput(agentPath, "/voice hold");
   await sleep(VOICE_STEP_DELAY_MS);
   if (!stillArming()) return;
   window.api.sendInput(agentPath, "\r");
   await sleep(VOICE_STEP_DELAY_MS);
   if (!stillArming()) return;
-  window.api.sendInput(agentPath, " "); // first tap - starts recording
+  // Simulated held key - repeated space bytes at roughly OS auto-repeat
+  // rate, for as long as the button stays toggled on. Hold mode's own
+  // warmup consumes the first couple of these (documented: "The first
+  // couple of key-repeat characters type into the input during warmup and
+  // are removed automatically when recording activates"), so a short burst
+  // before the button is clicked again is expected and harmless.
+  voiceHoldInterval = setInterval(() => {
+    window.api.sendInput(agentPath, " ");
+  }, VOICE_HOLD_REPEAT_MS);
 }
 
 function stopVoiceHold() {
@@ -1537,9 +1543,21 @@ function stopVoiceHold() {
   voiceHeld = false;
   voiceArmToken++;
   voiceInputBtn.classList.remove("recording");
-  // Second tap - stops recording and auto-submits if the transcript is 3+
-  // words (documented behavior, nothing more for this button to do).
-  if (activeAgentPath) window.api.sendInput(activeAgentPath, " ");
+  if (voiceHoldInterval) {
+    clearInterval(voiceHoldInterval);
+    voiceHoldInterval = null;
+  }
+  // Releasing the held key stops recording and finalizes the transcript
+  // into the prompt, but hold mode does NOT auto-submit by default (unlike
+  // tap mode) - "Claude Code inserts the transcript and waits for you to
+  // press Enter" unless autoSubmit is configured, which nothing here sets.
+  // A brief pause lets the CLI actually finalize the transcript before
+  // Enter lands, rather than submitting whatever was in the prompt a
+  // moment before recording stopped.
+  if (activeAgentPath) {
+    const agentPath = activeAgentPath;
+    setTimeout(() => window.api.sendInput(agentPath, "\r"), 400);
+  }
   if (voiceMaxHoldTimer) {
     clearTimeout(voiceMaxHoldTimer);
     voiceMaxHoldTimer = null;
