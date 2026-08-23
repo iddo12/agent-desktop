@@ -2,7 +2,7 @@
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 const pty = require("node-pty");
 const { listAgents, createAgent, updateAgent, deleteAgent } = require("./agents");
 const { syncArchive, listArchivedDays, readArchivedDay, encodeProjectPath, getLatestUsage, getUsageWindows, getLiveTranscriptBlocks } = require("./archive");
@@ -476,6 +476,8 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(() => {
     createWindow();
     ensureRateLimitStatusLine();
+    reapOrphanedBackgroundAgentProcesses();
+    setInterval(reapOrphanedBackgroundAgentProcesses, REAPER_INTERVAL_MS);
   });
 }
 
@@ -1009,6 +1011,119 @@ async function stopBackgroundAgentForCwd(sessionCwd) {
     /* best-effort - a stray still-running background process is not worth failing the delete over */
   }
 }
+
+// Diagnosed live, 2026-08-23: a `claude --bg` dispatch's own "daemon run"
+// helper process can die without ever cleaning up the "--bg-pty-host"
+// wrapper (and that wrapper's own inner --session-id process) it spawned.
+// Windows does not kill a process's children when it dies unless it
+// explicitly used a Job Object, and nothing - not this app, not the CLI
+// itself - ever re-checks these once dispatched. Confirmed live: 8 such
+// orphaned pairs (16 processes, ~5GB of RAM) were found sitting idle for
+// over an hour, every one with a dead parent daemon, none of them having
+// ever written a single line to a transcript file - this matches, and now
+// gives a confirmed mechanism for, the "several orphaned background agents
+// accumulated" observation from the 2026-08-21 backend-rewrite investigation
+// above, which was circumstantial at the time.
+//
+// A pty-host is only treated as orphaned - and only killed - when BOTH:
+// (1) its own parent PID is no longer running, AND (2) `claude agents --json
+// --all` does not list its session id as still known to the CLI. Either
+// signal alone risks a false positive (a legitimately reparented process, or
+// a momentary gap in `agents --json`); both together is the conservative bar
+// for something to actually be unreachable dead weight worth killing.
+//
+// $ProgressPreference='SilentlyContinue' avoids a real, confirmed gotcha:
+// Get-CimInstance's first-use module load writes a "Preparing modules..."
+// progress record that PowerShell serializes as CLIXML onto the output
+// stream when invoked non-interactively like this, corrupting the JSON.
+function runPowerShellJson(script) {
+  const wrapped = `$ProgressPreference='SilentlyContinue'; ${script}`;
+  const encoded = Buffer.from(wrapped, "utf16le").toString("base64");
+  // execFileSync (argument array, no shell) rather than execSync (shell
+  // string) - the -EncodedCommand payload is base64 so it can't contain
+  // shell metacharacters either way, but this avoids a shell entirely
+  // rather than relying on that being true forever.
+  const out = execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+    encoding: "utf-8",
+    maxBuffer: 20 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const parsed = out.trim() ? JSON.parse(out) : [];
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+function listClaudeProcessesWindows() {
+  try {
+    return runPowerShellJson("Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress");
+  } catch (e) {
+    return [];
+  }
+}
+
+// process.kill(pid, 0) throws ESRCH if the pid is gone, but throws EPERM
+// (not ESRCH) if the pid exists and this process just lacks permission to
+// signal it - EPERM therefore still means "alive," not "unreachable."
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+const REAPER_LOG_PATH = path.join(app.getPath("userData"), "orphan-reaper.log");
+function logReaperAction(line) {
+  try {
+    fs.appendFileSync(REAPER_LOG_PATH, `${new Date().toISOString()} ${line}\n`);
+  } catch (e) {
+    /* logging itself must never be why the reaper fails */
+  }
+}
+
+async function reapOrphanedBackgroundAgentProcesses() {
+  if (process.platform !== "win32") return;
+  try {
+    const procs = listClaudeProcessesWindows();
+    const pidsPresent = new Set(procs.map((p) => p.ProcessId));
+    const ptyHosts = procs.filter((p) => (p.CommandLine || "").includes("--bg-pty-host"));
+    if (ptyHosts.length === 0) return;
+
+    const shell = resolveClaudeExecutable();
+    const spawnEnv = { ...process.env, ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
+    const knownAgents = await listBackgroundAgents(shell, spawnEnv);
+    const knownIds = new Set(knownAgents.map((a) => a.id));
+
+    for (const host of ptyHosts) {
+      const parentAlive = pidsPresent.has(host.ParentProcessId) || isPidAlive(host.ParentProcessId);
+      if (parentAlive) continue; // still owned by a live daemon - leave it alone
+
+      const idMatch = (host.CommandLine || "").match(/--session-id\s+([a-f0-9-]+)/i);
+      const sessionId = idMatch ? idMatch[1] : null;
+      if (sessionId && knownIds.has(sessionId)) continue; // CLI still knows it - don't touch it
+
+      const children = procs.filter((p) => p.ParentProcessId === host.ProcessId);
+      const toKill = [host.ProcessId, ...children.map((c) => c.ProcessId)];
+      for (const pid of toKill) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch (e) {
+          /* already gone - fine */
+        }
+      }
+      logReaperAction(`killed orphaned pty-host pid=${host.ProcessId} sessionId=${sessionId || "unknown"} deadParentPid=${host.ParentProcessId} children=[${children.map((c) => c.ProcessId).join(",")}]`);
+    }
+  } catch (e) {
+    logReaperAction(`reaper error: ${e.message}`);
+  }
+}
+
+// Run once at startup (catches orphans left over from a prior app run or
+// crash) and then on a slow periodic sweep while the app stays open - this
+// isn't chasing a fast-moving condition, a daemon dying mid-session is rare,
+// so 30 minutes is plenty rather than adding startup-only blind spots for a
+// long-running window.
+const REAPER_INTERVAL_MS = 30 * 60 * 1000;
 // --- end native background-agent backend helpers ---------------------------
 // Shared by proc.onExit() below (the normal path) and the terminal-input/
 // terminal-resize catch blocks further down (the "we only found out the
