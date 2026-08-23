@@ -158,6 +158,55 @@ function ensureRateLimitStatusLine() {
   }
 }
 
+// Added 2026-08-23, asked for directly: Iddo wants every agent this app
+// dispatches to be reachable from his phone (or any other device) without
+// a manual per-agent step. A background agent, on its own, never registers
+// with Anthropic's servers - it's a purely local process, invisible to
+// claude.ai/code, the Claude mobile app, or this Desktop app's own Code
+// tab, until something explicitly runs `/remote-control` inside it (real,
+// live-confirmed: Iddo's own screenshot of Claude Desktop's Code tab showed
+// only the Security project, nothing for Testing agent or LensVid, despite
+// both running the whole time). `remoteControlAtStartup: true` in the
+// user-level settings.json is the documented, official way to make every
+// future interactive Claude Code session auto-connect at launch
+// (https://code.claude.com/docs/en/remote-control#enable-remote-control-for-all-sessions)
+// - confirmed it has to be user-level specifically, not project/local
+// settings, which the docs say Claude Code only ever honors a `false` from,
+// never a `true`. Same idempotent, non-destructive pattern as
+// ensureRateLimitStatusLine() above: only ever sets this if Iddo hasn't
+// already made an explicit choice either way, never overwrites a real
+// false he set on purpose.
+//
+// Scope worth being clear about: this is a genuinely global, user-level
+// setting - it affects every future interactive `claude` session on this
+// machine, including ones Iddo starts in a plain terminal himself, not
+// just Agent Desktop's own dispatched agents. That's exactly what he asked
+// for ("every agent... reachable from anywhere"), not a side effect to
+// hide. Confirmed with him directly before making this change (auto mode's
+// own classifier flagged the first attempt as worth a real human okay on,
+// not just proceeding silently).
+//
+// Only covers sessions started AFTER this setting exists - an already-
+// running background agent (like Testing agent/LensVid were at the moment
+// this was added) needs one manual `/remote-control` to register for the
+// first time, or a restart, since the setting is only read at a session's
+// own startup.
+function ensureRemoteControlEnabled() {
+  const settingsPath = path.join(app.getPath("home"), ".claude", "settings.json");
+  try {
+    let settings = {};
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    }
+    if ("remoteControlAtStartup" in settings) return; // Iddo (or something else) already made an explicit choice - leave it alone
+    settings.remoteControlAtStartup = true;
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  } catch (e) {
+    // Non-critical - agents just stay local-only (the pre-existing
+    // behavior) if this never gets installed.
+  }
+}
+
 // ---------------------------------------------------- Claude Code updates --
 //
 // Agent Desktop depends on a completely separate Claude Code CLI install
@@ -476,6 +525,7 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(() => {
     createWindow();
     ensureRateLimitStatusLine();
+    ensureRemoteControlEnabled();
     reapOrphanedBackgroundAgentProcesses();
     setInterval(reapOrphanedBackgroundAgentProcesses, REAPER_INTERVAL_MS);
   });
