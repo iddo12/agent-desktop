@@ -1,6 +1,6 @@
 {
   "name": "agent-desktop",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Standalone desktop app for managing and chatting with local Claude Code agents",
   "main": "src/main.js",
   "private": true,

@@ -242,14 +242,54 @@ ipcMain.handle("check-claude-code-update", async () => {
   return { current, latest, updateAvailable: isVersionNewer(latest, current) };
 });
 
+// Diagnosed live, 2026-08-23: clicking "Update" can report success while
+// actually leaving the CLI broken. npm's own install process extracts the
+// new version into a randomly-named staging folder, then renames it into
+// place and deletes the old one - if any of the many claude.exe processes
+// this app deliberately keeps alive as background agents happens to have
+// a file handle open in that old folder at that exact moment, the delete
+// step throws EPERM. npm treats this as a non-fatal warning ("npm warn
+// cleanup...") and still exits 0 - but the rename into place can fail
+// along with it, leaving the real package.json missing entirely at the
+// resolved path while the old shim files got overwritten. The result:
+// every future agent dispatch fails with a confusing "not recognized" -
+// confirmed to have actually happened on Iddo's own machine, requiring a
+// manual repair (copying a known-good install over the broken one) to fix.
+async function updateClaudeCodeOnce(npmPath, shell) {
+  await runClaudeCommand(npmPath, ["install", "-g", "@anthropic-ai/claude-code@latest"], { env: process.env });
+  // Verify rather than trust npm's exit code - a real `claude --version`
+  // run is the only thing that actually proves the install is usable.
+  try {
+    const output = await runClaudeCommand(shell, ["--version"], { env: process.env }, 3, 500);
+    return /\(Claude Code\)/.test(output) || /^\d+\.\d+\.\d+/.test(output.trim());
+  } catch (e) {
+    return false;
+  }
+}
+
 ipcMain.handle("update-claude-code", async () => {
   const npmPath = process.platform === "win32" ? resolveNpmExecutable() : "npm";
+  const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   // Routed through the same pty-based runner as the native-agent backend
   // calls below rather than child_process directly, for the same reason:
   // execFileSync/spawnSync are confirmed unreliable in this app's launch
   // context on Windows.
-  await runClaudeCommand(npmPath, ["install", "-g", "@anthropic-ai/claude-code@latest"], { env: process.env });
+  let verified = await updateClaudeCodeOnce(npmPath, shell);
+  // One retry - the same transient-file-lock hedge already used elsewhere
+  // in this file (spawnPtyWithRetry, runClaudeCommand). A second attempt
+  // gives whichever background agent process held the lock a chance to
+  // have released it by the time this runs again.
+  if (!verified) {
+    verified = await updateClaudeCodeOnce(npmPath, shell);
+  }
   const current = getInstalledClaudeCodeVersion();
+  if (!verified || !current) {
+    throw new Error(
+      "The update ran, but the install couldn't be verified as working afterward - this can happen if a running " +
+      "Claude Code process locked a file mid-update. The CLI may now be broken. Try closing every open agent, " +
+      "fully closing and reopening Agent Desktop, then retrying the update."
+    );
+  }
   return { current };
 });
 
