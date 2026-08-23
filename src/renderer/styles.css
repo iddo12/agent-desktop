@@ -383,7 +383,8 @@ html, body {
 #five-hour-usage,
 #weekly-usage,
 #monthly-usage,
-#context-usage {
+#context-usage,
+#cache-status {
   -webkit-app-region: no-drag;
   font-size: 0.76rem;
   color: var(--text-muted);
@@ -395,10 +396,16 @@ html, body {
 }
 #context-usage.warning,
 #five-hour-usage.warning,
-#weekly-usage.warning { color: var(--health-warning); border-color: var(--health-warning); }
+#weekly-usage.warning,
+#cache-status.warning { color: var(--health-warning); border-color: var(--health-warning); }
 #context-usage.critical,
 #five-hour-usage.critical,
 #weekly-usage.critical { color: var(--health-critical); border-color: var(--health-critical); }
+/* Deliberately NOT .critical (red) once the cache has expired - going cold
+   costs more on the next message, but nothing is broken or risky the way
+   red reads elsewhere in this app. A distinct muted/cool tone keeps that
+   honest instead of overstating it. */
+#cache-status.expired { color: var(--text-muted); border-color: var(--border); opacity: 0.75; }
 /* Visible marker for a badge that hasn't refreshed recently - a dashed
    border rather than a color change, so it doesn't fight with the
    warning/critical coloring above (a badge can be both critical AND

@@ -32,6 +32,7 @@ const chatAttachmentsEl = document.getElementById("chat-attachments");
 const chatQueueEl = document.getElementById("chat-queue");
 const chatThinkingIndicatorEl = document.getElementById("chat-thinking-indicator");
 const contextUsageEl = document.getElementById("context-usage");
+const cacheStatusEl = document.getElementById("cache-status");
 const fiveHourUsageEl = document.getElementById("five-hour-usage");
 const weeklyUsageEl = document.getElementById("weekly-usage");
 const monthlyUsageEl = document.getElementById("monthly-usage");
@@ -262,6 +263,10 @@ function showTerminalFor(agent) {
       // survive normal ~1s gaps between a CLI spinner's own redraws.
       turnStartedAt: null,
       thinkingQuietTimer: null,
+      // Real timestamp (Date) of this agent's last actual API response, per
+      // its own JSONL transcript - see refreshCacheStatus()/PROMPT_CACHE_TTL_MS
+      // below. null until getContextUsage() has resolved at least once.
+      lastResponseAt: null,
       // Timestamp of the last byte of pty output seen for this agent, for
       // anything that needs to detect real completion faster than the
       // 3s-tuned thinkingQuietTimer above - see waitForPtyQuiet() and the
@@ -728,7 +733,77 @@ async function refreshContextUsage(agentPath) {
   } else {
     contextUsageEl.classList.add("hidden");
   }
+
+  const session = terminals.get(agentPath);
+  if (session) {
+    session.lastResponseAt = usage && usage.timestamp ? new Date(usage.timestamp) : null;
+    updateCacheStatus();
+  }
 }
+
+// Added 2026-08-23, prompted directly by Iddo asking whether a YouTube
+// video's cost-saving claim ("You're Paying Anthropic 20x MORE Than You
+// Need To") could improve something already built rather than just get
+// filed away - see optimization_agent_pending_notes.md for the full
+// research trail. Core claim, independently corroborated (not just taken
+// from the video): Anthropic's prompt caching uses a 1-hour, activity-
+// based window - a message sent after the cache has lapsed re-processes
+// the entire conversation at full (uncached) price instead of the much
+// cheaper cached rate. Iddo runs several named agents and checks in on
+// them at irregular intervals, often well over an hour apart, with no way
+// to see that coming before now.
+//
+// Reuses getContextUsage()'s own usage.timestamp (already fetched for the
+// context-window badge above, same IPC call, no new backend work needed)
+// as the anchor for "when did this agent's cache last go warm."
+// PROMPT_CACHE_TTL_MS is Anthropic's own documented window, not a guess.
+const PROMPT_CACHE_TTL_MS = 60 * 60 * 1000;
+// How soon before expiry to start the "expiring soon" warning state -
+// gives Iddo a real chance to act (send a message, or knowingly let it
+// lapse) rather than the badge flipping straight from "fine" to "expired"
+// with no notice.
+const CACHE_EXPIRY_WARNING_MS = 10 * 60 * 1000;
+
+function formatCacheDuration(ms) {
+  const totalMinutes = Math.round(Math.abs(ms) / 60000);
+  if (totalMinutes < 1) return "under 1m";
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+function updateCacheStatus() {
+  const session = activeAgentPath && terminals.get(activeAgentPath);
+  if (!session || !session.lastResponseAt) {
+    cacheStatusEl.classList.add("hidden");
+    return;
+  }
+  const elapsedMs = Date.now() - session.lastResponseAt.getTime();
+  const remainingMs = PROMPT_CACHE_TTL_MS - elapsedMs;
+  cacheStatusEl.classList.remove("hidden", "warning", "expired");
+  if (remainingMs > 0) {
+    cacheStatusEl.textContent = `Cache: ${formatCacheDuration(remainingMs)} left`;
+    cacheStatusEl.title =
+      `This agent's last response was ${formatCacheDuration(elapsedMs)} ago. Anthropic's prompt cache for this ` +
+      `conversation is still warm for about ${formatCacheDuration(remainingMs)} more - a message sent before then reuses the ` +
+      `cached context at a much cheaper rate. Once it lapses, the next message re-processes the whole conversation ` +
+      `at full price. Not an official Anthropic-reported figure - calculated locally from this agent's own last response time.`;
+    if (remainingMs <= CACHE_EXPIRY_WARNING_MS) cacheStatusEl.classList.add("warning");
+  } else {
+    cacheStatusEl.textContent = `Cache expired ${formatCacheDuration(-remainingMs)} ago`;
+    cacheStatusEl.title =
+      `This agent's last response was ${formatCacheDuration(elapsedMs)} ago, past Anthropic's ~1-hour prompt cache window. ` +
+      `Your next message to this agent will re-process the whole conversation at full price rather than the cheaper ` +
+      `cached rate. Not an official Anthropic-reported figure - calculated locally from this agent's own last response time.`;
+    cacheStatusEl.classList.add("expired");
+  }
+}
+// Ticks the display only - never re-fetches usage data on its own (that
+// already happens via refreshContextUsage(), called from the same places
+// the app already refreshes usage elsewhere). 30s is plenty for a badge
+// whose whole point is a ~1-hour window, not a stopwatch.
+setInterval(updateCacheStatus, 30000);
 
 // Unofficial, community-sourced estimates, one per Claude subscription
 // plan - Anthropic does not publish these figures, and they're known to
