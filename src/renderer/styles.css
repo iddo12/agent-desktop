@@ -173,6 +173,33 @@ html, body {
   opacity: 0.6;
 }
 
+/* Which Claude subscription plan Iddo's on - this app can't detect it, so
+   it's a real setting (persisted via localStorage), not just a display.
+   Only feeds the 5h usage badge's fallback estimate when Anthropic's own
+   real rate_limits figure isn't available - see PLAN_FIVE_HOUR_ESTIMATES
+   in renderer.js. */
+#plan-selector-row {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+#plan-selector-row label {
+  flex-shrink: 0;
+}
+#plan-select {
+  flex: 1;
+  background: var(--bg-sidebar);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 0.72rem;
+}
+
 .agent-item {
   display: flex;
   align-items: center;
@@ -311,13 +338,18 @@ html, body {
 #chat-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   -webkit-app-region: drag;
 }
-#chat-header-text { flex: 1; min-width: 0; }
+/* min-width floor added when a 5th usage badge (monthly) started
+   squeezing this down to an unreadable width on a maximized window -
+   flex-wrap above lets the badges/buttons spill onto a second line
+   instead of continuing to shrink the name/role area past readability. */
+#chat-header-text { flex: 1; min-width: 140px; }
 /* Confirmed live: with up to 8 stat badges/buttons sharing this same flex
    row (msg counts, buffer/context indicators, Reset/Raw Terminal/Model/
    History), the leftover width for name+role can stay narrow even in a
@@ -350,6 +382,7 @@ html, body {
    the raw numbers so it's never silently misleading. */
 #five-hour-usage,
 #weekly-usage,
+#monthly-usage,
 #plan-tokens-remaining,
 #context-usage {
   -webkit-app-region: no-drag;

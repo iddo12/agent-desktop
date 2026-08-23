@@ -17,6 +17,10 @@
       <div id="interfering-service-warning" class="hidden"></div>
       <div id="claude-cli-warning" class="hidden"></div>
       <div id="agent-list"></div>
+      <div id="plan-selector-row">
+        <label for="plan-select">Plan</label>
+        <select id="plan-select" title="Which Claude subscription plan you're on - used to estimate the 5h usage badge when Anthropic's own real rate_limits figure isn't available yet"></select>
+      </div>
       <div id="app-version"></div>
     </aside>
     <div id="sidebar-resize-handle" title="Drag to resize"></div>
@@ -34,6 +38,7 @@
           </div>
           <div id="five-hour-usage" class="hidden" title=""></div>
           <div id="weekly-usage" class="hidden" title=""></div>
+          <div id="monthly-usage" class="hidden" title=""></div>
           <div id="plan-tokens-remaining" class="hidden" title=""></div>
           <div id="context-usage" class="hidden" title=""></div>
           <button id="reset-session-btn" title="Clear this agent's current conversation context and start fresh (full history stays available in History)">Reset Session</button>

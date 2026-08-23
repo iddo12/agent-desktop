@@ -426,6 +426,12 @@ function getUsageWindows() {
   let messagesInLast7d = 0;
   let latestPlanTokens = null;
   let maxPlanTokensSeen = 0;
+  // Per-calendar-day message counts, for the "this month" view Iddo asked
+  // for on top of the 5h/7d windows above. Built in the same scan pass
+  // (not a separate re-scan of every JSONL file in the account) purely for
+  // efficiency - this account-wide scan already reads every line once.
+  const dailyMessageCounts = new Map(); // "YYYY-MM-DD" (local time) -> count
+  let earliestTimestampMs = null;
 
   const projectsRoot = path.join(os.homedir(), ".claude", "projects");
   let projectDirs;
@@ -438,6 +444,7 @@ function getUsageWindows() {
       planTokenBufferPct: null,
       fiveHourConfirmed: null,
       sevenDayConfirmed: null,
+      monthly: buildMonthlyUsage(new Map(), null, Date.now()),
     };
   }
 
@@ -468,9 +475,15 @@ function getUsageWindows() {
 
         if (obj.type === "user" && obj.origin && obj.origin.kind === "human") {
           const t = new Date(obj.timestamp).getTime();
-          if (!Number.isNaN(t) && now - t <= SEVEN_DAYS_MS) {
-            messagesInLast7d++;
-            if (now - t <= FIVE_HOURS_MS) messagesInLast5h++;
+          if (!Number.isNaN(t)) {
+            if (now - t <= SEVEN_DAYS_MS) {
+              messagesInLast7d++;
+              if (now - t <= FIVE_HOURS_MS) messagesInLast5h++;
+            }
+            if (earliestTimestampMs === null || t < earliestTimestampMs) earliestTimestampMs = t;
+            const d = new Date(t);
+            const dayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+            dailyMessageCounts.set(dayKey, (dailyMessageCounts.get(dayKey) || 0) + 1);
           }
         }
 
@@ -506,6 +519,61 @@ function getUsageWindows() {
     // community-sourced message-count guess.
     fiveHourConfirmed: confirmed.fiveHour,
     sevenDayConfirmed: confirmed.sevenDay,
+    monthly: buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now),
+  };
+}
+
+// Deliberately real numbers and a labeled projection, not a percentage -
+// unlike the 5h/7d windows, Anthropic doesn't publish any monthly cap for
+// Claude subscriptions to compute a percentage against (the two real caps
+// are the rolling 5-hour window and the rolling 7-day/weekly one, both
+// already covered above). Inventing a monthly percentage against a made-up
+// denominator would be exactly the "wrong, not just imprecise" mistake
+// this project's own history (see CLAUDE.md's "Second badge" section, the
+// original total_tokens_reminder mislabeling) already learned the hard way
+// not to repeat. What's genuinely useful and honest instead: how much
+// you've actually used this calendar month, your daily pace, and a plain
+// linear projection of where that pace lands by month's end - all real,
+// derived from the same account-wide message counts as the 5h/7d windows.
+function buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now) {
+  const nowDate = new Date(now);
+  const year = nowDate.getFullYear();
+  const month = nowDate.getMonth(); // 0-indexed
+  const dayOfMonth = nowDate.getDate(); // 1-indexed - also "days elapsed so far," today included
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const dayKey = (y, m, d) => `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+  let messagesThisMonth = 0;
+  for (let day = 1; day <= dayOfMonth; day++) {
+    messagesThisMonth += dailyMessageCounts.get(dayKey(year, month, day)) || 0;
+  }
+
+  const prevMonthDate = new Date(year, month - 1, 1);
+  const prevYear = prevMonthDate.getFullYear();
+  const prevMonth = prevMonthDate.getMonth();
+  const daysInPrevMonth = new Date(prevYear, prevMonth + 1, 0).getDate();
+  const dataGoesBackToPrevMonth = earliestTimestampMs !== null && earliestTimestampMs <= new Date(prevYear, prevMonth, 1).getTime();
+
+  let messagesLastMonth = null;
+  if (dataGoesBackToPrevMonth) {
+    messagesLastMonth = 0;
+    for (let day = 1; day <= daysInPrevMonth; day++) {
+      messagesLastMonth += dailyMessageCounts.get(dayKey(prevYear, prevMonth, day)) || 0;
+    }
+  }
+
+  return {
+    messagesThisMonth,
+    daysElapsedThisMonth: dayOfMonth,
+    daysInMonth,
+    dailyAverageThisMonth: dayOfMonth > 0 ? Math.round((messagesThisMonth / dayOfMonth) * 10) / 10 : 0,
+    // Plain linear projection from the pace so far this month - not a
+    // prediction that accounts for weekday patterns or anything fancier,
+    // just "if this rate holds." Framed as a projection everywhere it's
+    // shown, not a claim about a real limit.
+    projectedMonthTotal: dayOfMonth > 0 ? Math.round((messagesThisMonth / dayOfMonth) * daysInMonth) : 0,
+    messagesLastMonth,
   };
 }
 

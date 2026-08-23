@@ -35,6 +35,7 @@ const contextUsageEl = document.getElementById("context-usage");
 const planTokensRemainingEl = document.getElementById("plan-tokens-remaining");
 const fiveHourUsageEl = document.getElementById("five-hour-usage");
 const weeklyUsageEl = document.getElementById("weekly-usage");
+const monthlyUsageEl = document.getElementById("monthly-usage");
 
 const modalEl = document.getElementById("new-agent-modal");
 const nameInput = document.getElementById("new-agent-name");
@@ -725,21 +726,42 @@ async function refreshContextUsage(agentPath) {
   }
 }
 
-// Unofficial, community-sourced estimate for Claude Pro specifically
-// (confirmed as the user's plan) - Anthropic does not publish this figure, and
-// it's known to vary by message complexity, model, and demand. Treat as a
-// rough compass, not a precise reading - see agent-desktop\CLAUDE.md for
-// where this number came from. No equivalent estimate is applied to the
-// 7-day figure - the real weekly cap is measured in compute-hours, not
-// messages, so a percentage there would mix two different units together
-// rather than give a meaningful reading.
-const PRO_FIVE_HOUR_MESSAGE_ESTIMATE = 45;
+// Unofficial, community-sourced estimates, one per Claude subscription
+// plan - Anthropic does not publish these figures, and they're known to
+// vary by message complexity, model, and demand. Treat as a rough compass,
+// not a precise reading - see agent-desktop\CLAUDE.md for where these
+// numbers came from. No equivalent estimate is applied to the 7-day
+// figure - the real weekly cap is measured in compute-hours, not messages,
+// so a percentage there would mix two different units together rather
+// than give a meaningful reading. Only used as a fallback when
+// windows.fiveHourConfirmed isn't available (see refreshUsageWindows()) -
+// Iddo picks his actual plan via the sidebar's Plan dropdown
+// (getSelectedPlan()/PLAN_STORAGE_KEY below), not something this app can
+// detect on its own.
+const PLAN_FIVE_HOUR_ESTIMATES = {
+  pro: { label: "Pro", fiveHourMessages: 45 },
+  max5x: { label: "Max 5x", fiveHourMessages: 225 },
+  max20x: { label: "Max 20x", fiveHourMessages: 900 },
+};
+const DEFAULT_PLAN_ID = "pro";
+const PLAN_STORAGE_KEY = "agentDesktop.selectedPlanId";
+
+function getSelectedPlanId() {
+  const stored = localStorage.getItem(PLAN_STORAGE_KEY);
+  return stored && PLAN_FIVE_HOUR_ESTIMATES[stored] ? stored : DEFAULT_PLAN_ID;
+}
+
+function setSelectedPlanId(planId) {
+  if (!PLAN_FIVE_HOUR_ESTIMATES[planId]) return;
+  localStorage.setItem(PLAN_STORAGE_KEY, planId);
+}
 
 async function refreshUsageWindows() {
   const windows = await window.api.getUsageWindows();
   if (!activeAgentPath) {
     fiveHourUsageEl.classList.add("hidden");
     weeklyUsageEl.classList.add("hidden");
+    monthlyUsageEl.classList.add("hidden");
     planTokensRemainingEl.classList.add("hidden");
     return;
   }
@@ -792,14 +814,16 @@ async function refreshUsageWindows() {
     if (pct >= 90) fiveHourUsageEl.classList.add("critical");
     else if (pct >= 70) fiveHourUsageEl.classList.add("warning");
   } else {
-    const fivePct = Math.min(100, Math.round((windows.messagesInLast5h / PRO_FIVE_HOUR_MESSAGE_ESTIMATE) * 100));
+    const plan = PLAN_FIVE_HOUR_ESTIMATES[getSelectedPlanId()];
+    const fivePct = Math.min(100, Math.round((windows.messagesInLast5h / plan.fiveHourMessages) * 100));
     fiveHourUsageEl.textContent = `${windows.messagesInLast5h} msgs (~${fivePct}%, 5h)`;
     fiveHourUsageEl.title =
       `${windows.messagesInLast5h} messages sent across ALL Claude Code sessions on this machine in the trailing 5 hours, ` +
-      `against an unofficial community estimate of ~${PRO_FIVE_HOUR_MESSAGE_ESTIMATE} messages/5h for Claude Pro. ` +
-      `Not published by Anthropic and known to vary by message complexity/model/demand - a rough compass, not a precise reading. ` +
-      `This estimate is used because no confirmed rate_limits figure is available yet (no interactive Claude Code ` +
-      `session has completed a turn since the statusLine integration was installed, or this account/plan doesn't report it).`;
+      `against an unofficial community estimate of ~${plan.fiveHourMessages} messages/5h for Claude ${plan.label} ` +
+      `(set via the Plan dropdown in the sidebar). Not published by Anthropic and known to vary by message ` +
+      `complexity/model/demand - a rough compass, not a precise reading. This estimate is used because no confirmed ` +
+      `rate_limits figure is available yet (no interactive Claude Code session has completed a turn since the ` +
+      `statusLine integration was installed, or this account/plan doesn't report it).`;
     fiveHourUsageEl.classList.remove("hidden", "warning", "critical");
     if (fivePct >= 90) fiveHourUsageEl.classList.add("critical");
     else if (fivePct >= 70) fiveHourUsageEl.classList.add("warning");
@@ -834,6 +858,35 @@ async function refreshUsageWindows() {
       `available yet - see the 5h badge's tooltip for why.`;
     weeklyUsageEl.classList.remove("hidden", "warning", "critical");
   }
+
+  refreshMonthlyUsage(windows.monthly);
+}
+
+// "This month" badge - Iddo asked for a short/medium/long-term view
+// (next few hours / this week / this month) alongside the existing 5h/7d
+// badges above. Unlike those two, there's no real monthly cap Anthropic
+// publishes to compute a percentage against, so this shows real numbers
+// and a plainly-labeled linear projection instead of a fabricated
+// percentage - see buildMonthlyUsage()'s own comment in archive.js for why
+// that line wasn't crossed here the way it was, and then corrected, for
+// the very first version of the plan-token-buffer badge.
+function refreshMonthlyUsage(monthly) {
+  if (!monthly) {
+    monthlyUsageEl.classList.add("hidden");
+    return;
+  }
+  monthlyUsageEl.textContent = `${monthly.messagesThisMonth} msgs (mo, ~${monthly.projectedMonthTotal} proj.)`;
+  const comparison =
+    monthly.messagesLastMonth !== null
+      ? ` Last month: ${monthly.messagesLastMonth} total.`
+      : " Not enough history yet for a last-month comparison.";
+  monthlyUsageEl.title =
+    `${monthly.messagesThisMonth} messages sent across ALL Claude Code sessions on this machine so far this calendar ` +
+    `month (day ${monthly.daysElapsedThisMonth} of ${monthly.daysInMonth}), averaging ${monthly.dailyAverageThisMonth}/day. ` +
+    `Projected total by month end if this pace holds: ~${monthly.projectedMonthTotal}.${comparison} No percentage shown - ` +
+    `Anthropic doesn't publish a monthly cap for Claude subscriptions the way it does for the 5-hour and 7-day windows above, ` +
+    `so there's no real ceiling to compute one against.`;
+  monthlyUsageEl.classList.remove("hidden");
 }
 
 // Some genuinely long waits aren't the agent "thinking" - Claude Code's own
@@ -1731,6 +1784,23 @@ loadAgents();
 
 window.api.getAppVersion().then((v) => {
   document.getElementById("app-version").textContent = `Agent Desktop v${v}`;
+});
+
+// Plan dropdown - populated from PLAN_FIVE_HOUR_ESTIMATES itself (not
+// hardcoded <option> tags in index.html) so adding a future plan (Iddo's
+// own words: "currently 3 but maybe they will add more later") is a
+// one-line addition to that object, not an HTML edit too.
+const planSelectEl = document.getElementById("plan-select");
+for (const [planId, plan] of Object.entries(PLAN_FIVE_HOUR_ESTIMATES)) {
+  const option = document.createElement("option");
+  option.value = planId;
+  option.textContent = plan.label;
+  planSelectEl.appendChild(option);
+}
+planSelectEl.value = getSelectedPlanId();
+planSelectEl.addEventListener("change", () => {
+  setSelectedPlanId(planSelectEl.value);
+  refreshUsageWindows();
 });
 
 // --------------------------------------------------- Claude Code updates --
