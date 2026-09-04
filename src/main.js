@@ -880,6 +880,17 @@ const RESUME_DIALOG_PEEK_MS = 1500;
 // IT was first dispatched.
 const REMOTE_CONTROL_REGISTER_WAIT_MS = 2500;
 const REMOTE_CONTROL_CONFIRM_RE = /Enable Remote Control/i;
+// Live-verified (2026-09-04, via `claude logs` on a real freshly-dispatched
+// bg agent): selecting "1. Enable Remote Control" doesn't return straight
+// to a normal session - it shows a follow-up summary panel first ("Remote
+// Control" heading, the session's claude.ai/code URL, Disconnect/QR-code
+// options, a highlighted "❯ Continue") that itself needs one more Enter to
+// dismiss. Without answering this too, the session sits there permanently
+// (`claude agents --json` showed status "waiting"/waitingFor:"dialog open"
+// forever) - confirmed live that a single extra Enter is exactly what
+// clears it, same as every other menu here defaults to its highlighted
+// option.
+const REMOTE_CONTROL_SUCCESS_RE = /This session is available in the Claude mobile app/i;
 
 // Deliberately best-effort and silent: this is plumbing, not something the
 // user needs to see happen, and an agent that fails to register should
@@ -912,6 +923,14 @@ async function registerRemoteControl(proc) {
       await new Promise((resolve) => setTimeout(resolve, 300));
       proc.write("\r");
       await new Promise((resolve) => setTimeout(resolve, REMOTE_CONTROL_REGISTER_WAIT_MS));
+    }
+    // See REMOTE_CONTROL_SUCCESS_RE above - the post-enable summary panel
+    // needs its own dismiss. `buffer` has kept accumulating everything
+    // since the very first write, so it already contains this panel's text
+    // if it appeared during either wait above.
+    if (REMOTE_CONTROL_SUCCESS_RE.test(stripTerminalCodes(buffer))) {
+      proc.write("\r");
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
     disposable.dispose();
   } catch (e) {
