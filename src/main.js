@@ -859,6 +859,66 @@ const LOGIN_EXPIRED_PEEK_MS = 1500;
 const RESUME_DIALOG_RE = /Resume from summary \(recommended\)/i;
 const RESUME_DIALOG_PEEK_MS = 1500;
 
+// Auto-registers every freshly-dispatched agent with Claude Code's Remote
+// Control (claude.ai/code, the mobile app) - requested directly by Iddo
+// (2026-09-04) after tracing why his agents never showed up remotely.
+// Root cause: this app always runs agents as `claude --bg` (see
+// dispatchBackgroundAgent above), and the `remoteControlAtStartup: true`
+// user setting (ensureRemoteControlEnabled() in this file) only auto-
+// connects INTERACTIVE sessions - `claude --help` is explicit that
+// `--remote-control` itself "start[s] an interactive session with Remote
+// Control enabled". A background agent never gets that automatic
+// connection no matter what the setting says. The one-time manual
+// `/remote-control` run per agent on 2026-08-23 proved a bg session CAN
+// still register if you run the command inside it - it just isn't
+// automatic, and that manual registration is tied to the live process, so
+// it was lost the moment each agent's bg session ended. This closes the
+// gap by running the same command, and answering its own confirm prompt,
+// right after every FRESH dispatch (see findOrDispatchBackgroundAgent's
+// freshlyDispatched flag) - not on a reattach to a bg agent that's still
+// alive, since that one already went through this exact registration when
+// IT was first dispatched.
+const REMOTE_CONTROL_REGISTER_WAIT_MS = 2500;
+const REMOTE_CONTROL_CONFIRM_RE = /Enable Remote Control/i;
+
+// Deliberately best-effort and silent: this is plumbing, not something the
+// user needs to see happen, and an agent that fails to register should
+// just stay local-only - exactly the pre-existing behavior - rather than
+// this ever blocking or breaking a real chat session opening. Uses its own
+// private onData listener rather than the permanent one (attached later in
+// startTerminalSession) specifically so its own "/remote-control" echo and
+// the confirm-menu redraw never reach the renderer/Chat View - purely
+// internal, same spirit as the login/resume-dialog peeks right above it.
+async function registerRemoteControl(proc) {
+  try {
+    let buffer = "";
+    const disposable = proc.onData((d) => {
+      buffer += d;
+    });
+    // Text and Enter as two separately-timed writes, not one combined write -
+    // the same pattern submitToAgent() in renderer.js uses for every real
+    // chat message (text, then a staggered "\r"), and for the same reason:
+    // sending them together can land before the CLI is actually reading
+    // input yet.
+    proc.write("/remote-control");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    proc.write("\r");
+    await new Promise((resolve) => setTimeout(resolve, REMOTE_CONTROL_REGISTER_WAIT_MS));
+    if (REMOTE_CONTROL_CONFIRM_RE.test(stripTerminalCodes(buffer))) {
+      // "1. Enable Remote Control" / "2. Never mind" - same write-key,
+      // wait, write-Enter sequence already proven to work against the
+      // RESUME_DIALOG_RE menu above, just selecting option 1 instead of 3.
+      proc.write("1");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      proc.write("\r");
+      await new Promise((resolve) => setTimeout(resolve, REMOTE_CONTROL_REGISTER_WAIT_MS));
+    }
+    disposable.dispose();
+  } catch (e) {
+    /* best-effort - see comment above */
+  }
+}
+
 // Diagnosed live, 2026-08-21, the actual cause of messages appearing "sent"
 // but never going anywhere: `output` here is captured straight off a real
 // ConPTY - it's genuinely a terminal stream, not plain text, and comes
@@ -1029,10 +1089,15 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   return match[1];
 }
 
+// Returns { id, freshlyDispatched } rather than a bare id - startTerminalSession
+// uses freshlyDispatched to know whether this is a brand-new bg process (needs
+// registerRemoteControl(), below) or one it's simply reattaching to (already
+// registered, if it ever was, back when IT was first dispatched).
 async function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
   const existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
-  if (existing) return existing.id;
-  return dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+  if (existing) return { id: existing.id, freshlyDispatched: false };
+  const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+  return { id, freshlyDispatched: true };
 }
 
 // Deleting an Agent Desktop agent must also stop its real native background
@@ -1260,8 +1325,15 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
 
   let agentId;
+  let freshlyDispatched = false;
   try {
-    agentId = knownAgentId || (await findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd));
+    if (knownAgentId) {
+      agentId = knownAgentId;
+    } else {
+      const found = await findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+      agentId = found.id;
+      freshlyDispatched = found.freshlyDispatched;
+    }
   } catch (e) {
     throw new Error("[find/dispatch stage] " + e.message);
   }
@@ -1349,6 +1421,13 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     // it through live.
     if (peekBuffer && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("terminal-data", { agentPath, data: peekBuffer });
+    }
+
+    // Only for a genuinely new bg process - see registerRemoteControl()'s
+    // own comment above for why reattaching to one that's still alive is
+    // deliberately skipped (already registered when it was first dispatched).
+    if (freshlyDispatched) {
+      await registerRemoteControl(proc);
     }
   }
 
