@@ -19,6 +19,10 @@ contextBridge.exposeInMainWorld("api", {
 
   listArchivedDays: (agentPath) => ipcRenderer.invoke("list-archived-days", { agentPath }),
   readArchivedDay: (agentPath, dateKey) => ipcRenderer.invoke("read-archived-day", { agentPath, dateKey }),
+
+  listConversations: (agentPath) => ipcRenderer.invoke("list-conversations", { agentPath }),
+  renameConversation: (agentPath, sessionId, title) => ipcRenderer.invoke("rename-conversation", { agentPath, sessionId, title }),
+  switchConversation: (agentPath, opts) => ipcRenderer.invoke("switch-conversation", { agentPath, ...opts }),
   getContextUsage: (agentPath) => ipcRenderer.invoke("get-context-usage", { agentPath }),
   getUsageWindows: () => ipcRenderer.invoke("get-usage-windows"),
   getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),

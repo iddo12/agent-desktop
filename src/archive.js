@@ -608,4 +608,164 @@ function buildMonthlyUsage(dailyMessageCounts, earliestTimestampMs, now, sevenDa
   };
 }
 
-module.exports = { syncArchive, listArchivedDays, readArchivedDay, encodeProjectPath, getLatestUsage, getUsageWindows, getLiveTranscriptBlocks };
+// ---------------------------------------------------------------------------
+// Per-agent conversation list (the "Chats" panel)
+// ---------------------------------------------------------------------------
+//
+// Every Agent Desktop agent's `.claude-session` cwd accumulates one
+// `<sessionId>.jsonl` file per distinct conversation: a fresh one is started
+// whenever the agent is opened with no prior session, and `/clear` (Reset
+// Session) also starts a brand-new file rather than appending a marker (see
+// getLiveTranscriptBlocks above for that discovery). Claude Code's own
+// `--continue` always resumes whichever file has the most recent activity;
+// `--resume <sessionId>` targets a specific one. This function turns that
+// pile of files into a titled, dated list the renderer can show so the user
+// can switch between past conversations or start a new one - the same
+// mental model as claude.ai/code's "Recents", built from the same on-disk
+// data Claude Code itself uses.
+//
+// Title precedence mirrors what Claude Code shows in its own /resume picker:
+// a user-set custom title wins, then the AI-generated title, then a snippet
+// of the first real user message, then a plain fallback. All three of
+// custom-title / ai-title / agent-name are plain JSONL control records
+// ({"type":"custom-title","customTitle":"..."} etc.) that can appear more
+// than once in a file as the title changes over the session's life - the
+// last occurrence of each is the current value.
+function summarizeText(s, max) {
+  const collapsed = String(s || "").replace(/\s+/g, " ").trim();
+  if (collapsed.length <= max) return collapsed;
+  return collapsed.slice(0, max - 1).trimEnd() + "…";
+}
+
+function readConversationMeta(jsonlPath) {
+  let raw;
+  try {
+    raw = fs.readFileSync(jsonlPath, "utf-8");
+  } catch (e) {
+    return null;
+  }
+  const fileSessionId = path.basename(jsonlPath, ".jsonl");
+  let ownEarliestTs = Infinity; // earliest entry actually belonging to THIS session
+  let anyEarliestTs = Infinity; // earliest entry at all (may be replayed history)
+  let latestTs = -Infinity;
+  let humanMessageCount = 0;
+  let firstHumanText = "";
+  let lastHumanText = "";
+  let customTitle = "";
+  let aiTitle = "";
+  let sessionId = "";
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch (e) {
+      continue;
+    }
+    if (obj.sessionId) sessionId = obj.sessionId;
+    if (obj.type === "custom-title" && typeof obj.customTitle === "string") customTitle = obj.customTitle;
+    if (obj.type === "ai-title" && typeof obj.aiTitle === "string") aiTitle = obj.aiTitle;
+    let ts = NaN;
+    if (obj.timestamp) {
+      ts = new Date(obj.timestamp).getTime();
+      if (!Number.isNaN(ts)) {
+        if (ts < anyEarliestTs) anyEarliestTs = ts;
+        if (ts > latestTs) latestTs = ts;
+        // Resuming a conversation replays the prior transcript into the new
+        // file with its original (old) timestamps, so the plain minimum
+        // isn't "when this conversation started". Entries stamped with this
+        // file's own session id are the ones that actually happened in it.
+        if (obj.sessionId === fileSessionId && ts < ownEarliestTs) ownEarliestTs = ts;
+      }
+    }
+    // A real human turn: type:"user" with origin.kind "human" (a tool_result
+    // is also type:"user" but has no such origin) - same filter proven
+    // correct in getLiveTranscriptBlocks / getUsageWindows.
+    if (obj.type === "user" && obj.origin && obj.origin.kind === "human") {
+      const text = extractText(obj.message && obj.message.content);
+      if (text) {
+        humanMessageCount++;
+        if (!firstHumanText) firstHumanText = text;
+        lastHumanText = text;
+      }
+    }
+  }
+  if (latestTs === -Infinity) return null; // empty / no real activity yet
+  const title =
+    summarizeText(customTitle, 120) ||
+    summarizeText(aiTitle, 120) ||
+    summarizeText(firstHumanText, 80) ||
+    "(untitled conversation)";
+  const titleSource = customTitle ? "custom" : aiTitle ? "ai" : firstHumanText ? "first-message" : "none";
+  let startedAt = ownEarliestTs;
+  if (startedAt === Infinity) startedAt = anyEarliestTs === Infinity ? latestTs : anyEarliestTs;
+  return {
+    sessionId: sessionId || fileSessionId,
+    title,
+    titleSource,
+    // Where the conversation currently stands reads better on a "which one
+    // do I want to resume" list than its opening line, which is often
+    // replayed setup text - fall back to the first if there's only one.
+    preview: summarizeText(lastHumanText || firstHumanText, 140),
+    startedAt,
+    lastActivityAt: latestTs,
+    humanMessageCount,
+  };
+}
+
+function listConversations(sessionCwd) {
+  const metas = [];
+  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+    const meta = readConversationMeta(jsonlPath);
+    if (meta) metas.push(meta);
+  }
+  metas.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+  // The most recently active conversation is the one `--continue` resumes,
+  // i.e. what a plain "reopen this agent" lands on - flag it so the UI can
+  // show which row is "current" without the renderer re-deriving the rule.
+  if (metas.length) metas[0].isCurrent = true;
+  return metas;
+}
+
+// A session id is always a UUID (hex + dashes). Enforced before it's ever
+// used to build a file path so a malformed value from the renderer can't
+// walk out of the project directory.
+const SESSION_ID_RE = /^[0-9a-fA-F-]{16,64}$/;
+
+// Rename a conversation by appending the same JSONL control records Claude
+// Code's own `-n/--name` flag writes ({"type":"custom-title",...} plus
+// {"type":"agent-name",...}). Appending rather than rewriting keeps the file
+// an append-only log exactly as the CLI treats it, and the last occurrence
+// wins on read (both here and in Claude Code itself). The new title reaches
+// claude.ai/code the next time that conversation is the live Remote Control
+// session, since the web reads the same records.
+function setConversationTitle(sessionCwd, sessionId, title) {
+  if (!SESSION_ID_RE.test(String(sessionId || ""))) {
+    throw new Error("Invalid session id");
+  }
+  const clean = String(title || "").replace(/[\r\n\t]+/g, " ").trim().slice(0, 200);
+  if (!clean) throw new Error("Title cannot be empty");
+  const jsonlPath = path.join(projectDirFor(sessionCwd), `${sessionId}.jsonl`);
+  if (!fs.existsSync(jsonlPath)) {
+    throw new Error("Conversation file not found");
+  }
+  const lines =
+    JSON.stringify({ type: "custom-title", customTitle: clean, sessionId }) +
+    "\n" +
+    JSON.stringify({ type: "agent-name", agentName: clean, sessionId }) +
+    "\n";
+  withFsRetry(() => fs.appendFileSync(jsonlPath, lines, "utf-8"));
+  return { ok: true, title: clean };
+}
+
+module.exports = {
+  syncArchive,
+  listArchivedDays,
+  readArchivedDay,
+  encodeProjectPath,
+  getLatestUsage,
+  getUsageWindows,
+  getLiveTranscriptBlocks,
+  listConversations,
+  setConversationTitle,
+};

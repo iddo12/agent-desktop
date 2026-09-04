@@ -5,7 +5,17 @@ const https = require("https");
 const { execSync, execFileSync } = require("child_process");
 const pty = require("node-pty");
 const { listAgents, createAgent, updateAgent, deleteAgent } = require("./agents");
-const { syncArchive, listArchivedDays, readArchivedDay, encodeProjectPath, getLatestUsage, getUsageWindows, getLiveTranscriptBlocks } = require("./archive");
+const {
+  syncArchive,
+  listArchivedDays,
+  readArchivedDay,
+  encodeProjectPath,
+  getLatestUsage,
+  getUsageWindows,
+  getLiveTranscriptBlocks,
+  listConversations,
+  setConversationTitle,
+} = require("./archive");
 const { withFsRetryAsync } = require("./fsRetry");
 
 let mainWindow;
@@ -992,8 +1002,22 @@ async function findAliveBackgroundAgent(shell, spawnEnv, sessionCwd) {
 // --continue with no prompt dispatches idle, "send a prompt to start",
 // which matches this app's own "reopen an agent to an empty, ready-to-type
 // box" UX exactly (confirmed directly before writing this).
-async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
-  const args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
+//
+// opts (all optional, used by the Chats panel's switch / new-conversation
+// actions - see the "conversation-*" IPC handlers below):
+//   resumeSessionId - resume this exact past conversation (`--bg --resume <id>`)
+//                     instead of the most-recent one `--continue` would pick.
+//   forceFresh      - start a brand-new conversation (`--bg`, no --continue)
+//                     even though prior sessions exist for this cwd.
+async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
+  let args;
+  if (opts.resumeSessionId) {
+    args = ["--bg", "--resume", opts.resumeSessionId];
+  } else if (opts.forceFresh) {
+    args = ["--bg"];
+  } else {
+    args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
+  }
   const output = await runClaudeCommand(shell, args, { cwd: sessionCwd, env: spawnEnv });
   // Real dispatch output (confirmed byte-for-byte via a live test dispatch):
   // "backgrounded \xC2\xB7 5467abbc (idle ...)" - a single U+00B7 MIDDLE DOT,
@@ -1459,6 +1483,67 @@ ipcMain.handle("get-context-usage", (event, { agentPath }) => getLatestUsage(ses
 ipcMain.handle("get-live-transcript", (event, { agentPath }) => getLiveTranscriptBlocks(sessionCwdFor(agentPath)));
 
 ipcMain.handle("get-usage-windows", () => getUsageWindows());
+
+// --- Chats panel (per-agent conversation list / switch / rename) -----------
+//
+// Each agent's `.claude-session` cwd accumulates one <sessionId>.jsonl per
+// distinct conversation (a fresh one on first open, another on every
+// /clear). listConversations() turns that pile into a titled list; the
+// panel lets the user resume any of them or start a new one - the same
+// model as claude.ai/code's "Recents", from the same on-disk data.
+
+ipcMain.handle("list-conversations", (event, { agentPath }) => {
+  const sessionCwd = sessionCwdFor(agentPath);
+  // Same freshness courtesy as list-archived-days: fold in anything the
+  // live session has written since the last 30s archive tick before listing.
+  const session = ptySessions.get(agentPath);
+  if (session && !session.starting) {
+    try {
+      syncArchive(agentPath, sessionCwd);
+    } catch (e) {}
+  }
+  return listConversations(sessionCwd);
+});
+
+ipcMain.handle("rename-conversation", (event, { agentPath, sessionId, title }) => {
+  // Throws (Invalid session id / empty title / file not found) surface to
+  // the renderer's catch - see archive.js setConversationTitle().
+  return setConversationTitle(sessionCwdFor(agentPath), sessionId, title);
+});
+
+// Point this agent's live session at a different past conversation
+// (resumeSessionId), or start a brand-new one (newConversation: true).
+// Either way the running `claude --bg` process has to be replaced: it's
+// bound to whatever conversation it was dispatched with, and only a fresh
+// dispatch (`--bg --resume <id>` or `--bg` with no --continue) can change
+// that. Tear down the attach pty, stop the bg daemon, dispatch a new one;
+// the renderer then re-attaches through its normal start-terminal path.
+ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId, newConversation }) => {
+  const sessionCwd = sessionCwdFor(agentPath);
+  // Drop the ptySessions entry BEFORE killing the pty: proc.onExit ->
+  // handlePtyExit checks `if (!session) return` first, so removing it now
+  // means the exit won't trigger handlePtyExit's auto-reattach, which would
+  // otherwise immediately reconnect to the very conversation we're leaving.
+  const live = ptySessions.get(agentPath);
+  if (live && !live.starting) {
+    if (live.archiveTimer) clearInterval(live.archiveTimer);
+    try {
+      syncArchive(agentPath, sessionCwd);
+    } catch (e) {}
+    ptySessions.delete(agentPath);
+    try {
+      if (live.proc) live.proc.kill();
+    } catch (e) {}
+  }
+  // Stops the underlying `claude --bg` daemon for this cwd and polls until
+  // its pid is actually gone (same helper delete-agent uses).
+  await stopBackgroundAgentForCwd(sessionCwd);
+  const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
+  const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
+  const opts = newConversation ? { forceFresh: true } : { resumeSessionId };
+  const newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
+  return { ok: true, agentId: newId };
+});
 
 // Caught live (2026-08-20): a real crash, not a hang. If the underlying
 // claude process has already died on its own (crashed, or one of the

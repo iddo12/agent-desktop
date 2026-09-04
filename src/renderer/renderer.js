@@ -18,6 +18,10 @@ const sendInputBtn = document.getElementById("send-input-btn");
 const resizeHandleEl = document.getElementById("chat-input-resize-handle");
 const saveToMasterBtn = document.getElementById("save-to-master-btn");
 const historyToggleBtn = document.getElementById("history-toggle-btn");
+const chatsToggleBtn = document.getElementById("chats-toggle-btn");
+const conversationsViewEl = document.getElementById("conversations-view");
+const conversationsListEl = document.getElementById("conversations-list");
+const newConversationBtn = document.getElementById("new-conversation-btn");
 const modelPickerBtn = document.getElementById("model-picker-btn");
 const rawTerminalToggleBtn = document.getElementById("raw-terminal-toggle-btn");
 const resetSessionBtn = document.getElementById("reset-session-btn");
@@ -196,6 +200,7 @@ function selectAgent(agent) {
   setChatRoleText(chatRoleEl, agent.role);
 
   setHistoryMode(false);
+  setConversationsMode(false);
   showTerminalFor(agent);
   updateComposeAvailability();
   updateThinkingIndicator();
@@ -1767,6 +1772,7 @@ const HISTORY_DAYS_PAGE_SIZE = 7;
 let historyDaysShown = HISTORY_DAYS_PAGE_SIZE;
 
 function setHistoryMode(on) {
+  if (on) setConversationsMode(false); // History and Chats are mutually exclusive full-panel views
   historyToggleBtn.classList.toggle("active", on);
   historyViewEl.classList.toggle("hidden", !on);
   chatBodyEl.classList.toggle("hidden", on);
@@ -1894,6 +1900,253 @@ historyToggleBtn.addEventListener("click", () => {
   setHistoryMode(historyViewEl.classList.contains("hidden"));
 });
 
+// ------------------------------------------------------- conversations --
+//
+// Each agent's `.claude-session` cwd holds one <sessionId>.jsonl per
+// distinct conversation (a new one on first open, another on every /clear).
+// This panel lists them - titled, newest first - so the user can resume any
+// past conversation in place, start a fresh one, or rename one (which also
+// updates the label on claude.ai/code, since the web reads the same
+// custom-title record `-n` writes). Backed by list-conversations /
+// switch-conversation / rename-conversation in main.js.
+
+let conversationsMode = false;
+let switchingConversation = false;
+
+// Switching the live session to a different past conversation, and starting
+// a brand-new one, both work at the data layer (switch-conversation in
+// main.js stops the bg daemon and re-dispatches with --bg --resume <id> /
+// --bg), and were verified doing exactly that. What's NOT solved yet: after
+// resuming an OLDER conversation, getLiveTranscriptBlocks() still picks the
+// transcript file with the newest entry timestamps (fine for --continue,
+// wrong here), so the chat view keeps showing the conversation you just
+// left. Fixing that means threading the active bg session id through to the
+// transcript reader rather than having it guess by recency. Until that's
+// done, the list is read + rename only - both fully working - and these two
+// actions stay disabled rather than shipping a switch that visibly lands on
+// the wrong conversation. Flip to true once the transcript reader is
+// session-scoped and it's been re-tested end to end.
+const CONVERSATION_SWITCH_ENABLED = false;
+
+function relativeTime(ms) {
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  return `${d}d ago`;
+}
+
+function setConversationsMode(on) {
+  conversationsMode = on;
+  if (on) setHistoryMode(false); // History and Chats are mutually exclusive full-panel views
+  chatsToggleBtn.classList.toggle("active", on);
+  conversationsViewEl.classList.toggle("hidden", !on);
+  chatBodyEl.classList.toggle("hidden", on);
+  chatInputBarEl.classList.toggle("hidden", on);
+  if (on) {
+    loadConversations();
+  } else {
+    requestAnimationFrame(refitActiveTerminal);
+    if (activeAgentPath) rebuildChatView(activeAgentPath);
+  }
+}
+
+async function loadConversations() {
+  if (!activeAgentPath) return;
+  const agentPath = activeAgentPath;
+  conversationsListEl.innerHTML = '<div id="conversations-empty">Loading…</div>';
+  let convos;
+  try {
+    convos = await window.api.listConversations(agentPath);
+  } catch (e) {
+    conversationsListEl.innerHTML = `<div id="conversations-empty">Couldn't load conversations: ${escapeHtml(e.message || String(e))}</div>`;
+    return;
+  }
+  if (agentPath !== activeAgentPath || !conversationsMode) return; // user moved on while awaiting
+  if (!convos || convos.length === 0) {
+    conversationsListEl.innerHTML = '<div id="conversations-empty">No past conversations yet for this agent.</div>';
+    return;
+  }
+  conversationsListEl.innerHTML = "";
+  for (const c of convos) {
+    conversationsListEl.appendChild(renderConversationItem(agentPath, c));
+  }
+}
+
+function renderConversationItem(agentPath, c) {
+  const item = document.createElement("div");
+  item.className = "conversation-item" + (c.isCurrent ? " current" : "");
+
+  const main = document.createElement("div");
+  main.className = "conversation-main";
+
+  const titleRow = document.createElement("div");
+  titleRow.className = "conversation-title-row";
+  const titleEl = document.createElement("span");
+  titleEl.className = "conversation-title";
+  titleEl.textContent = c.title;
+  titleRow.appendChild(titleEl);
+  if (c.isCurrent) {
+    const tag = document.createElement("span");
+    tag.className = "conversation-current-tag";
+    tag.textContent = "current";
+    titleRow.appendChild(tag);
+  }
+  main.appendChild(titleRow);
+
+  if (c.preview) {
+    const preview = document.createElement("div");
+    preview.className = "conversation-preview";
+    preview.textContent = c.preview;
+    main.appendChild(preview);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "conversation-meta";
+  const msgs = c.humanMessageCount === 1 ? "1 message" : `${c.humanMessageCount} messages`;
+  meta.textContent = `Last active ${relativeTime(c.lastActivityAt)} · ${msgs}`;
+  main.appendChild(meta);
+
+  if (!CONVERSATION_SWITCH_ENABLED && !c.isCurrent) {
+    item.style.cursor = "default";
+    item.title = "Resuming a past conversation from here is coming soon - for now, rename it and switch by reopening the agent.";
+  }
+
+  const renameBtn = document.createElement("button");
+  renameBtn.className = "conversation-rename-btn";
+  renameBtn.textContent = "Rename";
+  renameBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    beginRename(agentPath, c, item, titleRow, renameBtn);
+  });
+
+  item.appendChild(main);
+  item.appendChild(renameBtn);
+
+  if (CONVERSATION_SWITCH_ENABLED && !c.isCurrent) {
+    item.addEventListener("click", () => switchToConversation(agentPath, { resumeSessionId: c.sessionId }, c.title));
+  }
+  return item;
+}
+
+function beginRename(agentPath, c, item, titleRow, renameBtn) {
+  if (titleRow.querySelector(".conversation-rename-input")) return;
+  const input = document.createElement("input");
+  input.className = "conversation-rename-input";
+  input.type = "text";
+  input.value = c.title.startsWith("(") ? "" : c.title;
+  input.maxLength = 200;
+  const titleEl = titleRow.querySelector(".conversation-title");
+  if (titleEl) titleEl.style.display = "none";
+  titleRow.prepend(input);
+  renameBtn.disabled = true;
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    input.remove();
+    if (titleEl) titleEl.style.display = "";
+    renameBtn.disabled = false;
+    const next = input.value.trim();
+    if (!save || !next || next === c.title) return;
+    try {
+      const res = await window.api.renameConversation(agentPath, c.sessionId, next);
+      c.title = res.title;
+      if (titleEl) titleEl.textContent = res.title;
+    } catch (e) {
+      alert("Rename failed: " + (e.message || String(e)));
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+async function switchToConversation(agentPath, opts, label) {
+  if (switchingConversation) return;
+  const session = terminals.get(agentPath);
+  if (session && session.busy) {
+    const ok = confirm(
+      "This agent is in the middle of a response. Switching conversations will interrupt it. Switch anyway?"
+    );
+    if (!ok) return;
+  }
+  switchingConversation = true;
+  conversationsListEl.querySelectorAll(".conversation-item").forEach((el) => (el.style.pointerEvents = "none"));
+  const note = document.createElement("div");
+  note.id = "conversations-busy-note";
+  note.textContent = opts.newConversation
+    ? "Starting a new conversation…"
+    : `Switching to “${label || "that conversation"}”…`;
+  conversationsViewEl.prepend(note);
+  try {
+    await window.api.switchConversation(agentPath, opts);
+    // Tear the local view down to the same state a cold app start would be
+    // in for this agent, then let selectAgent rebuild it - which re-runs
+    // start-terminal, attaching to the freshly dispatched bg session.
+    reloadAgentSessionView(agentPath);
+    note.remove();
+    setConversationsMode(false);
+    const agent = agents.find((a) => a.path === agentPath);
+    if (agent) selectAgent(agent);
+  } catch (e) {
+    note.textContent = "Switch failed: " + (e.message || String(e));
+    note.style.color = "var(--health-critical)";
+  } finally {
+    switchingConversation = false;
+  }
+}
+
+// Drop this agent's cached terminal/session state so the next showTerminalFor
+// rebuilds it from scratch (fresh xterm, fresh start-terminal call). Used
+// after switch-conversation replaces the underlying bg process.
+function reloadAgentSessionView(agentPath) {
+  const session = terminals.get(agentPath);
+  if (session) {
+    try {
+      session.term.dispose();
+    } catch (e) {}
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    if (session.chatRebuildTimer) clearTimeout(session.chatRebuildTimer);
+    if (session.thinkingQuietTimer) clearTimeout(session.thinkingQuietTimer);
+    terminals.delete(agentPath);
+  }
+}
+
+chatsToggleBtn.addEventListener("click", () => {
+  setConversationsMode(conversationsViewEl.classList.contains("hidden"));
+});
+
+newConversationBtn.addEventListener("click", () => {
+  if (!activeAgentPath) return;
+  const ok = confirm(
+    "Start a new conversation for this agent? The current one stays saved and you can switch back to it here anytime."
+  );
+  if (!ok) return;
+  switchToConversation(activeAgentPath, { newConversation: true });
+});
+
+// Until session-scoped switching lands (see CONVERSATION_SWITCH_ENABLED),
+// the panel is a titled, renameable list of this agent's conversations -
+// hide the "+ New chat" control and reword the hint so it doesn't promise
+// an action that isn't wired up yet.
+if (!CONVERSATION_SWITCH_ENABLED) {
+  newConversationBtn.classList.add("hidden");
+  const hint = document.getElementById("conversations-hint");
+  if (hint) {
+    hint.textContent =
+      "This agent's past conversations, newest first. Rename any of them - the new name also shows on claude.ai/code once that conversation is the live one there.";
+  }
+}
+
 // ---------------------------------------------------------- model picker --
 
 // Claude Code's own CLI already has an interactive model picker (with
@@ -1907,6 +2160,9 @@ modelPickerBtn.addEventListener("click", () => {
   if (!activeAgentPath) return;
   if (!historyViewEl.classList.contains("hidden")) {
     setHistoryMode(false);
+  }
+  if (!conversationsViewEl.classList.contains("hidden")) {
+    setConversationsMode(false);
   }
   // The picker needs real arrow-key/number keystrokes, which only the raw
   // terminal can provide - the chat view has no concept of an interactive
@@ -1977,6 +2233,9 @@ resetSessionBtn.addEventListener("click", async () => {
   const agentPath = activeAgentPath;
   if (!historyViewEl.classList.contains("hidden")) {
     setHistoryMode(false);
+  }
+  if (!conversationsViewEl.classList.contains("hidden")) {
+    setConversationsMode(false);
   }
   setRawTerminalMode(true);
   submitToAgent(agentPath, "/clear");

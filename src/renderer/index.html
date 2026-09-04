@@ -44,6 +44,7 @@
           <button id="reset-session-btn" title="Clear this agent's current conversation context and start fresh (full history stays available in History)">Reset Session</button>
           <button id="raw-terminal-toggle-btn" title="Switch to the raw terminal (needed for things like the Model picker's arrow keys)">Raw Terminal</button>
           <button id="model-picker-btn" title="Choose which Claude model this agent uses">Model</button>
+          <button id="chats-toggle-btn" title="Switch between this agent's past conversations, start a new one, or rename them">Chats</button>
           <button id="history-toggle-btn" title="View past conversation history">History</button>
         </div>
 
@@ -81,6 +82,14 @@
         <div id="history-view" class="hidden">
           <div id="history-day-list"></div>
           <div id="history-content"></div>
+        </div>
+
+        <div id="conversations-view" class="hidden">
+          <div id="conversations-toolbar">
+            <button id="new-conversation-btn" title="Start a brand-new conversation for this agent (the current one stays saved)">+ New chat</button>
+            <span id="conversations-hint">Resume any past conversation, or start a new one. Renaming here also updates the name shown on claude.ai/code.</span>
+          </div>
+          <div id="conversations-list"></div>
         </div>
       </div>
     </main>
