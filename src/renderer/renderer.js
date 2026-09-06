@@ -2311,32 +2311,24 @@ const updateAvailableBtn = document.getElementById("update-available-btn");
 async function checkForClaudeCodeUpdate() {
   const { current, latest, updateAvailable } = await window.api.checkClaudeCodeUpdate();
   if (!updateAvailable) return;
-  updateAvailableBtn.textContent = `Update available: Claude Code ${current || "?"} → ${latest}`;
-  updateAvailableBtn.title = "Click to update the Claude Code CLI. Agent Desktop closes all agents, updates, and reopens itself.";
+  updateAvailableBtn.textContent = `Claude Code ${latest} available (you have ${current || "?"})`;
+  updateAvailableBtn.title = "Click for how to update. Agent Desktop does not update the CLI itself - that's Claude Desktop's job, or a manual npm install.";
   updateAvailableBtn.classList.remove("hidden");
 }
 
 updateAvailableBtn.addEventListener("click", async () => {
+  // Informational only. An earlier version tried to quit the app and run a
+  // detached updater; it killed every Claude process on the machine (incl.
+  // the user's interactive session) and didn't reliably bump the version on
+  // this bundled-CLI setup. See the claude-code-update-info handler in
+  // main.js for the full reasoning.
   updateAvailableBtn.disabled = true;
-  const original = updateAvailableBtn.textContent;
-  updateAvailableBtn.textContent = "Preparing update…";
   try {
-    // Quits the app and hands off to a detached updater that runs the npm
-    // install with nothing locking the package folder, then relaunches -
-    // see the update-claude-code-restart handler in main.js.
-    const res = await window.api.updateClaudeCodeRestart();
-    if (res && res.cancelled) {
-      updateAvailableBtn.disabled = false;
-      updateAvailableBtn.textContent = original;
-      return;
-    }
-    // The app quits within ~1s of here; this is just the last visible state.
-    updateAvailableBtn.textContent = "Updating & restarting…";
+    await window.api.claudeCodeUpdateInfo();
   } catch (e) {
-    updateAvailableBtn.disabled = false;
-    updateAvailableBtn.textContent = "Update failed to start - click to retry";
-    updateAvailableBtn.title = String((e && e.message) || e);
+    /* nothing to recover - it only shows a dialog */
   }
+  updateAvailableBtn.disabled = false;
 });
 
 checkForClaudeCodeUpdate();
