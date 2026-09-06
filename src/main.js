@@ -52,7 +52,42 @@ const ptySessions = new Map(); // agentPath -> { proc, sessionCwd, archiveTimer 
 // that made this so hard to pin down across three earlier rounds of fixes.
 // Fixed at the actual source: resolve the real target directly, skipping
 // the symlink entirely, rather than continuing to retry through it.
+// Agent Desktop keeps its OWN copy of the Claude Code CLI under userData,
+// installed/updated with `npm install -g --prefix <dir>` into a plain
+// directory it fully controls. Why (found live 2026-09-07): on a machine
+// where `claude` is Claude Desktop's *bundled* copy (%APPDATA%\npm\claude.cmd
+// is a symlink into the MSIX package store), `npm install -g` into the
+// default prefix cannot move that version - the write lands in a virtualized
+// package overlay the real binary never reads (npm reports success, the
+// version never changes). Installing into a normal private dir works and
+// gets the true `@latest`. Claude Desktop's bundled copy is left untouched
+// and stays the fallback until/unless the private one exists.
+function privateCliDir() {
+  return path.join(app.getPath("userData"), "cli");
+}
+function privateCliCmd() {
+  return path.join(privateCliDir(), "claude.cmd");
+}
+function privateCliPackageJson() {
+  return path.join(privateCliDir(), "node_modules", "@anthropic-ai", "claude-code", "package.json");
+}
+// Written only after a fresh install has verified (`claude --version` ran
+// clean), so a half-finished / interrupted install is never selected.
+function privateCliMarker() {
+  return path.join(privateCliDir(), "agent-desktop-cli.json");
+}
+function privateCliReady() {
+  try {
+    return fs.existsSync(privateCliMarker()) && fs.existsSync(privateCliCmd()) && fs.existsSync(privateCliPackageJson());
+  } catch (e) {
+    return false;
+  }
+}
+
 function resolveClaudeExecutable() {
+  // Agent Desktop's own managed copy wins when present - it's the one this
+  // app can actually keep updated (see the block comment above).
+  if (privateCliReady()) return privateCliCmd();
   const localAppData = process.env.LOCALAPPDATA || (process.env.USERPROFILE && path.join(process.env.USERPROFILE, "AppData", "Local"));
   if (localAppData) {
     try {
@@ -352,45 +387,80 @@ ipcMain.handle("update-claude-code", async () => {
   return { current };
 });
 
-// REVERTED 2026-09-07: the "Update & restart" flow (quit the app, run a
-// detached updater, relaunch) was tried live twice and is abandoned. Two
-// showstoppers:
-//  1. Its "drain leftover claude.exe" step ran `Get-Process claude |
-//     Stop-Process -Force`, which killed EVERY Claude process on the
-//     machine - ~19 of them, including the interactive Claude Desktop
-//     Code-tab session the user was talking to (it auto-resumed, but the
-//     session was still yanked out from under them). There is no safe,
-//     app-agnostic way to tell "my background agent" from "some other
-//     Claude session" from an external script.
-//  2. `npm install -g @anthropic-ai/claude-code@latest` reported success
-//     ("added 2 packages", exit 0) but `claude --version` stayed 2.1.260.
-//     On this machine `claude` is Claude Desktop's *bundled* copy
-//     (`%APPDATA%\npm\claude.cmd` is a symlink into
-//     `%LOCALAPPDATA%\Packages\Claude_*\...`), not a plain npm global -
-//     see resolveClaudeExecutable()'s comment and the
-//     `claude-cmd-symlink-flakiness` memory. `npm install -g` does not
-//     reliably move that version. Updating the CLI is Claude Desktop's job
-//     (or a deliberate manual `npm i -g` the user runs themselves).
-// So the banner is now INFORMATIONAL ONLY - clicking it explains how to
-// update, and does not touch any process. The old in-place
-// `update-claude-code` handler above is also left unwired.
-ipcMain.handle("claude-code-update-info", async () => {
-  const current = getInstalledClaudeCodeVersion();
-  const latest = await getLatestClaudeCodeVersion();
-  await dialog.showMessageBox(mainWindow, {
-    type: "info",
-    buttons: ["OK"],
-    title: "Claude Code update",
-    message:
-      "Claude Code " + (latest || "?") + " is available (you have " + (current || "?") + ").",
-    detail:
-      "Agent Desktop does not update the CLI itself - on this machine `claude` is " +
-      "Claude Desktop's bundled copy, which Claude Desktop keeps up to date.\n\n" +
-      "To update manually: close every Claude window (including this app), then run\n" +
-      "    npm install -g @anthropic-ai/claude-code@latest\n" +
-      "in a terminal, and reopen.",
-  });
-  return { shown: true };
+// Install / update Agent Desktop's OWN private copy of the Claude Code CLI
+// (see the privateCli* block near resolveClaudeExecutable for why a private
+// copy is the only thing this app can reliably keep current on a
+// bundled-CLI machine).
+//
+// History that led here (2026-09-07): a first attempt updated the shared
+// npm-global in place, risking an EPERM folder-swap race against live
+// agents. A second attempt quit the whole app and ran a detached updater
+// that (a) force-killed every `claude.exe` on the machine by name -
+// including the user's own interactive session - and (b) still couldn't
+// move the bundled copy's version. Both abandoned. This approach avoids
+// all of it: install into a fresh private dir, and only ever stop THIS
+// app's own background agents (by the cwds it dispatched), never anything
+// matched by process name, and never the app itself.
+ipcMain.handle("update-claude-cli", async () => {
+  if (process.platform !== "win32") {
+    throw new Error("Managed CLI update is implemented for Windows only.");
+  }
+  const dir = privateCliDir();
+  fs.mkdirSync(dir, { recursive: true });
+
+  // 1. Stop only OUR background agents + live attach ptys, so nothing from
+  //    the private dir holds a file handle during npm's swap. They
+  //    re-dispatch (on the new CLI) the next time the renderer reattaches.
+  try {
+    for (const agent of listAgents()) {
+      await stopBackgroundAgentForCwd(sessionCwdFor(agent.path));
+    }
+  } catch (e) {
+    /* best-effort */
+  }
+  for (const [, session] of ptySessions) {
+    try {
+      if (session.archiveTimer) clearInterval(session.archiveTimer);
+      if (session.proc) session.proc.kill();
+    } catch (e) {}
+  }
+  ptySessions.clear();
+
+  // 2. Install @latest into the private prefix (works where a default-prefix
+  //    -g install silently no-ops against the bundled copy).
+  const npmPath = resolveNpmExecutable();
+  const env = { ...process.env, DISABLE_AUTOUPDATER: "1" };
+  await runClaudeCommand(
+    npmPath,
+    ["install", "-g", "--prefix", dir, "@anthropic-ai/claude-code@latest", "--no-audit", "--no-fund"],
+    { env, cwd: dir },
+    3,
+    800
+  );
+
+  // 3. Verify against the freshly-installed binary itself.
+  let version = null;
+  try {
+    const out = await runClaudeCommand(privateCliCmd(), ["--version"], { env }, 3, 500);
+    const m = String(out).trim().match(/(\d+\.\d+\.\d+)/);
+    if (m) version = m[1];
+  } catch (e) {
+    /* falls through to the throw below */
+  }
+  if (!version || !fs.existsSync(privateCliPackageJson())) {
+    throw new Error(
+      "The CLI install ran but couldn't be verified. Agent Desktop is still using its previous Claude Code - " +
+        "try again, or run 'npm install -g @anthropic-ai/claude-code@latest' in a terminal."
+    );
+  }
+
+  // 4. Only now mark it ready, so resolveClaudeExecutable() switches over.
+  fs.writeFileSync(
+    privateCliMarker(),
+    JSON.stringify({ version, installedAt: new Date().toISOString() }, null, 2),
+    "utf-8"
+  );
+  return { version };
 });
 
 // -------------------------------------------- known-interfering software --

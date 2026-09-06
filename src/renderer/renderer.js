@@ -2311,24 +2311,31 @@ const updateAvailableBtn = document.getElementById("update-available-btn");
 async function checkForClaudeCodeUpdate() {
   const { current, latest, updateAvailable } = await window.api.checkClaudeCodeUpdate();
   if (!updateAvailable) return;
-  updateAvailableBtn.textContent = `Claude Code ${latest} available (you have ${current || "?"})`;
-  updateAvailableBtn.title = "Click for how to update. Agent Desktop does not update the CLI itself - that's Claude Desktop's job, or a manual npm install.";
+  updateAvailableBtn.textContent = `Update Claude Code ${current || "?"} → ${latest}`;
+  updateAvailableBtn.title =
+    "Installs Agent Desktop's own managed copy of the Claude Code CLI (into this app's data folder). " +
+    "Your agents restart briefly; the app does not close. Claude Desktop's own CLI is left untouched.";
   updateAvailableBtn.classList.remove("hidden");
 }
 
 updateAvailableBtn.addEventListener("click", async () => {
-  // Informational only. An earlier version tried to quit the app and run a
-  // detached updater; it killed every Claude process on the machine (incl.
-  // the user's interactive session) and didn't reliably bump the version on
-  // this bundled-CLI setup. See the claude-code-update-info handler in
-  // main.js for the full reasoning.
+  // Installs/updates Agent Desktop's private CLI copy - see the
+  // update-claude-cli handler in main.js. No app quit; only this app's own
+  // background agents restart (and auto-reattach).
   updateAvailableBtn.disabled = true;
+  const original = updateAvailableBtn.textContent;
+  updateAvailableBtn.textContent = "Updating Claude Code…";
   try {
-    await window.api.claudeCodeUpdateInfo();
+    const { version } = await window.api.updateClaudeCli();
+    updateAvailableBtn.textContent = `Updated to Claude Code ${version || "latest"} - reopen an agent`;
+    // The bg agents were stopped; whichever one is open shows "[session
+    // ended]" and reconnects (on the new CLI) when the user clicks it again.
+    setTimeout(() => updateAvailableBtn.classList.add("hidden"), 6000);
   } catch (e) {
-    /* nothing to recover - it only shows a dialog */
+    updateAvailableBtn.disabled = false;
+    updateAvailableBtn.textContent = original + "  (update failed - click to retry)";
+    updateAvailableBtn.title = String((e && e.message) || e);
   }
-  updateAvailableBtn.disabled = false;
 });
 
 checkForClaudeCodeUpdate();
