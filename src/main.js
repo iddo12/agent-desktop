@@ -2,7 +2,7 @@
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
-const { execSync, execFileSync } = require("child_process");
+const { execSync, execFileSync, spawn } = require("child_process");
 const pty = require("node-pty");
 const { listAgents, createAgent, updateAgent, deleteAgent } = require("./agents");
 const {
@@ -472,8 +472,57 @@ ipcMain.handle("update-claude-cli", async () => {
     JSON.stringify({ version, installedAt: new Date().toISOString() }, null, 2),
     "utf-8"
   );
-  return { version };
+
+  // 5. Restart the app so every agent comes back fresh on the new CLI and
+  //    the version line updates. The update itself is already fully done
+  //    and verified on disk at this point - the relaunch does no real work,
+  //    so it can't half-fail the way the abandoned "quit then run an
+  //    external updater" flow could.
+  await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    buttons: ["Restart now"],
+    defaultId: 0,
+    title: "Claude Code updated",
+    message: "Updated to Claude Code " + version + ".",
+    detail: "Agent Desktop will restart now so your agents reconnect on the new version.",
+  });
+  relaunchApp();
+  return { version, restarting: true };
 });
+
+// Restart Agent Desktop. Two mechanisms fired together, which is safe
+// because requestSingleInstanceLock() (see further down) means a second
+// launch just focuses the first window rather than opening another:
+//  - app.relaunch(): Electron's own detached wait-for-exit-then-start
+//    helper. The normal path.
+//  - a tiny detached .vbs that sleeps a few seconds then runs Launch.vbs
+//    (the exact chain Start_Agents_Dashboard.bat uses). Backup, in case
+//    app.relaunch() misbehaves for this non-packaged `electron .` setup.
+// If somehow neither takes, the app just closes and the user reopens it -
+// and the update is already applied, so nothing is lost.
+function relaunchApp() {
+  try {
+    app.relaunch();
+  } catch (e) {
+    /* fall through to the vbs backup */
+  }
+  try {
+    if (process.platform === "win32") {
+      const launchVbs = path.join(__dirname, "..", "Launch.vbs");
+      const relaunchVbs = path.join(app.getPath("userData"), "relaunch.vbs");
+      fs.writeFileSync(
+        relaunchVbs,
+        'WScript.Sleep 4000\r\n' +
+          'CreateObject("WScript.Shell").Run "wscript.exe //B ""' + launchVbs + '""", 0, False\r\n',
+        "utf-8"
+      );
+      spawn("wscript.exe", ["//B", relaunchVbs], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    }
+  } catch (e) {
+    /* best-effort backup only */
+  }
+  setTimeout(() => app.quit(), 500);
+}
 
 // -------------------------------------------- known-interfering software --
 //

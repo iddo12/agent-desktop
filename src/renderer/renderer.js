@@ -2310,11 +2310,16 @@ const updateAvailableBtn = document.getElementById("update-available-btn");
 
 async function checkForClaudeCodeUpdate() {
   const { current, latest, updateAvailable } = await window.api.checkClaudeCodeUpdate();
+  // Always show which Claude Code the app is actually dispatching agents
+  // with, right under the Agent Desktop version - so "I see a new version"
+  // isn't ambiguous between the two.
+  const cliVerEl = document.getElementById("claude-cli-version");
+  if (cliVerEl) cliVerEl.textContent = current ? `Claude Code v${current}` : "";
   if (!updateAvailable) return;
   updateAvailableBtn.textContent = `Update Claude Code ${current || "?"} → ${latest}`;
   updateAvailableBtn.title =
-    "Installs Agent Desktop's own managed copy of the Claude Code CLI (into this app's data folder). " +
-    "Your agents restart briefly; the app does not close. Claude Desktop's own CLI is left untouched.";
+    "Updates Agent Desktop's own managed copy of the Claude Code CLI, then restarts the app so every agent " +
+    "comes back on the new version. Claude Desktop's own CLI is left untouched.";
   updateAvailableBtn.classList.remove("hidden");
 }
 
@@ -2326,11 +2331,15 @@ updateAvailableBtn.addEventListener("click", async () => {
   const original = updateAvailableBtn.textContent;
   updateAvailableBtn.textContent = "Updating Claude Code…";
   try {
-    const { version } = await window.api.updateClaudeCli();
-    updateAvailableBtn.textContent = `Updated to Claude Code ${version || "latest"} - reopen an agent`;
-    // The bg agents were stopped; whichever one is open shows "[session
-    // ended]" and reconnects (on the new CLI) when the user clicks it again.
-    setTimeout(() => updateAvailableBtn.classList.add("hidden"), 6000);
+    // main.js installs into its private CLI dir, verifies, then shows a
+    // "Restart now" dialog and relaunches - so this await normally never
+    // resolves (the window is torn down first). If it does resolve, the
+    // relaunch didn't happen for some reason; reflect that.
+    const { version, restarting } = await window.api.updateClaudeCli();
+    updateAvailableBtn.textContent = restarting
+      ? `Updated to Claude Code ${version || "latest"} - restarting…`
+      : `Updated to Claude Code ${version || "latest"} - reopen the app to load it`;
+    setTimeout(() => updateAvailableBtn.classList.add("hidden"), 8000);
   } catch (e) {
     updateAvailableBtn.disabled = false;
     updateAvailableBtn.textContent = original + "  (update failed - click to retry)";
