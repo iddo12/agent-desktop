@@ -477,15 +477,29 @@ ipcMain.handle("update-claude-code-restart", async () => {
     "utf-8"
   );
 
-  const child = spawn(
-    "powershell.exe",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
-    { detached: true, stdio: "ignore", windowsHide: false }
+  // Launch through a tiny .vbs via wscript, NOT child_process.spawn of
+  // powershell directly. Confirmed live on the first real run (2026-09-07):
+  // a detached spawn from the Electron main process did NOT survive
+  // app.quit() - the .ps1 was written but never executed, no log, no
+  // relaunch. WScript.Shell.Run hands the new process straight to the OS
+  // and returns immediately, so it fully outlives this app - the exact
+  // mechanism Launch.vbs / Start_Agents_Dashboard.bat already rely on.
+  // Window style 1 = a normal visible console so progress/failure is
+  // visible while Agent Desktop is closed.
+  const runnerVbs = path.join(workDir, "update-claude-code-runner.vbs");
+  fs.writeFileSync(
+    runnerVbs,
+    'Set s = CreateObject("WScript.Shell")\r\n' +
+      's.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""' +
+      scriptPath +
+      '""", 1, False\r\n',
+    "utf-8"
   );
-  child.unref();
+  spawn("wscript.exe", ["//B", runnerVbs], { detached: true, stdio: "ignore", windowsHide: true }).unref();
 
-  // Give the detached child a beat to actually start before we vanish.
-  setTimeout(() => app.quit(), 600);
+  // wscript fires WScript.Shell.Run and exits almost immediately; give it a
+  // clear beat to hand the real process to the OS before we disappear.
+  setTimeout(() => app.quit(), 1500);
   return { started: true, logPath };
 });
 
