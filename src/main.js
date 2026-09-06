@@ -77,8 +77,20 @@ function privateCliMarker() {
   return path.join(privateCliDir(), "agent-desktop-cli.json");
 }
 function privateCliReady() {
+  // Deliberately reads actual bytes rather than fs.existsSync: existsSync
+  // has proven unreliable in this app's launch context for some paths (see
+  // resolveClaudeExecutable's history) - and a freshly npm-installed `cli`
+  // dir being scanned by Defender right at boot is exactly the kind of
+  // transient that would make existsSync lie. A successful JSON.parse of
+  // both the marker and the package's own package.json is the honest
+  // "it's really there and complete" check. BOM-tolerant: a marker written
+  // by PowerShell Set-Content -Encoding utf8 carries a UTF-8 BOM that plain
+  // JSON.parse chokes on.
   try {
-    return fs.existsSync(privateCliMarker()) && fs.existsSync(privateCliCmd()) && fs.existsSync(privateCliPackageJson());
+    const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf-8").replace(/^﻿/, ""));
+    const marker = readJson(privateCliMarker());
+    const pkg = readJson(privateCliPackageJson());
+    return !!(marker && marker.version && pkg && pkg.version);
   } catch (e) {
     return false;
   }
