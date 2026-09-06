@@ -1332,6 +1332,54 @@ async function handlePtyExit(agentPath, isReattachAttempt = false) {
   }
 }
 
+// Reads an agent's chosen display name from its agent_config.json, falling
+// back to the folder name (the app's oldest agents predate that file - see
+// agents.js's loadAgentConfig for the same fallback). Kept local rather than
+// importing from agents.js since only the one field is needed here.
+function agentDisplayName(agentPath) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(agentPath, "agent_config.json"), "utf-8"));
+    if (cfg && typeof cfg.display_name === "string" && cfg.display_name.trim()) {
+      return cfg.display_name.trim();
+    }
+  } catch (e) {
+    /* no/unreadable config - fall through to the folder name */
+  }
+  return path.basename(agentPath);
+}
+
+// When a brand-new background conversation is dispatched for an agent, give
+// it a recognizable title right away - "<Agent name> · <YYYY-MM-DD>" -
+// instead of leaving it to Claude Code's own auto-generated (and often
+// stale) name. This is the title the Chats panel shows and, because this
+// runs immediately after registerRemoteControl() made this the live Remote
+// Control session, the one claude.ai/code's "Recents" and the mobile app
+// read too - so a roster of many agents stays identifiable there without
+// renaming each by hand. Best-effort and silent: any failure (or a title
+// the user/CLI already set) just leaves the conversation as-is; it never
+// blocks the session opening. The <sessionId>.jsonl file exists by now
+// because registerRemoteControl() already wrote to the session, but a short
+// retry covers the write still settling on disk.
+async function autoTitleFreshConversation(agentPath, sessionCwd) {
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const convos = listConversations(sessionCwd);
+      const current = convos.find((c) => c.isCurrent) || convos[0];
+      if (current && current.sessionId) {
+        // Never clobber a title someone deliberately set (a user rename, or
+        // a resumed conversation that already carried one).
+        if (current.titleSource === "custom") return;
+        const stamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD, tz-stable enough
+        setConversationTitle(sessionCwd, current.sessionId, `${agentDisplayName(agentPath)} · ${stamp}`);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  } catch (e) {
+    /* best-effort - a missing auto-title is not worth surfacing or retrying harder */
+  }
+}
+
 // Core session-connection logic, shared by the start-terminal IPC handler
 // (a fresh open) and handlePtyExit's own silent-reattach path above. When
 // knownAgentId is omitted, finds or dispatches a background agent for this
@@ -1447,6 +1495,12 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     // deliberately skipped (already registered when it was first dispatched).
     if (freshlyDispatched) {
       await registerRemoteControl(proc);
+      // Name this fresh conversation after the agent so it's identifiable in
+      // the Chats panel and (via the Remote Control registration just done)
+      // in claude.ai/code's "Recents" / the mobile app. Awaited so its own
+      // JSONL append can't race the permanent onData listener / archive tick
+      // attached below, but it's fully self-contained and never throws.
+      await autoTitleFreshConversation(agentPath, sessionCwd);
     }
   }
 
