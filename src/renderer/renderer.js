@@ -2312,21 +2312,30 @@ async function checkForClaudeCodeUpdate() {
   const { current, latest, updateAvailable } = await window.api.checkClaudeCodeUpdate();
   if (!updateAvailable) return;
   updateAvailableBtn.textContent = `Update available: Claude Code ${current || "?"} → ${latest}`;
-  updateAvailableBtn.title = "Click to update the Claude Code CLI this app dispatches agents through (npm install -g @anthropic-ai/claude-code@latest)";
+  updateAvailableBtn.title = "Click to update the Claude Code CLI. Agent Desktop closes all agents, updates, and reopens itself.";
   updateAvailableBtn.classList.remove("hidden");
 }
 
 updateAvailableBtn.addEventListener("click", async () => {
   updateAvailableBtn.disabled = true;
-  updateAvailableBtn.textContent = "Updating Claude Code...";
+  const original = updateAvailableBtn.textContent;
+  updateAvailableBtn.textContent = "Preparing update…";
   try {
-    const { current } = await window.api.updateClaudeCode();
-    updateAvailableBtn.textContent = `Updated to Claude Code ${current || "latest"}`;
-    setTimeout(() => updateAvailableBtn.classList.add("hidden"), 4000);
+    // Quits the app and hands off to a detached updater that runs the npm
+    // install with nothing locking the package folder, then relaunches -
+    // see the update-claude-code-restart handler in main.js.
+    const res = await window.api.updateClaudeCodeRestart();
+    if (res && res.cancelled) {
+      updateAvailableBtn.disabled = false;
+      updateAvailableBtn.textContent = original;
+      return;
+    }
+    // The app quits within ~1s of here; this is just the last visible state.
+    updateAvailableBtn.textContent = "Updating & restarting…";
   } catch (e) {
     updateAvailableBtn.disabled = false;
-    updateAvailableBtn.textContent = "Update failed - click to retry";
-    updateAvailableBtn.title = e.message;
+    updateAvailableBtn.textContent = "Update failed to start - click to retry";
+    updateAvailableBtn.title = String((e && e.message) || e);
   }
 });
 

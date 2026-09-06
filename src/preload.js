@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("api", {
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
   checkClaudeCodeUpdate: () => ipcRenderer.invoke("check-claude-code-update"),
   updateClaudeCode: () => ipcRenderer.invoke("update-claude-code"),
+  updateClaudeCodeRestart: () => ipcRenderer.invoke("update-claude-code-restart"),
 
   checkInterferingServices: () => ipcRenderer.invoke("check-interfering-services"),
   disableInterferingService: (serviceName) => ipcRenderer.invoke("disable-interfering-service", { serviceName }),
