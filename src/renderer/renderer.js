@@ -1912,6 +1912,26 @@ function setChatInputHeight(px) {
   refitActiveTerminal();
 }
 
+// Grow the compose box to fit what's typed, like a normal chat input, so a
+// long message isn't cramped into ~2 lines. Caps at 60% of the window
+// (past that the textarea scrolls internally); the manual drag handle can
+// still take it larger. If the user has dragged it to a size they want,
+// that height becomes a floor auto-grow never shrinks below - only send
+// (which resets the box) clears that floor.
+let chatInputManualFloor = 0;
+
+function autoGrowChatInput() {
+  const cap = window.innerHeight * 0.6;
+  const floor = Math.max(CHAT_INPUT_DEFAULT_HEIGHT, chatInputManualFloor);
+  chatInputEl.style.height = "auto"; // let scrollHeight report the real content height
+  const needed = chatInputEl.scrollHeight;
+  chatInputEl.style.height = Math.max(floor, Math.min(needed, cap)) + "px";
+  // Any change to #chat-input-bar's height must refit the terminal, and it
+  // must be on the next frame (a synchronous fit() can still measure the
+  // pre-change layout) - the recurring lesson in this file.
+  requestAnimationFrame(refitActiveTerminal);
+}
+
 // ---------------------------------------------------------- attachments --
 
 // Dropped or pasted images/files show up as small removable thumbnail chips
@@ -2041,6 +2061,7 @@ function sendChatInput() {
 
   chatInputEl.value = "";
   clearAttachments();
+  chatInputManualFloor = 0; // a fresh message starts from the default size again
   setChatInputHeight(CHAT_INPUT_DEFAULT_HEIGHT);
   chatInputEl.focus();
   // xterm.js does NOT auto-follow new output once the user has scrolled up -
@@ -2058,6 +2079,9 @@ chatInputEl.addEventListener("keydown", (e) => {
     sendChatInput();
   }
 });
+
+// Auto-grow as the content changes (typing, paste, cut, undo).
+chatInputEl.addEventListener("input", autoGrowChatInput);
 
 sendInputBtn.addEventListener("click", sendChatInput);
 
@@ -2265,6 +2289,8 @@ window.addEventListener("mouseup", () => {
   dragStartY = null;
   dragStartHeight = null;
   resizeHandleEl.classList.remove("dragging");
+  // Remember the size the user chose so auto-grow won't shrink below it.
+  chatInputManualFloor = chatInputEl.getBoundingClientRect().height;
 });
 
 // ---------------------------------------------------- drag-and-drop files --

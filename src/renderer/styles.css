@@ -1036,7 +1036,7 @@ html, body {
    textarea from its top edge, like pulling up a bottom sheet, rather than
    the browser's native resize (which only ever grows toward the bottom). */
 #chat-input-resize-handle {
-  height: 14px;
+  height: 16px;
   margin-top: 2px;
   cursor: ns-resize;
   display: flex;
@@ -1045,11 +1045,14 @@ html, body {
 }
 #chat-input-resize-handle::before {
   content: "";
-  width: 36px;
+  width: 40px;
   height: 4px;
   border-radius: 2px;
-  background: var(--border);
+  background: var(--text-muted);
+  opacity: 0.5;
+  transition: opacity 0.12s ease, background 0.12s ease;
 }
+#chat-input-resize-handle:hover::before { opacity: 0.9; }
 #chat-input-resize-handle:hover::before,
 #chat-input-resize-handle.dragging::before {
   background: var(--accent);
