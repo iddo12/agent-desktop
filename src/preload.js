@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld("api", {
   savePastedImage: (base64, ext) => ipcRenderer.invoke("save-pasted-image", { base64, ext }),
   createAgent: (payload) => ipcRenderer.invoke("create-agent", payload),
   updateAgent: (payload) => ipcRenderer.invoke("update-agent", payload),
+  readInstructions: (agentPath) => ipcRenderer.invoke("read-instructions", { agentPath }),
+  writeInstructions: (payload) => ipcRenderer.invoke("write-instructions", payload),
   deleteAgent: (agentPath) => ipcRenderer.invoke("delete-agent", { agentPath }),
   pickAvatar: () => ipcRenderer.invoke("pick-avatar"),
 

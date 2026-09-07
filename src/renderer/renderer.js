@@ -480,6 +480,14 @@ function openAgentItemMenu(agent, buttonEl) {
   });
   menu.appendChild(editBtn);
 
+  const instrBtn = document.createElement("button");
+  instrBtn.textContent = "Edit instructions";
+  instrBtn.addEventListener("click", () => {
+    closeAgentItemMenu();
+    openInstructionsModal(agent);
+  });
+  menu.appendChild(instrBtn);
+
   if (groupsDoc.groups.length > 0) {
     const currentGroup = groupsDoc.groups.find((g) => g.members.includes(agent.folderName));
     const label = document.createElement("div");
@@ -598,6 +606,7 @@ function selectAgent(agent) {
   renderQueue(agent.path);
   refreshContextUsage(agent.path);
   refreshUsageWindows();
+  updateNoInstructionsBanner(agent);
 }
 
 // A resize call reaches the underlying Claude Code process as a real pty
@@ -1828,6 +1837,160 @@ confirmDeleteGroupBtn.addEventListener("click", async () => {
   deleteGroupModalEl.classList.add("hidden");
   deletingGroupId = null;
   await saveGroupsDoc();
+});
+
+// ----------------------------------------------- agent instructions modal --
+
+const instructionsModalEl = document.getElementById("instructions-modal");
+const instructionsModalTitleEl = document.getElementById("instructions-modal-title");
+const instructionsTextareaEl = document.getElementById("instructions-textarea");
+const instructionsCountEl = document.getElementById("instructions-count");
+const saveInstructionsBtn = document.getElementById("save-instructions-btn");
+
+let instructionsAgent = null; // { path, displayName, folderName }
+let instructionsBaseMtime = null;
+
+function instructionsTemplate(name) {
+  return (
+    `# ${name || "Agent"} — standing instructions\n\n` +
+    `## Identity\n` +
+    `What this agent is responsible for, in a sentence or two.\n\n` +
+    `## Scope\n` +
+    `- What it owns / monitors / works on\n` +
+    `- What is explicitly out of scope\n\n` +
+    `## Reporting & coordination\n` +
+    `- Who it reports to\n` +
+    `- Which other agents it coordinates with, and on what\n\n` +
+    `## Autonomy\n` +
+    `- What it may do on its own\n` +
+    `- What it must ask about first\n\n` +
+    `## Output & cadence\n` +
+    `- What it produces, and when (e.g. a daily report at 08:00)\n`
+  );
+}
+
+function updateInstructionsCount() {
+  const v = instructionsTextareaEl.value;
+  const lines = v ? v.split("\n").length : 0;
+  const chars = v.length;
+  let s = `${lines} line${lines === 1 ? "" : "s"} · ${chars.toLocaleString()} char${chars === 1 ? "" : "s"}`;
+  if (chars > 8000) s += " · large files cost context on every session";
+  instructionsCountEl.textContent = s;
+}
+
+async function openInstructionsModal(agent) {
+  instructionsAgent = agent;
+  instructionsModalTitleEl.textContent = `Instructions — ${agent.displayName}`;
+  instructionsTextareaEl.value = "Loading…";
+  instructionsTextareaEl.disabled = true;
+  saveInstructionsBtn.disabled = true;
+  instructionsModalEl.classList.remove("hidden");
+  try {
+    const res = await window.api.readInstructions(agent.path);
+    instructionsBaseMtime = res.mtimeMs;
+    instructionsTextareaEl.value = res.content || "";
+  } catch (e) {
+    instructionsTextareaEl.value = "";
+    instructionsBaseMtime = null;
+    alert("Could not read this agent's CLAUDE.md: " + e.message);
+  }
+  instructionsTextareaEl.disabled = false;
+  saveInstructionsBtn.disabled = false;
+  updateInstructionsCount();
+  instructionsTextareaEl.focus();
+}
+
+instructionsTextareaEl.addEventListener("input", updateInstructionsCount);
+
+document.getElementById("cancel-instructions-btn").addEventListener("click", () => {
+  instructionsModalEl.classList.add("hidden");
+  instructionsAgent = null;
+});
+
+document.getElementById("instructions-template-btn").addEventListener("click", () => {
+  const tpl = instructionsTemplate(instructionsAgent && instructionsAgent.displayName);
+  if (instructionsTextareaEl.value.trim() && !confirm("Replace the current text with the template?")) return;
+  instructionsTextareaEl.value = tpl;
+  updateInstructionsCount();
+  instructionsTextareaEl.focus();
+});
+
+saveInstructionsBtn.addEventListener("click", async () => {
+  if (!instructionsAgent) return;
+  const agent = instructionsAgent;
+  const content = instructionsTextareaEl.value;
+  saveInstructionsBtn.disabled = true;
+  try {
+    let res = await window.api.writeInstructions({
+      agentPath: agent.path,
+      content,
+      baseMtimeMs: instructionsBaseMtime,
+    });
+    if (res && res.conflict) {
+      const overwrite = confirm(
+        "This agent's CLAUDE.md changed on disk since you opened it (Claude may have edited it, " +
+          "or it was changed elsewhere).\n\nOK = overwrite with your version.\nCancel = discard your " +
+          "changes and reload the current file."
+      );
+      if (!overwrite) {
+        instructionsTextareaEl.value = res.content || "";
+        instructionsBaseMtime = res.mtimeMs;
+        updateInstructionsCount();
+        saveInstructionsBtn.disabled = false;
+        return;
+      }
+      res = await window.api.writeInstructions({ agentPath: agent.path, content, force: true });
+    }
+    instructionsBaseMtime = res && res.mtimeMs ? res.mtimeMs : instructionsBaseMtime;
+    instructionsModalEl.classList.add("hidden");
+    instructionsAgent = null;
+    // If this was the selected agent, the "no instructions" nudge may now be stale.
+    if (activeAgentPath === agent.path) updateNoInstructionsBanner(agent);
+  } catch (e) {
+    alert("Could not save: " + e.message);
+  } finally {
+    saveInstructionsBtn.disabled = false;
+  }
+});
+
+// --- "this agent has no instructions" nudge in the chat view --------------
+
+const noInstructionsBannerEl = document.getElementById("no-instructions-banner");
+
+function instructionsBannerDismissKey(folderName) {
+  return "instrBannerDismissed:" + folderName;
+}
+
+async function updateNoInstructionsBanner(agent) {
+  if (!agent) {
+    noInstructionsBannerEl.classList.add("hidden");
+    return;
+  }
+  let show = false;
+  if (!localStorage.getItem(instructionsBannerDismissKey(agent.folderName))) {
+    try {
+      const res = await window.api.readInstructions(agent.path);
+      show = !res.exists || !String(res.content).trim();
+    } catch (e) {
+      show = false;
+    }
+  }
+  // Ignore a result that arrived after the user moved to a different agent.
+  if (activeAgentPath !== agent.path) return;
+  noInstructionsBannerEl.classList.toggle("hidden", !show);
+  requestAnimationFrame(refitActiveTerminal); // banner changes chat-view height
+}
+
+document.getElementById("add-instructions-btn").addEventListener("click", () => {
+  const agent = agents.find((a) => a.path === activeAgentPath);
+  if (agent) openInstructionsModal(agent);
+});
+
+document.getElementById("dismiss-instructions-banner-btn").addEventListener("click", () => {
+  const agent = agents.find((a) => a.path === activeAgentPath);
+  if (agent) localStorage.setItem(instructionsBannerDismissKey(agent.folderName), "1");
+  noInstructionsBannerEl.classList.add("hidden");
+  requestAnimationFrame(refitActiveTerminal);
 });
 
 // ------------------------------------------------------- delete agent --

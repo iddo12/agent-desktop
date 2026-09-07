@@ -60,6 +60,12 @@
           <button id="history-toggle-btn" title="View past conversation history">History</button>
         </div>
 
+        <div id="no-instructions-banner" class="hidden">
+          <span>This agent has no instructions yet.</span>
+          <button id="add-instructions-btn">Add instructions</button>
+          <button id="dismiss-instructions-banner-btn" class="dismiss-btn" title="Hide">&times;</button>
+        </div>
+
         <div id="chat-body">
           <div id="chat-messages-view"></div>
           <div id="terminal-wrapper" class="view-hidden">
@@ -124,6 +130,29 @@
       <div class="modal-actions">
         <button id="cancel-agent-btn" class="secondary">Cancel</button>
         <button id="create-agent-btn" class="primary">Create Agent</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="instructions-modal" class="modal hidden">
+    <div class="modal-box modal-box-wide">
+      <h2 id="instructions-modal-title">Instructions</h2>
+      <p class="modal-hint">
+        This agent's standing instructions &mdash; the <code>CLAUDE.md</code> file Claude
+        Code loads at the start of every session. This is what actually drives the agent
+        (the "Role description" is only the sidebar blurb). Workspace-wide rules from a
+        parent <code>CLAUDE.md</code> apply on top of this. Changes take effect on the
+        agent's next session &mdash; use <strong>Reset Session</strong>, or reopen the
+        agent, to apply now.
+      </p>
+      <textarea id="instructions-textarea" spellcheck="false" placeholder="# Agent name&#10;&#10;What this agent is responsible for, what it owns, who it reports to, how it should behave, what it produces and when..."></textarea>
+      <div id="instructions-meta">
+        <button id="instructions-template-btn" class="secondary" type="button">Start from template</button>
+        <span id="instructions-count"></span>
+      </div>
+      <div class="modal-actions">
+        <button id="cancel-instructions-btn" class="secondary">Cancel</button>
+        <button id="save-instructions-btn" class="primary">Save</button>
       </div>
     </div>
   </div>

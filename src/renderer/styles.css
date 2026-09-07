@@ -1375,6 +1375,88 @@ html, body {
 }
 .modal-box select { cursor: pointer; }
 
+/* Wide variant for the instructions (CLAUDE.md) editor - a full document,
+   not a one-line field. */
+.modal-box-wide {
+  width: min(720px, 92vw);
+  max-height: 92vh;
+  overflow-y: auto;
+}
+.modal-hint {
+  margin: 0 0 12px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.modal-hint code {
+  background: var(--bg-hover);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.9em;
+}
+#instructions-textarea {
+  width: 100%;
+  height: 52vh;
+  min-height: 200px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 12px;
+  font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  resize: vertical;
+  tab-size: 2;
+}
+#instructions-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+#instructions-count {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+/* Nudge shown in the chat view when the selected agent has no CLAUDE.md. */
+#no-instructions-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 16px 8px;
+  padding: 8px 12px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+#no-instructions-banner span { flex: 1; }
+#no-instructions-banner #add-instructions-btn {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.76rem;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#no-instructions-banner #add-instructions-btn:hover { filter: brightness(1.08); }
+#no-instructions-banner .dismiss-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+#no-instructions-banner .dismiss-btn:hover { color: var(--text); }
+
 #avatar-picker {
   display: flex;
   align-items: center;

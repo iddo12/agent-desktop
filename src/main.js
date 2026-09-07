@@ -4,7 +4,7 @@ const fs = require("fs");
 const https = require("https");
 const { execSync, execFileSync, spawn } = require("child_process");
 const pty = require("node-pty");
-const { listAgents, createAgent, updateAgent, deleteAgent } = require("./agents");
+const { listAgents, createAgent, updateAgent, deleteAgent, ROOT: AGENTS_ROOT } = require("./agents");
 const { readGroups, writeGroups } = require("./groups");
 const {
   syncArchive,
@@ -767,6 +767,54 @@ ipcMain.handle("update-agent", (event, { agentPath, name, role, avatarPath }) =>
   }
   updateAgent(agentPath, { name, role, avatarBuffer });
   return { ok: true };
+});
+
+// --- Agent instructions (the agent folder's own CLAUDE.md) ---------------
+// This is the file Claude Code actually loads as the agent's standing
+// instructions every session - distinct from the short `role` blurb in
+// agent_config.json. Editing it in-app means a user (not just a Claude
+// session willing to write files) can set an agent up.
+function agentClaudeMdPath(agentPath) {
+  const resolved = path.resolve(agentPath);
+  // Only ever touch a CLAUDE.md that sits directly inside a real agent
+  // folder one level under the agents root - refuse anything else outright
+  // rather than trust the caller's path.
+  if (path.dirname(resolved) !== path.resolve(AGENTS_ROOT)) {
+    throw new Error("Refusing to touch a path outside the agents root");
+  }
+  return path.join(resolved, "CLAUDE.md");
+}
+
+ipcMain.handle("read-instructions", (event, { agentPath }) => {
+  const file = agentClaudeMdPath(agentPath);
+  if (!fs.existsSync(file)) return { exists: false, content: "", mtimeMs: null };
+  const content = fs.readFileSync(file, "utf-8");
+  const mtimeMs = fs.statSync(file).mtimeMs;
+  return { exists: true, content, mtimeMs };
+});
+
+ipcMain.handle("write-instructions", async (event, { agentPath, content, baseMtimeMs, force }) => {
+  const file = agentClaudeMdPath(agentPath);
+  const exists = fs.existsSync(file);
+  if (!force) {
+    // Conflict check: the file changed on disk since the editor loaded it
+    // (Claude edited it, an external editor, a Dropbox-synced change from
+    // another machine). Hand the current content back so the renderer can
+    // offer to reload rather than silently clobbering.
+    const currentMtime = exists ? fs.statSync(file).mtimeMs : null;
+    const changed = exists
+      ? baseMtimeMs == null || Math.abs(currentMtime - baseMtimeMs) > 1
+      : baseMtimeMs != null;
+    if (changed) {
+      return {
+        conflict: true,
+        content: exists ? fs.readFileSync(file, "utf-8") : "",
+        mtimeMs: currentMtime,
+      };
+    }
+  }
+  await withFsRetryAsync(() => fs.writeFileSync(file, content, "utf-8"));
+  return { ok: true, mtimeMs: fs.statSync(file).mtimeMs };
 });
 
 // Windows does not release a killed process file handles (including its
