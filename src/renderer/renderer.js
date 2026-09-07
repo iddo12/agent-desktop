@@ -721,7 +721,8 @@ function showTerminalFor(agent) {
     // Populate the chat view immediately rather than waiting for the next
     // terminal-data event, so switching to an agent shows whatever's
     // already in its buffer (e.g. this session's activity so far) right away.
-    rebuildChatView(agent.path);
+    // forceBottom: a freshly-opened agent should land on its latest message.
+    rebuildChatView(agent.path, { forceBottom: true });
 
     // The chat textarea is the primary way to compose a message; the terminal
     // itself is still directly focusable by clicking into it (e.g. for quick
@@ -893,7 +894,17 @@ function renderTextWithImages(container, text) {
   }
 }
 
-function renderChatBlocks(blocks, pendingSent) {
+function renderChatBlocks(blocks, pendingSent, opts = {}) {
+  // Keep the reader where they are. This view is re-rendered from scratch on
+  // every rebuild - the 4s stale poll, every burst of streaming output, etc.
+  // Snapping to the bottom each time yanked the user back down mid-read
+  // whenever they scrolled up. Only stick to the bottom if they were already
+  // there, or a caller explicitly asks (agent switch, just sent a message).
+  const scrollEl = chatMessagesViewEl;
+  const NEAR_BOTTOM_PX = 60;
+  const wasNearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <= NEAR_BOTTOM_PX;
+  const prevScrollTop = scrollEl.scrollTop;
+
   chatMessagesViewEl.innerHTML = "";
   for (const block of blocks) {
     const text = block.lines.join("\n").trim();
@@ -939,7 +950,11 @@ function renderChatBlocks(blocks, pendingSent) {
     renderTextWithImages(el, pending.text);
     chatMessagesViewEl.appendChild(el);
   }
-  chatMessagesViewEl.scrollTop = chatMessagesViewEl.scrollHeight;
+  if (opts.forceBottom || wasNearBottom) {
+    scrollEl.scrollTop = scrollEl.scrollHeight;
+  } else {
+    scrollEl.scrollTop = prevScrollTop;
+  }
 }
 
 // Whitespace-normalized for comparison only (not for display) - guards
@@ -963,7 +978,7 @@ const PENDING_SENT_TIMEOUT_MS = 45000;
 // the next one is scheduled just resolves and renders somewhat later -
 // fine, since renderChatBlocks() always renders the full latest state, not
 // a delta).
-async function rebuildChatView(agentPath) {
+async function rebuildChatView(agentPath, opts = {}) {
   const session = terminals.get(agentPath);
   if (!session) return;
   const blocks = await window.api.getLiveTranscript(agentPath);
@@ -1016,7 +1031,7 @@ async function rebuildChatView(agentPath) {
     const notExpired = now - pending.addedAt < PENDING_SENT_TIMEOUT_MS;
     return stillUnmatched && notExpired;
   });
-  renderChatBlocks(blocks, session.pendingSent);
+  renderChatBlocks(blocks, session.pendingSent, { forceBottom: !!opts.forceBottom });
 }
 
 // Originally tuned (widened from 120ms) to dodge a mid-redraw terminal read
@@ -1091,7 +1106,7 @@ function setRawTerminalMode(on) {
     const session = activeAgentPath && terminals.get(activeAgentPath);
     if (session) session.term.focus();
   } else if (activeAgentPath) {
-    rebuildChatView(activeAgentPath);
+    rebuildChatView(activeAgentPath, { forceBottom: true });
     // Previously only Reset Session's own handler refocused the compose
     // box after leaving raw mode - toggling this button by hand left focus
     // wherever it was (often still on the now-hidden terminal element),
@@ -2034,7 +2049,7 @@ function submitToAgent(agentPath, text) {
       // round-trip. A real rebuild is already scheduled by markActivity()
       // above once the pty actually reacts, so this is just the immediate,
       // optimistic frame - it's fine if it's using a render that's a beat old.
-      renderChatBlocks(session.lastBlocks || [], session.pendingSent);
+      renderChatBlocks(session.lastBlocks || [], session.pendingSent, { forceBottom: true });
       updateThinkingIndicator();
     }
   }
