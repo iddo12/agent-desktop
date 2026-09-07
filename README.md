@@ -37,7 +37,7 @@ By default, agents live as sibling folders next to `agent-desktop` itself — i.
 
 ## Adding an agent
 
-Click **+ New** in the sidebar and give it a name. That creates a folder for it with:
+Click **+ Agent** in the sidebar and give it a name. That creates a folder for it with:
 
 - `agent_config.json` — display name, role description, avatar
 - `master_state.md` — optional status doc the agent can keep updated (`## Status`, `## Health`, `## Recent Tasks` sections are parsed and surfaced in the sidebar)
