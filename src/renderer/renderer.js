@@ -1581,6 +1581,8 @@ let editingAgentPath = null;
 const agentModalTitleEl = document.getElementById("agent-modal-title");
 const createAgentBtn = document.getElementById("create-agent-btn");
 const agentGroupSelect = document.getElementById("new-agent-group");
+const newAgentInstructionsEl = document.getElementById("new-agent-instructions");
+let editAgentInstructionsBase = ""; // CLAUDE.md content loaded when the Edit modal opened, to detect changes
 
 // Fills the modal's Group dropdown with "None" + every group, selecting the
 // given group id (or "" for none).
@@ -1613,6 +1615,8 @@ function openCreateAgentModal() {
   avatarPreview.style.display = "none";
   selectedAvatarPath = null;
   populateAgentGroupSelect(null);
+  newAgentInstructionsEl.value = "";
+  editAgentInstructionsBase = "";
   modalEl.classList.remove("hidden");
   nameInput.focus();
 }
@@ -1625,6 +1629,18 @@ function openEditAgentModal(agent) {
   roleInput.value = agent.role || "";
   const curGroup = groupsDoc.groups.find((g) => g.members.includes(agent.folderName));
   populateAgentGroupSelect(curGroup ? curGroup.id : "");
+  // Load the agent's current CLAUDE.md into the field (fire-and-forget - the
+  // modal just opened, focus is on the name field, nothing to race).
+  newAgentInstructionsEl.value = "";
+  editAgentInstructionsBase = "";
+  window.api
+    .readInstructions(agent.path)
+    .then((res) => {
+      if (editingAgentPath !== agent.path) return; // modal moved on
+      editAgentInstructionsBase = res.content || "";
+      if (!newAgentInstructionsEl.value) newAgentInstructionsEl.value = editAgentInstructionsBase;
+    })
+    .catch(() => {});
   selectedAvatarPath = null; // only replaces the avatar if a new one is picked below
   if (agent.avatar) {
     avatarPreview.src = agent.avatar;
@@ -1660,7 +1676,9 @@ createAgentBtn.addEventListener("click", async () => {
   }
   try {
     const desiredGroupId = agentGroupSelect.value || null;
+    const instructions = newAgentInstructionsEl.value;
     let targetFolderName = editingAgentPath ? folderNameFromPath(editingAgentPath) : null;
+    let instructionsTargetPath = editingAgentPath || null;
     if (editingAgentPath) {
       await window.api.updateAgent({
         agentPath: editingAgentPath,
@@ -1675,6 +1693,15 @@ createAgentBtn.addEventListener("click", async () => {
         avatarPath: selectedAvatarPath,
       });
       targetFolderName = res && res.agentDir ? folderNameFromPath(res.agentDir) : null;
+      instructionsTargetPath = (res && res.agentDir) || null;
+    }
+    // Write CLAUDE.md if there's content to write (create) or it changed (edit).
+    if (instructionsTargetPath && (editingAgentPath ? instructions !== editAgentInstructionsBase : instructions.trim())) {
+      try {
+        await window.api.writeInstructions({ agentPath: instructionsTargetPath, content: instructions, force: true });
+      } catch (e) {
+        alert("The agent was saved, but its instructions could not be written: " + e.message);
+      }
     }
     modalEl.classList.add("hidden");
     const wasEditingActive = editingAgentPath && editingAgentPath === activeAgentPath;
@@ -1697,6 +1724,7 @@ createAgentBtn.addEventListener("click", async () => {
         setChatRoleText(chatRoleEl, updated.role);
         chatAvatarSlotEl.innerHTML = "";
         chatAvatarSlotEl.appendChild(renderAvatarEl(updated));
+        updateNoInstructionsBanner(updated); // instructions may have just been added
       }
     }
   } catch (e) {

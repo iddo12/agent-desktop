@@ -119,7 +119,10 @@
       <label>Name</label>
       <input id="new-agent-name" type="text" placeholder="e.g. Marketing Agent" />
       <label>Role description</label>
-      <textarea id="new-agent-role" rows="3" placeholder="What does this agent do?"></textarea>
+      <textarea id="new-agent-role" rows="2" placeholder="One line for the sidebar"></textarea>
+      <label>Instructions (optional)</label>
+      <p class="field-hint">The agent's <code>CLAUDE.md</code> &mdash; its full standing instructions, loaded every session. Also editable later from the agent's &#8942; menu.</p>
+      <textarea id="new-agent-instructions" rows="6" spellcheck="false" placeholder="# Agent name&#10;&#10;What it owns, who it reports to, how it should behave, what it produces and when..."></textarea>
       <label>Group (optional)</label>
       <select id="new-agent-group"></select>
       <label>Avatar (optional)</label>
