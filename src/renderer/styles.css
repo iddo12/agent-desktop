@@ -1,18 +1,23 @@
 :root {
-  --bg-app: #0f1115;
-  --bg-sidebar: #15181f;
-  --bg-panel: #1a1e26;
-  --bg-hover: #232833;
-  --bg-active: #2a3040;
-  --border: #262b35;
-  --text: #e6e8ec;
-  --text-muted: #8b93a3;
-  --accent: #6366f1;
-  --accent-2: #0ea5e9;
+  /* Warm "paper" light theme, matched to the Claude Code desktop app. The
+     whole UI is driven off these tokens - retheming means editing here, not
+     hunting literals through the file. A handful of intentional literals
+     remain (the yellow user chat bubble, red recording/warning states, dark
+     scrims that sit over images) - those are state colours, not chrome. */
+  --bg-app: #faf9f5;      /* app background / canvas */
+  --bg-sidebar: #f3f1ea;  /* sidebar + slightly-recessed surfaces */
+  --bg-panel: #ffffff;    /* raised panels, inputs, dropdowns */
+  --bg-hover: #efece3;
+  --bg-active: #e6e2d6;
+  --border: #e3e0d5;
+  --text: #26241f;
+  --text-muted: #77746b;
+  --accent: #c96442;      /* Claude terracotta */
+  --accent-2: #a94f30;    /* deeper terracotta, for gradients */
   --health-healthy: #16a34a;
-  --health-warning: #d97706;
+  --health-warning: #b45309;
   --health-critical: #dc2626;
-  --health-unknown: #6b7280;
+  --health-unknown: #9c9990;
 }
 
 * { box-sizing: border-box; }
@@ -122,7 +127,7 @@ html, body {
 #interfering-service-warning .warning-title,
 #claude-cli-warning .warning-title {
   font-weight: 700;
-  color: #fca5a5;
+  color: #b91c1c;
   margin-bottom: 4px;
 }
 #interfering-service-warning .warning-body,
@@ -230,7 +235,7 @@ html, body {
   height: 36px;
   border-radius: 50%;
   object-fit: cover;
-  background: #3a4050;
+  background: #d9d5c8;
   flex-shrink: 0;
 }
 .avatar-fallback {
@@ -302,7 +307,7 @@ html, body {
   background: var(--bg-sidebar);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+  box-shadow: 0 12px 32px rgba(40,36,28,0.18);
   padding: 6px;
   z-index: 20;
 }
@@ -320,6 +325,197 @@ html, body {
 }
 .agent-item-menu button:hover { background: var(--bg-hover); }
 .agent-item-menu button.danger-text { color: var(--health-critical); }
+.agent-item-menu button.menu-current { color: var(--accent); font-weight: 600; }
+.agent-item-menu .menu-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 8px 10px 3px;
+}
+.agent-item-menu .menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 4px;
+}
+.agent-item-menu { max-height: 70vh; overflow-y: auto; }
+
+.group-empty {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 6px 8px;
+  opacity: 0.7;
+}
+
+/* ---------------- Sidebar groups ("folders") ---------------- */
+
+#sidebar-header-actions {
+  -webkit-app-region: no-drag;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+#new-group-btn {
+  -webkit-app-region: no-drag;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 0.8rem;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#new-group-btn:hover { color: var(--text); border-color: var(--text-muted); }
+
+/* One-time, dismissible reminder that groups are purely cosmetic. Neutral
+   (not the red warning-banner look) - it's informational, not a problem. */
+#agent-groups-note {
+  margin: 0 16px 12px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+#agent-groups-note .note-body { margin-bottom: 8px; }
+#agent-groups-note strong { color: var(--text); }
+#agent-groups-note .dismiss-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 0.74rem;
+  padding: 5px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#agent-groups-note .dismiss-btn:hover { color: var(--text); border-color: var(--text-muted); }
+
+.group-block {
+  margin-bottom: 4px;
+  border-radius: 10px;
+}
+/* Accent stripe down the whole group so membership still reads when the
+   header has scrolled out of view. Colour is set inline per group. */
+.group-agents {
+  border-left: 2px solid var(--group-color, var(--border));
+  margin-left: 10px;
+  padding-left: 6px;
+}
+.group-block.collapsed .group-agents { display: none; }
+.group-block.drop-target {
+  outline: 2px dashed var(--group-color, var(--accent));
+  outline-offset: -2px;
+}
+
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 6px 7px 4px;
+  cursor: pointer;
+  border-radius: 8px;
+  user-select: none;
+}
+.group-header:hover { background: var(--bg-hover); }
+.group-header.drop-target { background: var(--bg-active); }
+
+.group-caret {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  transition: transform 0.12s ease;
+}
+.group-block.collapsed .group-caret { transform: rotate(-90deg); }
+
+.group-color-dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--group-color, var(--text-muted));
+}
+
+.group-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-count {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-active);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.group-menu-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+}
+.group-header:hover .group-menu-btn,
+.group-menu-btn.open { opacity: 1; }
+.group-menu-btn:hover { background: var(--bg-active); color: var(--text); }
+
+/* Reuses .agent-item-menu positioning/look; same floating dropdown shape. */
+
+.agent-item.dragging { opacity: 0.4; }
+.agent-item.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+.agent-item.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+
+/* Group create/edit modal colour picker */
+#group-color-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#group-color-input {
+  width: 44px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+#group-color-swatches {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.group-color-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+.group-color-swatch.selected { border-color: var(--text); }
 
 /* ---------------- Main panel ---------------- */
 
@@ -704,9 +900,9 @@ html, body {
    conversation naturally has. */
 .chat-session-ended-notice {
   align-self: center;
-  background: rgba(220, 38, 38, 0.14);
-  border: 1px solid rgba(220, 38, 38, 0.5);
-  color: #fca5a5;
+  background: rgba(220, 38, 38, 0.1);
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  color: #b91c1c;
   border-radius: 8px;
   padding: 10px 16px;
   font-size: 0.85rem;
@@ -820,7 +1016,8 @@ html, body {
   right: 16px;
   bottom: 12px;
   height: 92px;
-  background: var(--bg-panel);
+  /* Must match the xterm theme background set in renderer.js, not --bg-panel. */
+  background: var(--bg-app);
   pointer-events: none;
 }
 
@@ -871,7 +1068,7 @@ html, body {
   animation: pending-pulse 1.4s ease-in-out infinite;
 }
 #chat-thinking-indicator.long {
-  color: #d69e2e;
+  color: #b26f00;
 }
 
 /* Small utility row above the compose box - a one-click way to prefill the
@@ -882,16 +1079,16 @@ html, body {
   margin-bottom: 6px;
 }
 #save-to-master-btn {
-  background: rgba(99, 102, 241, 0.14);
-  border: 1px solid rgba(99, 102, 241, 0.55);
-  color: #c7d2fe;
+  background: rgba(201, 100, 66, 0.12);
+  border: 1px solid rgba(201, 100, 66, 0.45);
+  color: var(--accent);
   border-radius: 8px;
   padding: 5px 12px;
   font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
 }
-#save-to-master-btn:hover { background: rgba(99, 102, 241, 0.26); border-color: var(--accent); color: var(--text); }
+#save-to-master-btn:hover { background: rgba(201, 100, 66, 0.22); border-color: var(--accent); color: var(--accent-2); }
 
 #chat-input-row {
   display: flex;
@@ -945,9 +1142,9 @@ html, body {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: rgba(15, 17, 21, 0.85);
+  background: rgba(0, 0, 0, 0.6);
   border: none;
-  color: var(--text);
+  color: #fff;
   font-size: 0.7rem;
   line-height: 1;
   cursor: pointer;
@@ -972,8 +1169,8 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(99, 102, 241, 0.1);
-  border: 1px solid rgba(99, 102, 241, 0.35);
+  background: rgba(201, 100, 66, 0.09);
+  border: 1px solid rgba(201, 100, 66, 0.3);
   border-radius: 10px;
   padding: 6px 10px;
 }
@@ -1031,7 +1228,7 @@ html, body {
    accent color as focus, so it's obvious the drop will land there. */
 #chat-input-bar.drag-over #chat-input {
   border-color: var(--accent);
-  background: rgba(99, 102, 241, 0.08);
+  background: rgba(201, 100, 66, 0.07);
 }
 
 #chat-input-actions {
@@ -1139,7 +1336,7 @@ html, body {
 .modal {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.55);
+  background: rgba(35,31,24,0.35);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1152,7 +1349,7 @@ html, body {
   border-radius: 14px;
   padding: 24px;
   width: 380px;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  box-shadow: 0 20px 60px rgba(40,36,28,0.22);
 }
 .modal-box h2 { margin: 0 0 16px; font-size: 1.1rem; }
 .modal-box label {
@@ -1161,7 +1358,7 @@ html, body {
   color: var(--text-muted);
   margin: 12px 0 4px;
 }
-.modal-box input[type=text], .modal-box textarea {
+.modal-box input[type=text], .modal-box textarea, .modal-box select {
   width: 100%;
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -1172,6 +1369,7 @@ html, body {
   font-size: 0.88rem;
   resize: vertical;
 }
+.modal-box select { cursor: pointer; }
 
 #avatar-picker {
   display: flex;

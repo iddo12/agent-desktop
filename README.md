@@ -7,6 +7,7 @@ If you've ever ended up with five terminal windows each running `claude` for a d
 ## What it does
 
 - **A sidebar of agents.** Each agent is just a folder on disk. Add one, and Agent Desktop dispatches a real, native Claude Code background agent (`claude --bg`) for it — the actual CLI's own multi-agent system, not a reimplementation.
+- **Groups to organize the sidebar.** Collect agents into colored, collapsible groups ("+ Group" in the sidebar), drag agents between them, and reorder groups by dragging their headers. **Groups are purely a visual aid** — they do not define reporting lines, which agent is a "manager", or any relationship between agents. What an agent does and answers to lives in that agent's own instructions (its `CLAUDE.md`), not in how it's grouped here. Group definitions live in one `agent_groups.json` file next to your agent folders; agents you haven't placed in a group show under "Ungrouped".
 - **A chat view, not a raw terminal.** Messages, tool calls, and responses are parsed out of the session's own transcript and shown as a normal chat thread. A "Raw Terminal" toggle drops back to the literal terminal when you want it.
 - **Status at a glance.** Each agent can maintain its own `master_state.md` (status / health / recent tasks) that shows up as a one-line summary in the sidebar, so you can tell what's going on without opening every agent.
 - **Conversation archive.** Sessions get archived to per-day markdown files, browsable without digging through raw JSONL.
@@ -48,6 +49,7 @@ Selecting the agent starts a real `claude` session with that folder as its worki
 
 - `src/main.js` — Electron main process: window management, dispatching each agent as a native Claude Code background agent (`claude --bg`) and attaching a node-pty view to it (`claude attach`), IPC handlers. One-shot CLI calls (listing agents, dispatching, stopping) go through node-pty rather than `child_process`, since the latter has proven unreliable in some launch contexts on Windows.
 - `src/agents.js` — agent folder CRUD (create/list/update/delete).
+- `src/groups.js` — reads/writes `agent_groups.json` (the sidebar's visual groups). Normalizes on every read and write, and falls back to "no groups" if the file is missing or corrupt, so a bad edit can never break the sidebar.
 - `src/archive.js` — reads each agent's live JSONL transcript and turns it into the chat view's message blocks, plus the per-day markdown archive.
 - `src/fsRetry.js` — retry-with-backoff wrapper for file operations, since cloud-synced folders (Dropbox, OneDrive, etc.) and antivirus/security software can transiently lock files mid-write.
 - `src/renderer/` — the UI itself.

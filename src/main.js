@@ -5,6 +5,7 @@ const https = require("https");
 const { execSync, execFileSync, spawn } = require("child_process");
 const pty = require("node-pty");
 const { listAgents, createAgent, updateAgent, deleteAgent } = require("./agents");
+const { readGroups, writeGroups } = require("./groups");
 const {
   syncArchive,
   listArchivedDays,
@@ -727,6 +728,13 @@ app.on("window-all-closed", () => {
 // ---------------------------------------------------------------- agents --
 
 ipcMain.handle("list-agents", () => listAgents());
+
+// Sidebar groups ("folders"). Visual-only - see src/groups.js for the full
+// contract. The renderer sends the whole document back on every change
+// (single user, single window via requestSingleInstanceLock, small file), and
+// writeGroups() normalizes + persists it and returns the cleaned copy.
+ipcMain.handle("list-groups", () => readGroups());
+ipcMain.handle("save-groups", (event, { doc }) => writeGroups(doc));
 
 ipcMain.handle("pick-avatar", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {

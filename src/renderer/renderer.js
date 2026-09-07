@@ -1,6 +1,7 @@
 const AVATAR_PALETTE = ["#6366f1", "#0ea5e9", "#14b8a6", "#f59e0b", "#ec4899", "#8b5cf6", "#22c55e"];
 
 let agents = [];
+let groupsDoc = { version: 1, groups: [] };
 let activeAgentPath = null;
 let selectedAvatarPath = null;
 
@@ -91,47 +92,358 @@ function renderAvatarEl(agent) {
 }
 
 async function loadAgents() {
-  agents = await window.api.listAgents();
+  const [agentList, gDoc] = await Promise.all([window.api.listAgents(), window.api.listGroups()]);
+  agents = agentList;
+  groupsDoc = gDoc && Array.isArray(gDoc.groups) ? gDoc : { version: 1, groups: [] };
   renderAgentList();
+  updateAgentGroupsNote();
 }
+
+// Persist the in-memory groupsDoc and re-render. The main process normalizes
+// (dedupes members, repacks order, drops dangling parentIds) and returns the
+// cleaned copy, which we adopt so the renderer and disk never drift.
+async function saveGroupsDoc() {
+  try {
+    const saved = await window.api.saveGroups(groupsDoc);
+    if (saved && Array.isArray(saved.groups)) groupsDoc = saved;
+  } catch (e) {
+    console.error("Failed to save groups", e);
+  }
+  renderAgentList();
+  updateAgentGroupsNote();
+}
+
+// ------------------------------------------------------ group render/state --
+
+const GROUP_COLOR_PRESETS = [
+  "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6",
+  "#06b6d4", "#f43f5e", "#84cc16", "#ec4899",
+];
+
+function genGroupId() {
+  return "g_" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-3);
+}
+
+function readCollapsedMap() {
+  try {
+    return JSON.parse(localStorage.getItem("agentGroupCollapsed") || "{}") || {};
+  } catch (e) {
+    return {};
+  }
+}
+function isGroupCollapsed(id) {
+  return !!readCollapsedMap()[id];
+}
+function setGroupCollapsed(id, collapsed) {
+  const map = readCollapsedMap();
+  if (collapsed) map[id] = true;
+  else delete map[id];
+  localStorage.setItem("agentGroupCollapsed", JSON.stringify(map));
+}
+
+// Drag state is a plain module var rather than dataTransfer payload so both
+// the dragover math and the drop handler can read it synchronously without
+// re-parsing. Cleared on every dragend (fired even when a drop misses).
+let dragState = null;
+
+function clearDragMarkers() {
+  document.querySelectorAll(".agent-item.dragging, .agent-item.drop-before, .agent-item.drop-after")
+    .forEach((el) => el.classList.remove("dragging", "drop-before", "drop-after"));
+  document.querySelectorAll(".group-block.drop-target, .group-header.drop-target")
+    .forEach((el) => el.classList.remove("drop-target"));
+}
+document.addEventListener("dragend", () => {
+  dragState = null;
+  clearDragMarkers();
+});
 
 function renderAgentList() {
   agentListEl.innerHTML = "";
-  for (const agent of agents) {
-    const item = document.createElement("div");
-    item.className = "agent-item" + (agent.path === activeAgentPath ? " active" : "");
-    item.appendChild(renderAvatarEl(agent));
+  closeAgentItemMenu();
+  closeGroupMenu();
 
-    const textWrap = document.createElement("div");
-    textWrap.className = "agent-item-text";
-    const nameEl = document.createElement("div");
-    nameEl.className = "agent-item-name";
-    nameEl.textContent = agent.displayName;
-    const roleEl = document.createElement("div");
-    roleEl.className = "agent-item-role";
-    roleEl.textContent = agent.role || agent.status;
-    textWrap.appendChild(nameEl);
-    textWrap.appendChild(roleEl);
-    item.appendChild(textWrap);
+  const byFolder = new Map(agents.map((a) => [a.folderName, a]));
+  const claimed = new Set();
 
-    const dot = document.createElement("div");
-    dot.className = "health-dot " + agent.healthLabel;
-    dot.title = agent.healthLabel;
-    item.appendChild(dot);
-
-    const menuBtn = document.createElement("button");
-    menuBtn.className = "agent-item-menu-btn";
-    menuBtn.title = "Agent options";
-    menuBtn.textContent = "⋮";
-    menuBtn.addEventListener("click", (e) => {
-      e.stopPropagation(); // don't also select the agent
-      openAgentItemMenu(agent, menuBtn);
-    });
-    item.appendChild(menuBtn);
-
-    item.addEventListener("click", () => selectAgent(agent));
-    agentListEl.appendChild(item);
+  const childrenOf = new Map(); // parentId ("" = root) -> [group]
+  for (const g of groupsDoc.groups) {
+    const key = g.parentId || "";
+    if (!childrenOf.has(key)) childrenOf.set(key, []);
+    childrenOf.get(key).push(g);
   }
+  for (const list of childrenOf.values()) list.sort((a, b) => a.order - b.order);
+
+  const renderGroup = (group) => {
+    const block = document.createElement("div");
+    block.className = "group-block";
+    if (isGroupCollapsed(group.id)) block.classList.add("collapsed");
+    block.style.setProperty("--group-color", group.color);
+    block.dataset.groupId = group.id;
+
+    const header = buildGroupHeader(group);
+    block.appendChild(header);
+
+    const wrap = document.createElement("div");
+    wrap.className = "group-agents";
+
+    for (const child of childrenOf.get(group.id) || []) {
+      wrap.appendChild(renderGroup(child));
+    }
+
+    let count = 0;
+    for (const folderName of group.members) {
+      const agent = byFolder.get(folderName);
+      if (!agent) continue; // a member whose folder no longer exists
+      claimed.add(folderName);
+      wrap.appendChild(renderAgentItem(agent, group.id));
+      count++;
+    }
+    header.querySelector(".group-count").textContent = String(count);
+
+    if (count === 0 && (childrenOf.get(group.id) || []).length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "group-empty";
+      empty.textContent = "Drop an agent here";
+      wrap.appendChild(empty);
+    }
+
+    block.appendChild(wrap);
+    wireGroupDropTarget(block, header, group.id);
+    return block;
+  };
+
+  for (const group of childrenOf.get("") || []) {
+    agentListEl.appendChild(renderGroup(group));
+  }
+
+  const ungrouped = agents.filter((a) => !claimed.has(a.folderName));
+
+  if (groupsDoc.groups.length === 0) {
+    // No groups defined at all - render exactly the pre-feature flat list,
+    // with no "Ungrouped" heading.
+    for (const agent of ungrouped) agentListEl.appendChild(renderAgentItem(agent, null));
+    return;
+  }
+
+  if (ungrouped.length > 0) {
+    const block = document.createElement("div");
+    block.className = "group-block";
+    if (isGroupCollapsed("__ungrouped__")) block.classList.add("collapsed");
+    block.dataset.groupId = "";
+
+    const header = document.createElement("div");
+    header.className = "group-header";
+    const caret = document.createElement("span");
+    caret.className = "group-caret";
+    caret.textContent = "▾";
+    const name = document.createElement("span");
+    name.className = "group-name";
+    name.textContent = "Ungrouped";
+    const cnt = document.createElement("span");
+    cnt.className = "group-count";
+    cnt.textContent = String(ungrouped.length);
+    header.append(caret, name, cnt);
+    header.addEventListener("click", () => {
+      const nowCollapsed = !block.classList.contains("collapsed");
+      block.classList.toggle("collapsed", nowCollapsed);
+      setGroupCollapsed("__ungrouped__", nowCollapsed);
+    });
+
+    const wrap = document.createElement("div");
+    wrap.className = "group-agents";
+    for (const agent of ungrouped) wrap.appendChild(renderAgentItem(agent, null));
+
+    block.append(header, wrap);
+    wireGroupDropTarget(block, header, null); // dropping here = remove from any group
+    agentListEl.appendChild(block);
+  }
+}
+
+function buildGroupHeader(group) {
+  const header = document.createElement("div");
+  header.className = "group-header";
+  header.draggable = true;
+
+  const caret = document.createElement("span");
+  caret.className = "group-caret";
+  caret.textContent = "▾";
+
+  const dot = document.createElement("span");
+  dot.className = "group-color-dot";
+
+  const name = document.createElement("span");
+  name.className = "group-name";
+  name.textContent = group.name;
+
+  const count = document.createElement("span");
+  count.className = "group-count";
+
+  const menuBtn = document.createElement("button");
+  menuBtn.className = "group-menu-btn";
+  menuBtn.title = "Group options";
+  menuBtn.textContent = "⋮";
+  menuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openGroupMenu(group, menuBtn);
+  });
+
+  header.append(caret, dot, name, count, menuBtn);
+
+  header.addEventListener("click", (e) => {
+    if (e.target === menuBtn) return;
+    const block = header.closest(".group-block");
+    const nowCollapsed = !block.classList.contains("collapsed");
+    block.classList.toggle("collapsed", nowCollapsed);
+    setGroupCollapsed(group.id, nowCollapsed);
+  });
+
+  header.addEventListener("dragstart", (e) => {
+    dragState = { type: "group", id: group.id };
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", group.name); } catch (err) {}
+  });
+
+  return header;
+}
+
+function renderAgentItem(agent, groupId) {
+  const item = document.createElement("div");
+  item.className = "agent-item" + (agent.path === activeAgentPath ? " active" : "");
+  item.draggable = true;
+  item.dataset.folderName = agent.folderName;
+  item.dataset.groupId = groupId || "";
+  item.appendChild(renderAvatarEl(agent));
+
+  const textWrap = document.createElement("div");
+  textWrap.className = "agent-item-text";
+  const nameEl = document.createElement("div");
+  nameEl.className = "agent-item-name";
+  nameEl.textContent = agent.displayName;
+  const roleEl = document.createElement("div");
+  roleEl.className = "agent-item-role";
+  roleEl.textContent = agent.role || agent.status;
+  textWrap.appendChild(nameEl);
+  textWrap.appendChild(roleEl);
+  item.appendChild(textWrap);
+
+  const dot = document.createElement("div");
+  dot.className = "health-dot " + agent.healthLabel;
+  dot.title = agent.healthLabel;
+  item.appendChild(dot);
+
+  const menuBtn = document.createElement("button");
+  menuBtn.className = "agent-item-menu-btn";
+  menuBtn.title = "Agent options";
+  menuBtn.textContent = "⋮";
+  menuBtn.addEventListener("click", (e) => {
+    e.stopPropagation(); // don't also select the agent
+    openAgentItemMenu(agent, menuBtn);
+  });
+  item.appendChild(menuBtn);
+
+  item.addEventListener("click", () => selectAgent(agent));
+
+  item.addEventListener("dragstart", (e) => {
+    e.stopPropagation();
+    dragState = { type: "agent", folderName: agent.folderName };
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", agent.folderName); } catch (err) {}
+    item.classList.add("dragging");
+  });
+  item.addEventListener("dragover", (e) => {
+    if (!dragState || dragState.type !== "agent") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = item.getBoundingClientRect();
+    const after = e.clientY > rect.top + rect.height / 2;
+    item.classList.toggle("drop-after", after);
+    item.classList.toggle("drop-before", !after);
+  });
+  item.addEventListener("dragleave", () => {
+    item.classList.remove("drop-before", "drop-after");
+  });
+  item.addEventListener("drop", (e) => {
+    if (!dragState || dragState.type !== "agent") return;
+    e.preventDefault();
+    e.stopPropagation(); // handled here, don't also fire the group block's drop
+    const rect = item.getBoundingClientRect();
+    const position = e.clientY > rect.top + rect.height / 2 ? "after" : "before";
+    const dragged = dragState.folderName;
+    item.classList.remove("drop-before", "drop-after");
+    if (dragged && dragged !== agent.folderName) {
+      moveAgent(dragged, groupId || null, { relativeTo: agent.folderName, position });
+    }
+  });
+
+  return item;
+}
+
+function wireGroupDropTarget(block, header, groupId) {
+  block.addEventListener("dragover", (e) => {
+    if (!dragState) return;
+    if (dragState.type === "agent") {
+      e.preventDefault();
+      block.classList.add("drop-target");
+    } else if (dragState.type === "group" && groupId) {
+      e.preventDefault();
+      header.classList.add("drop-target");
+    }
+  });
+  block.addEventListener("dragleave", (e) => {
+    if (!block.contains(e.relatedTarget)) {
+      block.classList.remove("drop-target");
+      header.classList.remove("drop-target");
+    }
+  });
+  block.addEventListener("drop", (e) => {
+    if (!dragState) return;
+    e.preventDefault();
+    block.classList.remove("drop-target");
+    header.classList.remove("drop-target");
+    if (dragState.type === "agent") {
+      moveAgent(dragState.folderName, groupId || null); // append to end
+    } else if (dragState.type === "group" && groupId && dragState.id !== groupId) {
+      reorderGroup(dragState.id, groupId);
+    }
+  });
+}
+
+// Removes the agent from whatever group currently holds it, then (if a target
+// group is given) inserts it - at the end, or next to `relativeTo`. Passing
+// targetGroupId null just leaves it ungrouped.
+function moveAgent(folderName, targetGroupId, opts = {}) {
+  for (const g of groupsDoc.groups) {
+    const i = g.members.indexOf(folderName);
+    if (i !== -1) g.members.splice(i, 1);
+  }
+  if (targetGroupId) {
+    const g = groupsDoc.groups.find((x) => x.id === targetGroupId);
+    if (g) {
+      let idx = g.members.length;
+      if (opts.relativeTo) {
+        const ri = g.members.indexOf(opts.relativeTo);
+        if (ri !== -1) idx = opts.position === "after" ? ri + 1 : ri;
+      }
+      g.members.splice(idx, 0, folderName);
+    }
+  }
+  saveGroupsDoc();
+}
+
+// v1: reordering is only within one set of siblings (all top-level today).
+function reorderGroup(draggedId, targetId) {
+  const dragged = groupsDoc.groups.find((g) => g.id === draggedId);
+  const target = groupsDoc.groups.find((g) => g.id === targetId);
+  if (!dragged || !target) return;
+  if ((dragged.parentId || null) !== (target.parentId || null)) return;
+  const siblings = groupsDoc.groups
+    .filter((g) => (g.parentId || null) === (dragged.parentId || null))
+    .sort((a, b) => a.order - b.order)
+    .filter((g) => g.id !== draggedId);
+  const ti = siblings.findIndex((g) => g.id === targetId);
+  siblings.splice(ti === -1 ? siblings.length : ti, 0, dragged);
+  siblings.forEach((g, i) => { g.order = i; });
+  saveGroupsDoc();
 }
 
 // -------------------------------------------------- agent edit / delete --
@@ -168,6 +480,31 @@ function openAgentItemMenu(agent, buttonEl) {
   });
   menu.appendChild(editBtn);
 
+  if (groupsDoc.groups.length > 0) {
+    const currentGroup = groupsDoc.groups.find((g) => g.members.includes(agent.folderName));
+    const label = document.createElement("div");
+    label.className = "menu-label";
+    label.textContent = "Move to group";
+    menu.appendChild(label);
+
+    const makeGroupBtn = (id, text) => {
+      const b = document.createElement("button");
+      b.textContent = text;
+      if ((currentGroup ? currentGroup.id : null) === id) b.classList.add("menu-current");
+      b.addEventListener("click", () => {
+        closeAgentItemMenu();
+        moveAgent(agent.folderName, id);
+      });
+      menu.appendChild(b);
+    };
+    makeGroupBtn(null, currentGroup ? "None (ungroup)" : "None");
+    for (const g of groupsDoc.groups) makeGroupBtn(g.id, g.name);
+
+    const sep = document.createElement("div");
+    sep.className = "menu-sep";
+    menu.appendChild(sep);
+  }
+
   const deleteBtn = document.createElement("button");
   deleteBtn.className = "danger-text";
   deleteBtn.textContent = "Delete";
@@ -178,13 +515,67 @@ function openAgentItemMenu(agent, buttonEl) {
   menu.appendChild(deleteBtn);
 
   document.body.appendChild(menu);
+  // A tall Move-to-group list can run off the bottom of the window - nudge it
+  // back up if so.
+  const menuRect = menu.getBoundingClientRect();
+  if (menuRect.bottom > window.innerHeight - 8) {
+    menu.style.top = Math.max(8, window.innerHeight - 8 - menuRect.height) + "px";
+  }
   openAgentMenuEl = menu;
   buttonEl.classList.add("open");
 }
 
 document.addEventListener("click", (e) => {
   if (openAgentMenuEl && !openAgentMenuEl.contains(e.target)) closeAgentItemMenu();
+  if (openGroupMenuEl && !openGroupMenuEl.contains(e.target)) closeGroupMenu();
 });
+
+// ------------------------------------------------------------- group menu --
+
+let openGroupMenuEl = null;
+
+function closeGroupMenu() {
+  if (openGroupMenuEl) {
+    openGroupMenuEl.remove();
+    openGroupMenuEl = null;
+  }
+  document.querySelectorAll(".group-menu-btn.open").forEach((b) => b.classList.remove("open"));
+}
+
+function openGroupMenu(group, buttonEl) {
+  if (openGroupMenuEl) {
+    const wasThisOne = openGroupMenuEl.dataset.forGroup === group.id;
+    closeGroupMenu();
+    if (wasThisOne) return;
+  }
+  const rect = buttonEl.getBoundingClientRect();
+  const menu = document.createElement("div");
+  menu.className = "agent-item-menu"; // same floating dropdown style
+  menu.dataset.forGroup = group.id;
+  menu.style.top = rect.bottom + 4 + "px";
+  menu.style.left = Math.max(8, rect.right - 160) + "px";
+
+  const editBtn = document.createElement("button");
+  editBtn.textContent = "Rename / recolor";
+  editBtn.addEventListener("click", () => {
+    closeGroupMenu();
+    openGroupModal(group);
+  });
+  menu.appendChild(editBtn);
+
+  const delBtn = document.createElement("button");
+  delBtn.className = "danger-text";
+  delBtn.textContent = "Delete group";
+  delBtn.addEventListener("click", () => {
+    closeGroupMenu();
+    openDeleteGroupModal(group);
+  });
+  menu.appendChild(delBtn);
+
+  document.body.appendChild(menu);
+  openGroupMenuEl = menu;
+  buttonEl.classList.add("open");
+}
 
 function selectAgent(agent) {
   activeAgentPath = agent.path;
@@ -234,10 +625,13 @@ function showTerminalFor(agent) {
   let session = terminals.get(agent.path);
   if (!session) {
     const term = new Terminal({
+      // Light "paper" theme to match the rest of the app (see styles.css
+      // :root) and the Claude Code desktop app the CLI itself renders for.
       theme: {
-        background: "#1a1e26",
-        foreground: "#e6e8ec",
-        cursor: "#6366f1",
+        background: "#faf9f5",
+        foreground: "#26241f",
+        cursor: "#c96442",
+        selectionBackground: "#e6e2d6",
       },
       fontFamily: "Cascadia Code, Consolas, monospace",
       fontSize: 13,
@@ -1155,6 +1549,28 @@ window.api.onTerminalExit(({ agentPath }) => {
 let editingAgentPath = null;
 const agentModalTitleEl = document.getElementById("agent-modal-title");
 const createAgentBtn = document.getElementById("create-agent-btn");
+const agentGroupSelect = document.getElementById("new-agent-group");
+
+// Fills the modal's Group dropdown with "None" + every group, selecting the
+// given group id (or "" for none).
+function populateAgentGroupSelect(selectedGroupId) {
+  agentGroupSelect.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "— None —";
+  agentGroupSelect.appendChild(none);
+  for (const g of groupsDoc.groups) {
+    const o = document.createElement("option");
+    o.value = g.id;
+    o.textContent = g.name;
+    agentGroupSelect.appendChild(o);
+  }
+  agentGroupSelect.value = selectedGroupId || "";
+}
+
+function folderNameFromPath(p) {
+  return String(p || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+}
 
 function openCreateAgentModal() {
   editingAgentPath = null;
@@ -1165,6 +1581,7 @@ function openCreateAgentModal() {
   avatarPreview.src = "";
   avatarPreview.style.display = "none";
   selectedAvatarPath = null;
+  populateAgentGroupSelect(null);
   modalEl.classList.remove("hidden");
   nameInput.focus();
 }
@@ -1175,6 +1592,8 @@ function openEditAgentModal(agent) {
   createAgentBtn.textContent = "Save Changes";
   nameInput.value = agent.displayName;
   roleInput.value = agent.role || "";
+  const curGroup = groupsDoc.groups.find((g) => g.members.includes(agent.folderName));
+  populateAgentGroupSelect(curGroup ? curGroup.id : "");
   selectedAvatarPath = null; // only replaces the avatar if a new one is picked below
   if (agent.avatar) {
     avatarPreview.src = agent.avatar;
@@ -1209,6 +1628,8 @@ createAgentBtn.addEventListener("click", async () => {
     return;
   }
   try {
+    const desiredGroupId = agentGroupSelect.value || null;
+    let targetFolderName = editingAgentPath ? folderNameFromPath(editingAgentPath) : null;
     if (editingAgentPath) {
       await window.api.updateAgent({
         agentPath: editingAgentPath,
@@ -1217,15 +1638,24 @@ createAgentBtn.addEventListener("click", async () => {
         avatarPath: selectedAvatarPath,
       });
     } else {
-      await window.api.createAgent({
+      const res = await window.api.createAgent({
         name,
         role: roleInput.value.trim(),
         avatarPath: selectedAvatarPath,
       });
+      targetFolderName = res && res.agentDir ? folderNameFromPath(res.agentDir) : null;
     }
     modalEl.classList.add("hidden");
     const wasEditingActive = editingAgentPath && editingAgentPath === activeAgentPath;
     await loadAgents();
+    // Apply the group selection after loadAgents() (which reloads groupsDoc
+    // from disk) so moveAgent mutates the fresh copy.
+    if (targetFolderName) {
+      const curGroup = groupsDoc.groups.find((g) => g.members.includes(targetFolderName));
+      if ((curGroup ? curGroup.id : null) !== desiredGroupId) {
+        moveAgent(targetFolderName, desiredGroupId);
+      }
+    }
     if (wasEditingActive) {
       // The chat header (name/avatar shown for the currently-open agent)
       // isn't rebuilt by loadAgents() on its own - refresh it directly so
@@ -1241,6 +1671,141 @@ createAgentBtn.addEventListener("click", async () => {
   } catch (e) {
     alert(`Could not ${editingAgentPath ? "update" : "create"} agent: ` + e.message);
   }
+});
+
+// ---------------------------------------------------------- group modal --
+
+const groupModalEl = document.getElementById("group-modal");
+const groupModalTitleEl = document.getElementById("group-modal-title");
+const groupNameInput = document.getElementById("group-name-input");
+const groupColorInput = document.getElementById("group-color-input");
+const groupColorSwatchesEl = document.getElementById("group-color-swatches");
+const saveGroupBtn = document.getElementById("save-group-btn");
+const newGroupBtn = document.getElementById("new-group-btn");
+let editingGroupId = null;
+
+const GROUPS_NOTE_KEY = "agentGroupsNoteDismissed";
+const agentGroupsNoteEl = document.getElementById("agent-groups-note");
+
+function updateAgentGroupsNote() {
+  const show = groupsDoc.groups.length > 0 && !localStorage.getItem(GROUPS_NOTE_KEY);
+  agentGroupsNoteEl.classList.toggle("hidden", !show);
+}
+
+document.getElementById("agent-groups-note-dismiss").addEventListener("click", () => {
+  localStorage.setItem(GROUPS_NOTE_KEY, "1");
+  agentGroupsNoteEl.classList.add("hidden");
+});
+
+function renderGroupColorSwatches(selected) {
+  groupColorSwatchesEl.innerHTML = "";
+  for (const c of GROUP_COLOR_PRESETS) {
+    const sw = document.createElement("div");
+    sw.className = "group-color-swatch" + (c.toLowerCase() === String(selected).toLowerCase() ? " selected" : "");
+    sw.style.background = c;
+    sw.title = c;
+    sw.addEventListener("click", () => {
+      groupColorInput.value = c;
+      renderGroupColorSwatches(c);
+    });
+    groupColorSwatchesEl.appendChild(sw);
+  }
+}
+
+function openGroupModal(group) {
+  editingGroupId = group ? group.id : null;
+  groupModalTitleEl.textContent = group ? "Edit Group" : "New Group";
+  saveGroupBtn.textContent = group ? "Save Changes" : "Create Group";
+  groupNameInput.value = group ? group.name : "";
+  const initColor = group
+    ? group.color
+    : GROUP_COLOR_PRESETS[groupsDoc.groups.length % GROUP_COLOR_PRESETS.length];
+  // <input type=color> only accepts #rrggbb; fall back if a group somehow has
+  // a non-hex colour from a hand-edit.
+  groupColorInput.value = /^#[0-9a-f]{6}$/i.test(initColor) ? initColor : "#6366f1";
+  renderGroupColorSwatches(groupColorInput.value);
+  groupModalEl.classList.remove("hidden");
+  groupNameInput.focus();
+}
+
+newGroupBtn.addEventListener("click", () => openGroupModal(null));
+document.getElementById("cancel-group-btn").addEventListener("click", () => {
+  groupModalEl.classList.add("hidden");
+  editingGroupId = null;
+});
+groupColorInput.addEventListener("input", () => renderGroupColorSwatches(groupColorInput.value));
+
+saveGroupBtn.addEventListener("click", async () => {
+  const name = groupNameInput.value.trim();
+  if (!name) {
+    groupNameInput.focus();
+    return;
+  }
+  const color = groupColorInput.value;
+  const wasFirstEver = groupsDoc.groups.length === 0;
+  if (editingGroupId) {
+    const g = groupsDoc.groups.find((x) => x.id === editingGroupId);
+    if (g) {
+      g.name = name;
+      g.color = color;
+    }
+  } else {
+    const topLevelCount = groupsDoc.groups.filter((g) => !g.parentId).length;
+    groupsDoc.groups.push({
+      id: genGroupId(),
+      name,
+      color,
+      parentId: null,
+      order: topLevelCount,
+      members: [],
+    });
+  }
+  groupModalEl.classList.add("hidden");
+  const wasCreate = !editingGroupId;
+  editingGroupId = null;
+  await saveGroupsDoc();
+  // First group ever created: surface the "visual only" note (unless already
+  // permanently dismissed). updateAgentGroupsNote() inside saveGroupsDoc has
+  // already shown it if applicable, so this is just belt-and-braces for the
+  // very first create.
+  if (wasCreate && wasFirstEver) updateAgentGroupsNote();
+});
+
+// ---------------------------------------------------- delete group modal --
+
+const deleteGroupModalEl = document.getElementById("delete-group-modal");
+const deleteGroupWarningEl = document.getElementById("delete-group-warning");
+const confirmDeleteGroupBtn = document.getElementById("confirm-delete-group-btn");
+let deletingGroupId = null;
+
+function openDeleteGroupModal(group) {
+  deletingGroupId = group.id;
+  const n = group.members.filter((m) => agents.some((a) => a.folderName === m)).length;
+  deleteGroupWarningEl.textContent =
+    `"${group.name}" will be removed from the sidebar. Its ${n} agent(s) become ungrouped. ` +
+    `No agent, conversation, or file is deleted.`;
+  deleteGroupModalEl.classList.remove("hidden");
+}
+
+document.getElementById("cancel-delete-group-btn").addEventListener("click", () => {
+  deleteGroupModalEl.classList.add("hidden");
+  deletingGroupId = null;
+});
+
+confirmDeleteGroupBtn.addEventListener("click", async () => {
+  if (deletingGroupId) {
+    const doomed = groupsDoc.groups.find((g) => g.id === deletingGroupId);
+    // Re-parent any child groups up to the deleted group's own parent so they
+    // aren't orphaned (only reachable via a future nested-group UI, but cheap
+    // to get right now).
+    for (const g of groupsDoc.groups) {
+      if (g.parentId === deletingGroupId) g.parentId = doomed ? doomed.parentId : null;
+    }
+    groupsDoc.groups = groupsDoc.groups.filter((g) => g.id !== deletingGroupId);
+  }
+  deleteGroupModalEl.classList.add("hidden");
+  deletingGroupId = null;
+  await saveGroupsDoc();
 });
 
 // ------------------------------------------------------- delete agent --

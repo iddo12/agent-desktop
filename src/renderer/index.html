@@ -11,11 +11,22 @@
     <aside id="sidebar">
       <div id="sidebar-header">
         <span id="app-title">Agents</span>
-        <button id="new-agent-btn" title="Create new agent">+ New</button>
+        <div id="sidebar-header-actions">
+          <button id="new-group-btn" title="Create a group to organize agents in the sidebar">+ Group</button>
+          <button id="new-agent-btn" title="Create new agent">+ New</button>
+        </div>
       </div>
       <button id="update-available-btn" class="hidden"></button>
       <div id="interfering-service-warning" class="hidden"></div>
       <div id="claude-cli-warning" class="hidden"></div>
+      <div id="agent-groups-note" class="hidden">
+        <div class="note-body">
+          Groups are a <strong>visual aid only</strong>. They don't set which agent
+          reports to which, or which agent is a "manager" &mdash; that lives in each
+          agent's own instructions. Grouping here just organizes the sidebar.
+        </div>
+        <button id="agent-groups-note-dismiss" class="dismiss-btn">Got it, don't show again</button>
+      </div>
       <div id="agent-list"></div>
       <div id="plan-selector-row">
         <label for="plan-select">Plan</label>
@@ -103,6 +114,8 @@
       <input id="new-agent-name" type="text" placeholder="e.g. Marketing Agent" />
       <label>Role description</label>
       <textarea id="new-agent-role" rows="3" placeholder="What does this agent do?"></textarea>
+      <label>Group (optional)</label>
+      <select id="new-agent-group"></select>
       <label>Avatar (optional)</label>
       <div id="avatar-picker">
         <img id="avatar-preview" class="avatar" />
@@ -111,6 +124,34 @@
       <div class="modal-actions">
         <button id="cancel-agent-btn" class="secondary">Cancel</button>
         <button id="create-agent-btn" class="primary">Create Agent</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="group-modal" class="modal hidden">
+    <div class="modal-box">
+      <h2 id="group-modal-title">New Group</h2>
+      <label>Name</label>
+      <input id="group-name-input" type="text" placeholder="e.g. Editorial &amp; Content" autocomplete="off" />
+      <label>Color</label>
+      <div id="group-color-picker">
+        <input id="group-color-input" type="color" value="#6366f1" />
+        <div id="group-color-swatches"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="cancel-group-btn" class="secondary">Cancel</button>
+        <button id="save-group-btn" class="primary">Create Group</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="delete-group-modal" class="modal hidden">
+    <div class="modal-box">
+      <h2>Delete group</h2>
+      <p id="delete-group-warning" class="modal-warning"></p>
+      <div class="modal-actions">
+        <button id="cancel-delete-group-btn" class="secondary">Cancel</button>
+        <button id="confirm-delete-group-btn" class="danger">Delete group</button>
       </div>
     </div>
   </div>
