@@ -625,13 +625,20 @@ function showTerminalFor(agent) {
   let session = terminals.get(agent.path);
   if (!session) {
     const term = new Terminal({
-      // Light "paper" theme to match the rest of the app (see styles.css
-      // :root) and the Claude Code desktop app the CLI itself renders for.
+      // The terminal stays DARK even though the rest of the app is light -
+      // same as VS Code and every other IDE. Claude Code's CLI draws its
+      // output (boxes, dim text, tool headers) in ANSI colors tuned for a
+      // dark background; on a light xterm background, and with only bg/fg
+      // overridden here rather than the full 16-colour ANSI palette, most of
+      // that output rendered near-white on near-white and vanished. A dark
+      // terminal panel is the correct, conventional choice and sidesteps the
+      // whole problem. Do not "theme" this to match the light chrome again
+      // without also supplying a complete, light-tuned ANSI palette AND
+      // verifying real CLI output stays readable.
       theme: {
-        background: "#faf9f5",
-        foreground: "#26241f",
+        background: "#1a1e26",
+        foreground: "#e6e8ec",
         cursor: "#c96442",
-        selectionBackground: "#e6e2d6",
       },
       fontFamily: "Cascadia Code, Consolas, monospace",
       fontSize: 13,

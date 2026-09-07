@@ -1016,8 +1016,9 @@ html, body {
   right: 16px;
   bottom: 12px;
   height: 92px;
-  /* Must match the xterm theme background set in renderer.js, not --bg-panel. */
-  background: var(--bg-app);
+  /* Must match the xterm theme background set in renderer.js (dark), not the
+     light app chrome. */
+  background: #1a1e26;
   pointer-events: none;
 }
 

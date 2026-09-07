@@ -17,13 +17,22 @@ const { withFsRetry } = require("./fsRetry");
 // by listing the real ~/.claude/projects folder, where this agent's
 // actual directory is "...LensVid-Master-Context--claude-session" (dashes
 // throughout) while this function was producing "...LensVid_Master_Context--
-// claude-session" (underscores preserved) for the exact same cwd. Every
-// other agent folder in this workspace happens to have no underscore in
-// its name, which is why this sat unnoticed - findJsonlFiles() was quietly
-// scanning a directory that never existed, always returning zero files,
-// for this one agent only.
+// claude-session" (underscores preserved) for the exact same cwd.
+//
+// 2026-09-08: hit again with an agent named "System Optimization &
+// Maintenance Agent" - Claude Code's real dir is
+// "...System-Optimization---Maintenance-Agent--claude-session" ("&" and its
+// surrounding spaces each became a dash), while the old
+// character-class regex (`[:\\/ ._]`) left the "&" intact, so History and
+// the live chat view read an empty/nonexistent directory and rendered a
+// blank conversation for that agent. Rather than keep adding one punctuation
+// character at a time as new agent names expose them, replace EVERY
+// character that isn't a letter, digit, or hyphen - which is exactly what
+// every real directory under ~/.claude/projects/ is already made of. If
+// Claude Code ever starts preserving some other character, widen the
+// keep-set here to match a freshly-listed real directory name.
 function encodeProjectPath(cwd) {
-  return cwd.replace(/[:\\/ ._]/g, "-");
+  return cwd.replace(/[^A-Za-z0-9-]/g, "-");
 }
 
 function projectDirFor(cwd) {
