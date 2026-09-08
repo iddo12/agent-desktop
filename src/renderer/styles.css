@@ -642,7 +642,8 @@ html, body {
 #raw-terminal-toggle-btn,
 #model-picker-btn,
 #chats-toggle-btn,
-#history-toggle-btn {
+#history-toggle-btn,
+#save-to-master-btn {
   -webkit-app-region: no-drag;
   background: var(--bg-sidebar);
   border: 1px solid var(--border);
@@ -657,7 +658,8 @@ html, body {
 #raw-terminal-toggle-btn:hover,
 #model-picker-btn:hover,
 #chats-toggle-btn:hover,
-#history-toggle-btn:hover { color: var(--text); border-color: var(--accent); }
+#history-toggle-btn:hover,
+#save-to-master-btn:hover { color: var(--text); border-color: var(--accent); }
 #reset-session-btn:hover { border-color: var(--health-critical); color: var(--health-critical); }
 #raw-terminal-toggle-btn.active,
 #chats-toggle-btn.active,
@@ -1234,25 +1236,6 @@ html, body {
 #chat-thinking-indicator.long {
   color: #b26f00;
 }
-
-/* Small utility row above the compose box - a one-click way to prefill the
-   input with a "save to master file" reminder, since that phrase only gets
-   typed occasionally and is easy to forget in the moment. */
-#chat-input-toolbar {
-  display: flex;
-  margin-bottom: 6px;
-}
-#save-to-master-btn {
-  background: rgba(201, 100, 66, 0.12);
-  border: 1px solid rgba(201, 100, 66, 0.45);
-  color: var(--accent);
-  border-radius: 8px;
-  padding: 5px 12px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-#save-to-master-btn:hover { background: rgba(201, 100, 66, 0.22); border-color: var(--accent); color: var(--accent-2); }
 
 #chat-input-row {
   display: flex;
