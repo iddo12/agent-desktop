@@ -1028,6 +1028,18 @@ html, body {
   font-size: 0.78rem;
   font-style: italic;
 }
+/* Merged "ran PowerShell ×4 · Write" line - one compact, quiet row for a
+   whole turn's tool activity instead of two lines per call. */
+.chat-tools-line {
+  font-style: normal;
+  font-size: 0.72rem;
+  opacity: 0.65;
+  font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+}
+.chat-tools-line::before {
+  content: "\21B3\00A0"; /* ↳ + nbsp */
+  opacity: 0.7;
+}
 
 /* Real timestamp per block (see formatBlockTime() in renderer.js) - small
    and muted so it doesn't compete with the actual message, but present on

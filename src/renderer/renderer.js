@@ -1130,9 +1130,43 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
   const prevScrollTop = scrollEl.scrollTop;
 
   chatMessagesViewEl.innerHTML = "";
-  for (const block of blocks) {
+  const TOOL_LINE_RE = /^\[used tool: (.+)\]$/;
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const block = blocks[bi];
     const text = block.lines.join("\n").trim();
     if (!text) continue;
+
+    // Collapse a run of consecutive "[used tool: X]" status lines into one
+    // compact, dim line ("PowerShell ×4 · Write") - a busy turn otherwise
+    // produced two lines (name + timestamp) per tool call and buried the
+    // actual message. Only the tool lines are merged; [asked: "..."] and the
+    // answered-questions status lines are left as-is.
+    if (block.role === "status" && TOOL_LINE_RE.test(text)) {
+      const names = [];
+      let j = bi;
+      while (j < blocks.length) {
+        const t = blocks[j].lines.join("\n").trim();
+        const m = TOOL_LINE_RE.exec(t);
+        if (blocks[j].role !== "status" || !m) break;
+        names.push(m[1]);
+        j++;
+      }
+      bi = j - 1;
+      // Tally, preserving first-seen order.
+      const order = [];
+      const counts = new Map();
+      for (const n of names) {
+        if (!counts.has(n)) order.push(n);
+        counts.set(n, (counts.get(n) || 0) + 1);
+      }
+      const summary = order.map((n) => (counts.get(n) > 1 ? `${n} ×${counts.get(n)}` : n)).join(" · ");
+      const line = document.createElement("div");
+      line.className = "chat-status-line chat-tools-line";
+      line.textContent = names.length === 1 ? `ran ${summary}` : `ran ${names.length} tools: ${summary}`;
+      chatMessagesViewEl.appendChild(line);
+      continue;
+    }
+
     if (block.role === "agent" && HAS_ANSWER_SECTION_MARKER_RE.test(text)) {
       const wrapper = document.createElement("div");
       wrapper.className = "chat-bubble chat-bubble-agent chat-bubble-annotated";
@@ -1153,10 +1187,11 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     }
     const el = document.createElement("div");
     el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role;
-    // Agent and user messages render as Markdown; status lines ("[used tool: X]")
-    // stay plain.
+    // Agent and user messages render as Markdown; status lines stay plain.
     renderRichText(el, text, { markdown: block.role !== "status" });
-    if (block.timestamp) {
+    // Status lines don't get a per-line timestamp - they're incidental and it
+    // just adds a second line of vertical noise.
+    if (block.timestamp && block.role !== "status") {
       const timeEl = document.createElement("span");
       timeEl.className = "chat-block-time";
       timeEl.textContent = formatBlockTime(block.timestamp);
