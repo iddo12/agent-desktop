@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("api", {
   getContextUsage: (agentPath) => ipcRenderer.invoke("get-context-usage", { agentPath }),
   getUsageWindows: () => ipcRenderer.invoke("get-usage-windows"),
   getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),
+  getSessionActivity: (agentPath) => ipcRenderer.invoke("get-session-activity", { agentPath }),
 
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
   checkClaudeCodeUpdate: () => ipcRenderer.invoke("check-claude-code-update"),

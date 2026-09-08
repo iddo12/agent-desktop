@@ -231,6 +231,76 @@ function getLiveTranscriptBlocks(sessionCwd) {
   return blocks;
 }
 
+// Is the agent still working? Derived from the transcript, not from pty
+// output timing - so it stays reliable through the quiet stretches (a slow
+// tool, the model generating with nothing streaming yet, a permission
+// prompt) that used to make the "thinking" indicator flicker off.
+//
+// Rule: look at the chronologically LAST user/assistant entry. The agent is
+// idle only if that entry is an assistant message that stopped cleanly
+// (stop_reason end_turn / stop_sequence). Anything else means it still has
+// something to act on: a fresh human prompt, a tool_result to consume, an
+// assistant `tool_use` turn about to run tools, or an assistant turn that
+// kept going on its own after a prior end_turn (autonomous multi-step work).
+// Non-message entry types (attachment, metadata) are ignored.
+function getSessionActivity(sessionCwd) {
+  let entries = [];
+  let latestFileTs = -Infinity;
+  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+    let raw;
+    try {
+      raw = fs.readFileSync(jsonlPath, "utf-8");
+    } catch (e) {
+      continue;
+    }
+    const fileEntries = [];
+    let fileLatestTs = -Infinity;
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch (e) {
+        continue;
+      }
+      if (!obj.timestamp) continue;
+      fileEntries.push(obj);
+      const ts = new Date(obj.timestamp).getTime();
+      if (ts > fileLatestTs) fileLatestTs = ts;
+    }
+    if (fileLatestTs > latestFileTs) {
+      latestFileTs = fileLatestTs;
+      entries = fileEntries;
+    }
+  }
+
+  let lastHumanTs = null;
+  let lastEndTurnTs = null;
+  let last = null; // { ts, done } for the most recent user/assistant entry
+  for (const obj of entries) {
+    const ts = new Date(obj.timestamp).getTime();
+    if (obj.type === "assistant" && obj.message) {
+      const done = obj.message.stop_reason === "end_turn" || obj.message.stop_reason === "stop_sequence";
+      if (done && (lastEndTurnTs == null || ts > lastEndTurnTs)) lastEndTurnTs = ts;
+      if (last == null || ts >= last.ts) last = { ts, done };
+    } else if (obj.type === "user") {
+      if (obj.origin && obj.origin.kind === "human" && !obj.isMeta) {
+        if (lastHumanTs == null || ts > lastHumanTs) lastHumanTs = ts;
+      }
+      if (last == null || ts >= last.ts) last = { ts, done: false };
+    }
+  }
+
+  const working = !!last && !last.done;
+  let startTs = null;
+  if (working) {
+    startTs = lastHumanTs;
+    if (startTs == null || (lastEndTurnTs != null && lastEndTurnTs > startTs)) startTs = lastEndTurnTs;
+    if (startTs == null) startTs = last.ts;
+  }
+  return { working, sinceMs: working ? Math.max(0, Date.now() - startTs) : 0 };
+}
+
 // Each assistant JSONL entry already carries structured token usage for
 // that turn - reused here for the live context/token indicator rather than
 // anything the CLI displays on its own (it doesn't, in the terminal UI).
@@ -775,6 +845,7 @@ module.exports = {
   getLatestUsage,
   getUsageWindows,
   getLiveTranscriptBlocks,
+  getSessionActivity,
   listConversations,
   setConversationTitle,
 };

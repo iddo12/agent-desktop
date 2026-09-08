@@ -14,6 +14,7 @@ const {
   getLatestUsage,
   getUsageWindows,
   getLiveTranscriptBlocks,
+  getSessionActivity,
   listConversations,
   setConversationTitle,
 } = require("./archive");
@@ -1861,6 +1862,8 @@ ipcMain.handle("read-archived-day", (event, { agentPath, dateKey }) => readArchi
 ipcMain.handle("get-context-usage", (event, { agentPath }) => getLatestUsage(sessionCwdFor(agentPath)));
 
 ipcMain.handle("get-live-transcript", (event, { agentPath }) => getLiveTranscriptBlocks(sessionCwdFor(agentPath)));
+
+ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActivity(sessionCwdFor(agentPath)));
 
 ipcMain.handle("get-usage-windows", () => getUsageWindows());
 

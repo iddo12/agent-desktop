@@ -678,6 +678,11 @@ function showTerminalFor(agent) {
       // survive normal ~1s gaps between a CLI spinner's own redraws.
       turnStartedAt: null,
       thinkingQuietTimer: null,
+      // Authoritative "is the agent still working" state, derived from the
+      // transcript on every rebuildChatView (see getSessionActivity). Drives
+      // the working indicator so it doesn't flicker off during quiet stretches.
+      transcriptWorking: false,
+      transcriptWorkingSince: null,
       // Real timestamp (Date) of this agent's last actual API response, per
       // its own JSONL transcript - see refreshCacheStatus()/PROMPT_CACHE_TTL_MS
       // below. null until getContextUsage() has resolved at least once.
@@ -1242,8 +1247,22 @@ const PENDING_SENT_TIMEOUT_MS = 45000;
 async function rebuildChatView(agentPath, opts = {}) {
   const session = terminals.get(agentPath);
   if (!session) return;
-  const blocks = await window.api.getLiveTranscript(agentPath);
+  const [blocks, activity] = await Promise.all([
+    window.api.getLiveTranscript(agentPath),
+    window.api.getSessionActivity(agentPath).catch(() => null),
+  ]);
   if (agentPath !== activeAgentPath || terminals.get(agentPath) !== session) return; // stale by the time the IPC round-trip finished
+
+  // Authoritative "is the agent still working" signal, from the transcript
+  // (see getSessionActivity in archive.js) - reliable through quiet stretches
+  // that the pty-timing heuristic can't see. updateThinkingIndicator() reads
+  // these; the 4s stale poll guarantees they refresh even when nothing streams.
+  if (activity) {
+    session.transcriptWorking = !!activity.working;
+    session.transcriptWorkingSince = activity.working ? Date.now() - (activity.sinceMs || 0) : null;
+    if (!activity.working) session.turnStartedAt = null; // real "turn done" - clear the optimistic timer too
+    updateThinkingIndicator();
+  }
 
   // the user hit a real incident where the old terminal-buffer-scraping version
   // of this rendered a whole real conversation as a totally blank view -
@@ -1714,20 +1733,38 @@ function setBusy(agentPath, session, busy) {
 // day) or a turn simply finishes, real output stops, the quiet timer
 // expires, and the indicator disappears - it does not count forever against
 // a process that's stopped producing anything.
-const THINKING_INDICATOR_QUIET_MS = 3000;
+// Fallback only. The indicator is normally driven by the transcript-derived
+// session.transcriptWorking (see rebuildChatView / getSessionActivity), which
+// stays correct through quiet stretches. This timer just stops a "Working…"
+// state from lasting forever if that signal is somehow unavailable (a broken
+// activity IPC) AND the pty has also gone dead silent - a long window,
+// because a genuine long generation or slow tool can legitimately be quiet.
+const THINKING_INDICATOR_QUIET_MS = 60000;
 let thinkingIndicatorInterval = null;
 function updateThinkingIndicator() {
   const session = activeAgentPath && terminals.get(activeAgentPath);
-  if (!session || !session.turnStartedAt) {
+  const working = !!session && (session.turnStartedAt || session.transcriptWorking);
+  if (!working) {
     chatThinkingIndicatorEl.classList.add("hidden");
     return;
   }
-  const elapsedMs = Date.now() - session.turnStartedAt;
+  // Elapsed since the turn started - prefer whichever start we have; if both,
+  // the earlier one.
+  const starts = [session.turnStartedAt, session.transcriptWorkingSince].filter(Boolean);
+  const startedAt = starts.length ? Math.min(...starts) : null;
+  const elapsedMs = startedAt ? Date.now() - startedAt : 0;
   const elapsedSec = Math.floor(elapsedMs / 1000);
-  chatThinkingIndicatorEl.textContent =
-    elapsedMs > LONG_BUSY_HINT_MS
-      ? `● Thinking… ${elapsedSec}s (taking a while - still receiving output, so it's alive; check Raw Terminal if you want to see it directly)`
-      : `● Thinking… ${elapsedSec}s`;
+  const quietMs = Date.now() - (session.lastActivityAt || 0);
+  const secLabel = startedAt ? ` ${elapsedSec}s` : "";
+  let text;
+  if (elapsedMs > LONG_BUSY_HINT_MS && quietMs > 15000) {
+    text = `● Working…${secLabel} — no recent output; it may be waiting on a prompt (check Raw Terminal) or stuck`;
+  } else if (elapsedMs > LONG_BUSY_HINT_MS) {
+    text = `● Working…${secLabel} (taking a while — still going)`;
+  } else {
+    text = `● Working…${secLabel}`;
+  }
+  chatThinkingIndicatorEl.textContent = text;
   chatThinkingIndicatorEl.classList.remove("hidden");
   chatThinkingIndicatorEl.classList.toggle("long", elapsedMs > LONG_BUSY_HINT_MS);
 }
@@ -1741,8 +1778,11 @@ function markActivity(agentPath, session) {
 
   clearTimeout(session.thinkingQuietTimer);
   session.thinkingQuietTimer = setTimeout(() => {
-    session.turnStartedAt = null;
-    if (agentPath === activeAgentPath) updateThinkingIndicator();
+    // Only give up if the transcript signal ISN'T also saying "working".
+    if (!session.transcriptWorking) {
+      session.turnStartedAt = null;
+      if (agentPath === activeAgentPath) updateThinkingIndicator();
+    }
   }, THINKING_INDICATOR_QUIET_MS);
 }
 
