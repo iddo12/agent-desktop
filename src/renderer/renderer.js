@@ -3371,6 +3371,68 @@ resetSessionBtn.addEventListener("click", async () => {
   chatInputEl.focus();
 });
 
+// Restart Session: kill and re-dispatch this agent's `claude --bg` process,
+// resuming the SAME conversation (`--bg --resume <id>`), so scrollback and
+// context are kept but the fresh process re-reads `.claude/settings.local.json`
+// and `CLAUDE.md`. This is the piece that was missing for "I changed the
+// agent's config or instructions - make it take effect without starting
+// over": a normal app restart just re-attaches to the still-running bg
+// process (old settings), and Reset Session (/clear) keeps the same process
+// too. Uses the same stop-daemon + re-dispatch path as the Chats panel's
+// conversation switch (switch-conversation IPC), just targeting the current
+// conversation.
+const restartSessionBtn = document.getElementById("restart-session-btn");
+
+restartSessionBtn.addEventListener("click", async () => {
+  if (!activeAgentPath || switchingConversation) return;
+  const agentPath = activeAgentPath;
+  const session = terminals.get(agentPath);
+  const busy = session && session.busy;
+  const ok = confirm(
+    busy
+      ? "This agent is mid-response. Restarting its process will interrupt the current turn. Restart anyway?\n\nKeeps the conversation; picks up changes to the agent's settings or CLAUDE.md."
+      : "Restart this agent's process?\n\nKeeps the current conversation and scrollback, and picks up any changes to the agent's settings (.claude/settings.local.json) or CLAUDE.md. Takes a few seconds."
+  );
+  if (!ok) return;
+
+  let sessionId = null;
+  try {
+    const convos = await window.api.listConversations(agentPath);
+    const cur = (convos || []).find((c) => c.isCurrent) || (convos || [])[0];
+    sessionId = cur && cur.sessionId;
+  } catch (e) {}
+  if (!sessionId) {
+    alert("Couldn't find this agent's current conversation to resume. Send it a message first, then try again.");
+    return;
+  }
+
+  switchingConversation = true;
+  restartSessionBtn.disabled = true;
+  const startedAt = Date.now();
+  const tick = setInterval(() => {
+    restartSessionBtn.textContent = `Restarting… ${Math.round((Date.now() - startedAt) / 1000)}s`;
+  }, 250);
+  try {
+    if (!historyViewEl.classList.contains("hidden")) setHistoryMode(false);
+    if (!conversationsViewEl.classList.contains("hidden")) setConversationsMode(false);
+    await window.api.switchConversation(agentPath, { resumeSessionId: sessionId });
+    reloadAgentSessionView(agentPath);
+    const agent = agents.find((a) => a.path === agentPath);
+    if (agent) selectAgent(agent);
+    restartSessionBtn.textContent = "✓ Restarted";
+  } catch (e) {
+    restartSessionBtn.textContent = "Restart failed";
+    alert("Restart failed: " + (e.message || String(e)));
+  } finally {
+    clearInterval(tick);
+    switchingConversation = false;
+    setTimeout(() => {
+      restartSessionBtn.textContent = "Restart Session";
+      restartSessionBtn.disabled = false;
+    }, 1500);
+  }
+});
+
 loadAgents();
 
 window.api.getAppVersion().then((v) => {

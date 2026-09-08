@@ -639,6 +639,7 @@ html, body {
   50% { opacity: 1; }
 }
 #reset-session-btn,
+#restart-session-btn,
 #raw-terminal-toggle-btn,
 #model-picker-btn,
 #chats-toggle-btn,
@@ -655,11 +656,13 @@ html, body {
   cursor: pointer;
 }
 #reset-session-btn:hover,
+#restart-session-btn:hover,
 #raw-terminal-toggle-btn:hover,
 #model-picker-btn:hover,
 #chats-toggle-btn:hover,
 #history-toggle-btn:hover,
 #save-to-master-btn:hover { color: var(--text); border-color: var(--accent); }
+#restart-session-btn:disabled { opacity: 0.6; cursor: default; }
 #reset-session-btn:hover { border-color: var(--health-critical); color: var(--health-critical); }
 #raw-terminal-toggle-btn.active,
 #chats-toggle-btn.active,
