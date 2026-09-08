@@ -839,15 +839,164 @@ html, body {
 }
 
 .chat-bubble {
-  white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.5;
+  line-height: 1.6;
   font-size: 0.92rem;
 }
 .chat-bubble-agent {
   color: var(--text);
   align-self: flex-start;
   max-width: 100%;
+}
+
+/* --- Rendered Markdown inside a chat bubble / annotated section --------- */
+.chat-bubble p,
+.chat-answer-section p {
+  margin: 0 0 0.7em;
+  white-space: pre-wrap;
+}
+.chat-bubble > *:last-child,
+.chat-answer-section > *:last-child {
+  margin-bottom: 0;
+}
+.chat-bubble h3,
+.chat-answer-section h3 {
+  font-size: 1.02rem;
+  font-weight: 700;
+  margin: 1.1em 0 0.45em;
+}
+.chat-bubble h4,
+.chat-answer-section h4 {
+  font-size: 0.94rem;
+  font-weight: 700;
+  margin: 1em 0 0.4em;
+}
+.chat-bubble h5,
+.chat-answer-section h5 {
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin: 0.9em 0 0.35em;
+}
+.chat-bubble h3:first-child,
+.chat-bubble h4:first-child,
+.chat-bubble h5:first-child,
+.chat-answer-section h3:first-child,
+.chat-answer-section h4:first-child,
+.chat-answer-section h5:first-child {
+  margin-top: 0;
+}
+.chat-bubble ul,
+.chat-bubble ol,
+.chat-answer-section ul,
+.chat-answer-section ol {
+  margin: 0 0 0.7em;
+  padding-left: 1.45em;
+}
+.chat-bubble li,
+.chat-answer-section li {
+  margin: 0.25em 0;
+  white-space: pre-wrap;
+}
+.chat-bubble li::marker,
+.chat-answer-section li::marker {
+  color: var(--text-muted);
+}
+.chat-bubble code,
+.chat-answer-section code {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05em 0.35em;
+  font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 0.86em;
+}
+.chat-bubble pre,
+.chat-answer-section pre {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 0.7em;
+  overflow-x: auto;
+}
+.chat-bubble pre code,
+.chat-answer-section pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.82em;
+  white-space: pre;
+}
+.chat-bubble strong,
+.chat-answer-section strong {
+  font-weight: 700;
+}
+.chat-bubble em,
+.chat-answer-section em {
+  font-style: italic;
+}
+.chat-bubble del,
+.chat-answer-section del {
+  opacity: 0.65;
+}
+.chat-bubble blockquote,
+.chat-answer-section blockquote {
+  margin: 0 0 0.7em;
+  padding: 0.1em 0 0.1em 0.9em;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+.chat-bubble hr,
+.chat-answer-section hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.9em 0;
+}
+.chat-bubble a,
+.chat-answer-section a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.chat-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 0.7em;
+}
+.chat-bubble table,
+.chat-answer-section table {
+  border-collapse: collapse;
+  font-size: 0.9em;
+  max-width: 100%;
+}
+.chat-bubble th,
+.chat-bubble td,
+.chat-answer-section th,
+.chat-answer-section td {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.chat-bubble thead th,
+.chat-answer-section thead th {
+  background: var(--bg-hover);
+  font-weight: 700;
+}
+.chat-bubble tbody tr:nth-child(even) td,
+.chat-answer-section tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+/* The yellow user bubble: keep monospace/borders readable on that ground. */
+.chat-bubble-user code,
+.chat-bubble-user pre,
+.chat-bubble-user th {
+  background: rgba(0, 0, 0, 0.08);
+  border-color: rgba(0, 0, 0, 0.15);
+}
+.chat-bubble-user a {
+  color: #6b4d00;
 }
 .chat-bubble-user {
   background: #f2d675;
@@ -927,9 +1076,8 @@ html, body {
   gap: 10px;
 }
 .chat-answer-section {
-  white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.5;
+  line-height: 1.6;
   font-size: 0.92rem;
 }
 .chat-answer-details {

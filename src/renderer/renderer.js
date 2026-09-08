@@ -869,20 +869,241 @@ function formatBlockTime(timestamp) {
 // unrelated file path isn't misrendered.
 const IMAGE_PATH_RE = /"([A-Za-z]:\\[^"]+\.(?:png|jpe?g|gif|webp|bmp))"/gi;
 
-function renderTextWithImages(container, text) {
+// --- Lightweight, safe Markdown -> DOM ---------------------------------------
+// The agents write normal Markdown (## headings, **bold**, - bullets, ```
+// fenced code, > quotes, [links](http...)). The chat view used to dump that
+// as raw text, so a long answer was a wall of asterisks and dashes with no
+// visual hierarchy. This renders the common subset. Safe by construction:
+// every piece of literal text goes through textContent / createTextNode -
+// never innerHTML - so agent output can't inject markup. Not a full CommonMark
+// implementation; deliberately small and predictable.
+
+function appendInlineMarkdown(parent, str) {
+  const patterns = [
+    { re: /`([^`]+)`/, tag: "code", literal: true },
+    { re: /\*\*([\s\S]+?)\*\*/, tag: "strong" },
+    { re: /(?<![\w])__([\s\S]+?)__(?![\w])/, tag: "strong" },
+    { re: /(?<![*\w])\*([^*\n]+?)\*(?![*\w])/, tag: "em" },
+    { re: /(?<![\w])_([^_\n]+?)_(?![\w])/, tag: "em" },
+    { re: /~~([^~]+?)~~/, tag: "del" },
+    { re: /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/, tag: "a" },
+  ];
+  let rest = String(str);
+  let guard = 0;
+  while (rest && guard++ < 5000) {
+    let best = null;
+    for (const p of patterns) {
+      const m = p.re.exec(rest);
+      if (m && (!best || m.index < best.m.index)) best = { p, m };
+    }
+    if (!best) {
+      parent.appendChild(document.createTextNode(rest));
+      return;
+    }
+    const { p, m } = best;
+    if (m.index) parent.appendChild(document.createTextNode(rest.slice(0, m.index)));
+    if (p.tag === "code") {
+      const c = document.createElement("code");
+      c.textContent = m[1];
+      parent.appendChild(c);
+    } else if (p.tag === "a") {
+      const a = document.createElement("a");
+      a.href = m[2];
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = m[1];
+      parent.appendChild(a);
+    } else {
+      const e = document.createElement(p.tag);
+      if (p.literal) e.textContent = m[1];
+      else appendInlineMarkdown(e, m[1]);
+      parent.appendChild(e);
+    }
+    rest = rest.slice(m.index + m[0].length);
+  }
+  if (rest) parent.appendChild(document.createTextNode(rest));
+}
+
+function isBlockStart(line) {
+  return (
+    /^\s*(#{1,6}\s|```|~~~|>\s?|[-*+]\s+|\d+[.)]\s+)/.test(line) ||
+    /^\s*([-*_])\1\1+\s*$/.test(line)
+  );
+}
+
+function appendMarkdownBlocks(container, text) {
+  const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+  let i = 0;
+  let guard = 0;
+  while (i < lines.length && guard++ < 20000) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+
+    // Fenced code block
+    const fence = line.match(/^\s*(```+|~~~+)/);
+    if (fence) {
+      const marker = fence[1][0];
+      const closer = new RegExp("^\\s*\\" + marker + "{3,}\\s*$");
+      const buf = [];
+      i++;
+      while (i < lines.length && !closer.test(lines[i])) {
+        buf.push(lines[i]);
+        i++;
+      }
+      i++; // consume closing fence if present
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = buf.join("\n");
+      pre.appendChild(code);
+      container.appendChild(pre);
+      continue;
+    }
+
+    // Heading
+    const h = line.match(/^\s*(#{1,6})\s+(.*)$/);
+    if (h) {
+      const tag = "h" + Math.min(5, 2 + h[1].length); // # -> h3, ## -> h4, ### .. -> h5
+      const el = document.createElement(tag);
+      appendInlineMarkdown(el, h[2].replace(/\s+#+\s*$/, "").trim());
+      container.appendChild(el);
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^\s*([-*_])\1\1+\s*$/.test(line)) {
+      container.appendChild(document.createElement("hr"));
+      i++;
+      continue;
+    }
+
+    // Blockquote
+    if (/^\s*>\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s*>\s?/, ""));
+        i++;
+      }
+      const bq = document.createElement("blockquote");
+      appendMarkdownBlocks(bq, buf.join("\n"));
+      container.appendChild(bq);
+      continue;
+    }
+
+    // Table (GitHub-flavored): a pipe row, then a |---|:--:|---| separator row.
+    if (
+      line.includes("|") &&
+      i + 1 < lines.length &&
+      /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1]) &&
+      lines[i + 1].includes("-")
+    ) {
+      const splitRow = (row) =>
+        row.trim().replace(/^\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
+      const headers = splitRow(line);
+      const aligns = splitRow(lines[i + 1]).map((s) => {
+        const l = s.startsWith(":");
+        const r = s.endsWith(":");
+        return l && r ? "center" : r ? "right" : l ? "left" : "";
+      });
+      i += 2;
+      const bodyRows = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|") && !isBlockStart(lines[i])) {
+        bodyRows.push(splitRow(lines[i]));
+        i++;
+      }
+      const wrap = document.createElement("div");
+      wrap.className = "chat-table-wrap";
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const htr = document.createElement("tr");
+      headers.forEach((cell, idx) => {
+        const th = document.createElement("th");
+        if (aligns[idx]) th.style.textAlign = aligns[idx];
+        appendInlineMarkdown(th, cell);
+        htr.appendChild(th);
+      });
+      thead.appendChild(htr);
+      table.appendChild(thead);
+      const tbody = document.createElement("tbody");
+      for (const row of bodyRows) {
+        const tr = document.createElement("tr");
+        for (let idx = 0; idx < headers.length; idx++) {
+          const td = document.createElement("td");
+          if (aligns[idx]) td.style.textAlign = aligns[idx];
+          appendInlineMarkdown(td, row[idx] || "");
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      container.appendChild(wrap);
+      continue;
+    }
+
+    // List (unordered or ordered)
+    const listItem = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+    if (listItem.test(line)) {
+      const ordered = /^\s*\d+[.)]\s+/.test(line);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (i < lines.length && listItem.test(lines[i])) {
+        const m = lines[i].match(listItem);
+        let content = m[3];
+        i++;
+        // Fold indented continuation lines into the same item.
+        while (i < lines.length && lines[i].trim() && /^\s{2,}/.test(lines[i]) && !listItem.test(lines[i])) {
+          content += "\n" + lines[i].replace(/^\s+/, "");
+          i++;
+        }
+        const li = document.createElement("li");
+        appendInlineMarkdown(li, content);
+        list.appendChild(li);
+      }
+      container.appendChild(list);
+      continue;
+    }
+
+    // Paragraph: gather until a blank line or a block-starter.
+    const buf = [line];
+    i++;
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) {
+      buf.push(lines[i]);
+      i++;
+    }
+    const p = document.createElement("p");
+    appendInlineMarkdown(p, buf.join("\n"));
+    container.appendChild(p);
+  }
+}
+
+// Splits inline image paths out first (still rendered as real <img>), then
+// renders the surrounding text either as Markdown (agent/user messages) or
+// as plain text (status lines).
+function renderRichText(container, text, opts = {}) {
+  const asMarkdown = opts.markdown !== false;
+  const renderChunk = (chunk) => {
+    const trimmed = chunk.replace(/^\n+|\n+$/g, "");
+    if (!trimmed) return;
+    if (asMarkdown) {
+      appendMarkdownBlocks(container, trimmed);
+    } else {
+      const p = document.createElement("div");
+      p.className = "chat-bubble-text";
+      p.textContent = trimmed;
+      container.appendChild(p);
+    }
+  };
+
   IMAGE_PATH_RE.lastIndex = 0;
   let lastIndex = 0;
   let match;
   let foundAny = false;
   while ((match = IMAGE_PATH_RE.exec(text))) {
     foundAny = true;
-    const before = text.slice(lastIndex, match.index).trim();
-    if (before) {
-      const p = document.createElement("div");
-      p.className = "chat-bubble-text";
-      p.textContent = before;
-      container.appendChild(p);
-    }
+    renderChunk(text.slice(lastIndex, match.index));
     const img = document.createElement("img");
     img.className = "chat-bubble-image";
     img.src = "file:///" + encodeURI(match[1].replace(/\\/g, "/"));
@@ -891,16 +1112,10 @@ function renderTextWithImages(container, text) {
     lastIndex = IMAGE_PATH_RE.lastIndex;
   }
   if (!foundAny) {
-    container.textContent = text; // textContent, not innerHTML - inherently safe against injection
+    renderChunk(text);
     return;
   }
-  const after = text.slice(lastIndex).trim();
-  if (after) {
-    const p = document.createElement("div");
-    p.className = "chat-bubble-text";
-    p.textContent = after;
-    container.appendChild(p);
-  }
+  renderChunk(text.slice(lastIndex));
 }
 
 function renderChatBlocks(blocks, pendingSent, opts = {}) {
@@ -924,7 +1139,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       for (const section of splitAnnotatedSections(text)) {
         const sectionEl = document.createElement("div");
         sectionEl.className = "chat-answer-section chat-answer-" + section.kind;
-        sectionEl.textContent = section.text; // textContent, not innerHTML - inherently safe against injection
+        renderRichText(sectionEl, section.text, { markdown: true });
         wrapper.appendChild(sectionEl);
       }
       if (block.timestamp) {
@@ -938,7 +1153,9 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     }
     const el = document.createElement("div");
     el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role;
-    renderTextWithImages(el, text);
+    // Agent and user messages render as Markdown; status lines ("[used tool: X]")
+    // stay plain.
+    renderRichText(el, text, { markdown: block.role !== "status" });
     if (block.timestamp) {
       const timeEl = document.createElement("span");
       timeEl.className = "chat-block-time";
@@ -956,7 +1173,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
   for (const pending of pendingSent || []) {
     const el = document.createElement("div");
     el.className = "chat-bubble chat-bubble-user chat-bubble-pending";
-    renderTextWithImages(el, pending.text);
+    renderRichText(el, pending.text, { markdown: true });
     chatMessagesViewEl.appendChild(el);
   }
   if (opts.forceBottom || wasNearBottom) {
