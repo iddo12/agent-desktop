@@ -902,6 +902,16 @@ function appendInlineMarkdown(parent, str) {
     { re: /(?<![\w])_([^_\n]+?)_(?![\w])/, tag: "em" },
     { re: /~~([^~]+?)~~/, tag: "del" },
     { re: /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/, tag: "a" },
+    // A bare URL (no [text](url) markdown around it - agents paste plain
+    // https://... links constantly, e.g. straight into a [[KEY]] line) was
+    // previously left as plain text, indistinguishable (to a click, a
+    // selection, or the context menu) from surrounding prose - Iddo hit
+    // this directly trying to copy "just the link" out of one and getting
+    // whatever else was on the line too. Turning it into a real <a> makes
+    // it independently clickable/selectable, and gives it a real
+    // params.linkURL so the right-click menu's "Copy Link Address" (added
+    // earlier the same day) can grab exactly the URL, nothing else.
+    { re: /(https?:\/\/[^\s<>"')\]]+)/, tag: "bareurl" },
   ];
   let rest = String(str);
   let guard = 0;
@@ -928,6 +938,25 @@ function appendInlineMarkdown(parent, str) {
       a.rel = "noopener noreferrer";
       a.textContent = m[1];
       parent.appendChild(a);
+    } else if (p.tag === "bareurl") {
+      // Sentence punctuation right after a bare URL (a period ending the
+      // sentence, a comma before "which...", etc.) reads as part of the
+      // match but almost never belongs in the actual link - trim it back
+      // off and let it fall through as normal trailing text instead.
+      let url = m[1];
+      const trailing = url.match(/[.,;:!?]+$/);
+      let trailingText = "";
+      if (trailing) {
+        trailingText = trailing[0];
+        url = url.slice(0, -trailingText.length);
+      }
+      const a = document.createElement("a");
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = url;
+      parent.appendChild(a);
+      if (trailingText) parent.appendChild(document.createTextNode(trailingText));
     } else {
       const e = document.createElement(p.tag);
       if (p.literal) e.textContent = m[1];
