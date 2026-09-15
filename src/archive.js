@@ -277,8 +277,10 @@ function getSessionActivity(sessionCwd) {
   let lastHumanTs = null;
   let lastEndTurnTs = null;
   let last = null; // { ts, done } for the most recent user/assistant entry
+  let lastSessionId = null;
   for (const obj of entries) {
     const ts = new Date(obj.timestamp).getTime();
+    if (obj.sessionId) lastSessionId = obj.sessionId;
     if (obj.type === "assistant" && obj.message) {
       const done = obj.message.stop_reason === "end_turn" || obj.message.stop_reason === "stop_sequence";
       if (done && (lastEndTurnTs == null || ts > lastEndTurnTs)) lastEndTurnTs = ts;
@@ -291,7 +293,48 @@ function getSessionActivity(sessionCwd) {
     }
   }
 
-  const working = !!last && !last.done;
+  let working = !!last && !last.done;
+
+  // The rule above is a pure transcript heuristic: an assistant tool_use
+  // entry with no matching tool_result yet reads as "still working" no
+  // matter how old it is - correct while a tool is genuinely still
+  // running, wrong forever if the underlying daemon process died (crashed,
+  // was killed, host machine slept) before it could write that result.
+  // Confirmed live (2026-09-15/16): the Optimization agent's last transcript
+  // entry was a mid-flight tool_use from ~17:00, Agent Desktop still showed
+  // "Working... 1594s (taking a while - still going)" at midnight, and there
+  // was no backend process for that session left running at all by then.
+  // Cross-check against the daemon's own pid file - claude's background
+  // daemon writes one to ~/.claude/daemon/pty-pids/<first 8 chars of the
+  // session id>.pid for as long as it's alive, and reliably removes it on
+  // exit (confirmed against two live sessions, one 6+ hours old, both still
+  // correctly pointing at a running process) - so a missing file, or one
+  // whose pid no longer exists, is strong direct evidence the process is
+  // actually gone, not just quiet. Deliberately conservative: only ever
+  // flips working from true to false, never the other way, and any error
+  // reading/checking the pid file leaves the transcript's own answer alone
+  // rather than risk a false "not working" for an agent that's actually fine.
+  if (working && lastSessionId) {
+    try {
+      const daemonShort = String(lastSessionId).split("-")[0];
+      const pidFile = path.join(os.homedir(), ".claude", "daemon", "pty-pids", `${daemonShort}.pid`);
+      if (!fs.existsSync(pidFile)) {
+        working = false;
+      } else {
+        const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+        if (Number.isFinite(pid)) {
+          try {
+            process.kill(pid, 0); // throws if the process doesn't exist; doesn't actually signal it
+          } catch (e) {
+            if (e && e.code === "ESRCH") working = false;
+          }
+        }
+      }
+    } catch (e) {
+      // Leave the transcript-based answer as-is - see the conservative note above.
+    }
+  }
+
   let startTs = null;
   if (working) {
     startTs = lastHumanTs;
