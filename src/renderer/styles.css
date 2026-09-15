@@ -1395,6 +1395,18 @@ html, body {
   border-radius: 10px;
   padding: 10px 16px;
   cursor: pointer;
+  /* Fixed width, sized for "Queue" (its longer label) - #chat-input-actions
+     is a column flex container with no explicit width, so by default
+     (align-items: stretch) both this button and the sibling mic button
+     stretch to match whichever child is widest at that instant. Without
+     this, toggling textContent between "Send"/"Queue" (updateComposeAvailability(),
+     driven by session.busy - deliberately twitchy, ~900ms, see IDLE_TIMEOUT_MS)
+     visibly resized both buttons in sync every time busy flickered during
+     normal streaming output - looked like the icons "breathing." Fixing the
+     width here is simpler and lower-risk than de-flickering session.busy,
+     which is twitchy on purpose for the (unrelated) send-vs-queue decision. */
+  min-width: 80px;
+  text-align: center;
 }
 #send-input-btn:hover { filter: brightness(1.1); }
 
