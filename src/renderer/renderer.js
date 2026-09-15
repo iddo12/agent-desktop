@@ -724,6 +724,16 @@ function showTerminalFor(agent) {
       session.lastSentRows = rows;
       window.api
         .startTerminal(agent.path, cols, rows)
+        .then(() => {
+          // Flush anything queued by sendChatInput()'s !session.started guard
+          // while this was in flight - same drain pattern as setBusy()'s
+          // busy -> not-busy transition, just for "just started" instead.
+          if (session.sendQueue.length > 0) {
+            const next = session.sendQueue.shift();
+            submitToAgent(agent.path, next);
+            renderQueue(agent.path);
+          }
+        })
         .catch((err) => {
           session.term.writeln(`\r\n[failed to start session: ${err.message}]`);
           session.started = false;
@@ -2547,10 +2557,24 @@ function sendChatInput() {
   if (!combined.trim() || !activeAgentPath) return;
 
   const session = terminals.get(activeAgentPath);
-  if (session && session.busy) {
-    // Stay typeable at all times rather than blocking on a busy session -
-    // queue it instead, setBusy() sends it automatically once the agent's
-    // actually free (see the busy-tracking section above).
+  // !session.started covers a real, confirmed-live bug: window.api.startTerminal()
+  // is only issued from a requestAnimationFrame callback in showTerminalFor()
+  // (deferred so layout has settled), so there's a brief real window, right
+  // after opening a brand-new agent (or any agent right after an app
+  // restart, before it's reattached), where the compose box is fully active
+  // but main.js's ptySessions map has no entry for this agent yet - not even
+  // the "starting" placeholder that normally queues input. A message sent
+  // in that window hit terminal-input's `if (!session) return` and vanished
+  // with zero trace (confirmed directly against a session's job-state file:
+  // spawned, cwd correct, but sat "idle - send a prompt to start" forever).
+  // Routing it through the same sendQueue used for a busy session closes
+  // this - see the matching .then() in showTerminalFor() that flushes it
+  // once the real session actually exists.
+  if (session && (session.busy || !session.started)) {
+    // Stay typeable at all times rather than blocking - queue it instead;
+    // setBusy() sends it automatically once the agent's actually free, and
+    // showTerminalFor()'s startTerminal().then() does the same once a
+    // freshly-opened agent's session has actually started.
     session.sendQueue.push(combined);
     renderQueue(activeAgentPath);
   } else {
