@@ -970,9 +970,11 @@ function appendMarkdownBlocks(container, text) {
       }
       i++; // consume closing fence if present
       const pre = document.createElement("pre");
+      pre.className = "code-block";
       const code = document.createElement("code");
       code.textContent = buf.join("\n");
       pre.appendChild(code);
+      addCopyButton(pre, () => code.textContent, "code-copy-btn");
       container.appendChild(pre);
       continue;
     }
@@ -1133,6 +1135,39 @@ function renderRichText(container, text, opts = {}) {
   renderChunk(text.slice(lastIndex));
 }
 
+// Small hover-revealed "Copy" button, reused for both a whole chat bubble
+// and an individual fenced code block - Iddo asked for the same one-click
+// copy affordance this chat UI itself has for code/links/text, since
+// Agent Desktop (an Electron app) never had a right-click context menu at
+// all until this same change (see main.js's "context-menu" handler) - there
+// was previously no way to copy anything except a manual drag-select, which
+// is what made "even text" hard, not just links specifically.
+function addCopyButton(container, getText, extraClass) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-btn" + (extraClass ? " " + extraClass : "");
+  btn.title = "Copy";
+  btn.textContent = "Copy";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const text = getText();
+    if (!text) return;
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        btn.textContent = "Copied!";
+        btn.classList.add("copied");
+        setTimeout(() => {
+          btn.textContent = "Copy";
+          btn.classList.remove("copied");
+        }, 1200);
+      })
+      .catch(() => {});
+  });
+  container.appendChild(btn);
+  return btn;
+}
+
 function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // Keep the reader where they are. This view is re-rendered from scratch on
   // every rebuild - the 4s stale poll, every burst of streaming output, etc.
@@ -1197,6 +1232,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
         timeEl.textContent = formatBlockTime(block.timestamp);
         wrapper.appendChild(timeEl);
       }
+      addCopyButton(wrapper, () => text, "bubble-copy-btn");
       chatMessagesViewEl.appendChild(wrapper);
       continue;
     }
@@ -1212,6 +1248,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       timeEl.textContent = formatBlockTime(block.timestamp);
       el.appendChild(timeEl);
     }
+    if (block.role !== "status") addCopyButton(el, () => text, "bubble-copy-btn");
     chatMessagesViewEl.appendChild(el);
   }
   // Messages shown immediately at send time, before a real matching entry

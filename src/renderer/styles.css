@@ -844,6 +844,7 @@ html, body {
 }
 
 .chat-bubble {
+  position: relative;
   word-break: break-word;
   line-height: 1.6;
   font-size: 0.92rem;
@@ -920,12 +921,51 @@ html, body {
 }
 .chat-bubble pre,
 .chat-answer-section pre {
+  position: relative;
   background: var(--bg-hover);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
   margin: 0 0 0.7em;
   overflow-x: auto;
+}
+
+/* Copy buttons - one per chat bubble (whole message) and one per fenced
+   code block (just that snippet), hover-revealed so they don't clutter a
+   normal read. Requested directly: Agent Desktop had no way to copy
+   anything short of a manual drag-select (no right-click menu existed at
+   all - see main.js's "context-menu" handler, added the same change), so
+   this mirrors the one-click copy affordance this chat UI itself has. */
+.copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  z-index: 1;
+}
+.chat-bubble:hover > .copy-btn,
+.chat-bubble-annotated:hover > .copy-btn,
+pre:hover > .copy-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+.copy-btn:hover { filter: brightness(1.15); }
+.copy-btn.copied {
+  color: #1a7f37;
+  border-color: #1a7f37;
+}
+.code-copy-btn {
+  top: 8px;
+  right: 8px;
 }
 .chat-bubble pre code,
 .chat-answer-section pre code {
@@ -1088,6 +1128,7 @@ html, body {
    distinct colors (amber vs. teal) so a risk/caution note never gets
    mistaken for the plain result/takeaway at a glance. */
 .chat-bubble-annotated {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 10px;

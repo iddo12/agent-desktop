@@ -1,4 +1,4 @@
-﻿const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+﻿const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
@@ -686,6 +686,46 @@ function createWindow() {
     },
   });
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+
+  // Electron gives a BrowserWindow no OS-native right-click menu and blocks
+  // target="_blank" links by default - neither was ever wired up here,
+  // which is exactly why copying (or even opening) a link, or copying
+  // plain text without a per-message button, has never worked in this app.
+  // Iddo hit this directly asking to copy something from a chat.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  mainWindow.webContents.on("context-menu", (event, params) => {
+    const template = [];
+    if (params.isEditable) {
+      template.push(
+        { label: "Cut", role: "cut", enabled: params.editFlags.canCut },
+        { label: "Copy", role: "copy", enabled: params.editFlags.canCopy },
+        { label: "Paste", role: "paste", enabled: params.editFlags.canPaste },
+        { type: "separator" },
+        { label: "Select All", role: "selectAll" }
+      );
+    } else if (params.selectionText) {
+      // Not webContents.copy()'s built-in role here - that copies whatever
+      // the OS selection currently is, which can change/clear between the
+      // right-click and the menu-item click on a slower machine. Capturing
+      // params.selectionText now and writing it explicitly is safer.
+      template.push({
+        label: "Copy",
+        click: () => clipboard.writeText(params.selectionText),
+      });
+    }
+    if (params.linkURL) {
+      if (template.length) template.push({ type: "separator" });
+      template.push(
+        { label: "Copy Link Address", click: () => clipboard.writeText(params.linkURL) },
+        { label: "Open Link in Browser", click: () => shell.openExternal(params.linkURL) }
+      );
+    }
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: mainWindow });
+  });
 }
 
 // Without this, launching the app a second time (e.g. clicking the shortcut
