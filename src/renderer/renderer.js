@@ -722,8 +722,10 @@ function showTerminalFor(agent) {
       session.started = true;
       session.lastSentCols = cols;
       session.lastSentRows = rows;
+      const knownAgentId = pendingKnownAgentIdByPath.get(agent.path);
+      pendingKnownAgentIdByPath.delete(agent.path);
       window.api
-        .startTerminal(agent.path, cols, rows)
+        .startTerminal(agent.path, cols, rows, knownAgentId)
         .then(() => {
           // Flush anything queued by sendChatInput()'s !session.started guard
           // while this was in flight - same drain pattern as setBusy()'s
@@ -3120,6 +3122,16 @@ historyToggleBtn.addEventListener("click", () => {
 let conversationsMode = false;
 let switchingConversation = false;
 
+// Set right after switch-conversation dispatches a specific session, keyed
+// by agentPath, consumed (and cleared) the very next time showTerminalFor()
+// attaches for that same agent - see its own comment for why this is
+// needed: without it, the subsequent plain "open this agent" call has no
+// way to know a specific fresh/resumed session already exists and falls
+// back to generic discovery, which can miss it entirely (confirmed live -
+// a forceFresh dispatch was left orphaned while a second, unwanted session
+// got dispatched and attached instead).
+const pendingKnownAgentIdByPath = new Map();
+
 // Switching the live session to a different past conversation, and starting
 // a brand-new one, both work at the data layer (switch-conversation in
 // main.js stops the bg daemon and re-dispatches with --bg --resume <id> /
@@ -3127,13 +3139,34 @@ let switchingConversation = false;
 // resuming an OLDER conversation, getLiveTranscriptBlocks() still picks the
 // transcript file with the newest entry timestamps (fine for --continue,
 // wrong here), so the chat view keeps showing the conversation you just
-// left. Fixing that means threading the active bg session id through to the
-// transcript reader rather than having it guess by recency. Until that's
-// done, the list is read + rename only - both fully working - and these two
-// actions stay disabled rather than shipping a switch that visibly lands on
-// the wrong conversation. Flip to true once the transcript reader is
-// session-scoped and it's been re-tested end to end.
-const CONVERSATION_SWITCH_ENABLED = false;
+// left.
+//
+// 2026-09-16: fixed the more fundamental half of this - switchConversation()
+// dispatched the right session and returned its id, but nothing downstream
+// ever used that id. reloadAgentSessionView()+selectAgent() just re-ran the
+// normal open flow, which has no memory of "a specific session was just
+// created" and falls back to generic find-or-dispatch discovery - which
+// picks by --continue's own "most recent conversation with real content"
+// heuristic. A just-forceFresh-dispatched, zero-message conversation
+// doesn't have any content yet, so that heuristic skips right past it -
+// confirmed live, not theoretical: a standalone forceFresh dispatch was
+// correctly created and left running, and the very next plain "open this
+// agent" dispatched a SECOND session and attached to the old conversation
+// instead, never finding the fresh one at all. Now threaded through
+// properly (pendingKnownAgentIdByPath -> startTerminal's knownAgentId ->
+// startTerminalSession, skipping discovery entirely) so a switch/new-chat
+// always attaches to the exact session it just dispatched, not a guess.
+//
+// The transcript-picks-by-newest-timestamp quirk above is real but narrower
+// than it first appears: it only bites when switching to an OLDER
+// already-populated conversation while a MORE recently active one exists
+// for the same cwd. For "+ New chat" specifically, there's no competing
+// content initially - Chat View naturally starts following the new
+// session the moment it gets its first real entry, since that's when it
+// actually becomes "the newest." Good enough to ship "+ New chat" on this
+// fix alone; resuming an arbitrary OLDER past conversation may still need
+// the fuller session-scoped transcript-reader fix later.
+const CONVERSATION_SWITCH_ENABLED = true;
 
 function relativeTime(ms) {
   const s = Math.round((Date.now() - ms) / 1000);
@@ -3295,10 +3328,12 @@ async function switchToConversation(agentPath, opts, label) {
     : `Switching to “${label || "that conversation"}”…`;
   conversationsViewEl.prepend(note);
   try {
-    await window.api.switchConversation(agentPath, opts);
+    const result = await window.api.switchConversation(agentPath, opts);
+    if (result && result.agentId) pendingKnownAgentIdByPath.set(agentPath, result.agentId);
     // Tear the local view down to the same state a cold app start would be
     // in for this agent, then let selectAgent rebuild it - which re-runs
-    // start-terminal, attaching to the freshly dispatched bg session.
+    // start-terminal, attaching to the freshly dispatched bg session (see
+    // pendingKnownAgentIdByPath above for how it finds that exact one).
     reloadAgentSessionView(agentPath);
     note.remove();
     setConversationsMode(false);

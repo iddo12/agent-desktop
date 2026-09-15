@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld("api", {
   deleteAgent: (agentPath) => ipcRenderer.invoke("delete-agent", { agentPath }),
   pickAvatar: () => ipcRenderer.invoke("pick-avatar"),
 
-  startTerminal: (agentPath, cols, rows) => ipcRenderer.invoke("start-terminal", { agentPath, cols, rows }),
+  startTerminal: (agentPath, cols, rows, knownAgentId) => ipcRenderer.invoke("start-terminal", { agentPath, cols, rows, knownAgentId }),
   sendInput: (agentPath, data) => ipcRenderer.send("terminal-input", { agentPath, data }),
   resizeTerminal: (agentPath, cols, rows) => ipcRenderer.send("terminal-resize", { agentPath, cols, rows }),
 

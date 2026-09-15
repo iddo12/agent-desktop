@@ -1858,7 +1858,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
   ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows });
 }
 
-ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows }) => {
+ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows, knownAgentId }) => {
   if (ptySessions.has(agentPath)) {
     return { alreadyRunning: true };
   }
@@ -1879,7 +1879,18 @@ ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows }) => {
   // (dispatchBackgroundAgent() applies this same condition internally now.)
   const sessionCwd = sessionCwdFor(agentPath);
   try {
-    await startTerminalSession(agentPath, sessionCwd, cols, rows);
+    // knownAgentId (set only right after switch-conversation dispatched a
+    // specific fresh/resumed session - see the renderer's switchToConversation)
+    // skips the normal find-or-dispatch discovery entirely. That discovery
+    // picks by --continue's own "most recent conversation with real content"
+    // heuristic, which a conversation that was *just* forceFresh-dispatched
+    // with zero messages yet doesn't qualify for - confirmed live: a
+    // standalone forceFresh dispatch was correctly created and left running,
+    // but the very next plain "open this agent" ended up dispatching ANOTHER
+    // session and resuming the old conversation instead, never finding the
+    // fresh one at all. Passing the id we already know we just created
+    // removes the guessing entirely.
+    await startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId || undefined);
   } catch (e) {
     ptySessions.delete(agentPath);
     throw e;
