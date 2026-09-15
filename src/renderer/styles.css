@@ -930,37 +930,47 @@ html, body {
   overflow-x: auto;
 }
 
-/* Copy buttons - one per chat bubble (whole message) and one per fenced
-   code block (just that snippet), hover-revealed so they don't clutter a
-   normal read. Requested directly: Agent Desktop had no way to copy
-   anything short of a manual drag-select (no right-click menu existed at
-   all - see main.js's "context-menu" handler, added the same change), so
-   this mirrors the one-click copy affordance this chat UI itself has. */
+/* Copy buttons - one per chat bubble (whole message, or just the current
+   text selection if there is one - see addCopyButton()) and one per fenced
+   code block. Iddo asked for these to actually stand out (accent-colored,
+   like this chat UI's own copy affordance) rather than blend into the
+   background - a plain icon on var(--bg-hover) read as barely-there. The
+   code-block one stays visible at rest (a persistent corner icon on an
+   already-boxed element is the normal convention, e.g. GitHub/VS Code);
+   the bubble one is hover-revealed so it doesn't clutter a normal read of
+   plain prose, but uses the same accent styling once shown. */
 .copy-btn {
   position: absolute;
   top: 6px;
   right: 6px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-  background: var(--bg-hover);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: white;
   border-radius: 6px;
-  padding: 3px 8px;
-  font-size: 0.72rem;
+  padding: 0;
   cursor: pointer;
   z-index: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: opacity 0.12s ease, filter 0.12s ease, transform 0.08s ease;
 }
-.chat-bubble:hover > .copy-btn,
-.chat-bubble-annotated:hover > .copy-btn,
-pre:hover > .copy-btn {
+.bubble-copy-btn {
+  opacity: 0;
+  pointer-events: none;
+}
+.chat-bubble:hover > .bubble-copy-btn,
+.chat-bubble-annotated:hover > .bubble-copy-btn {
   opacity: 1;
   pointer-events: auto;
 }
-.copy-btn:hover { filter: brightness(1.15); }
+.copy-btn:hover { filter: brightness(1.12); }
+.copy-btn:active { transform: scale(0.92); }
 .copy-btn.copied {
-  color: #1a7f37;
+  background: #1a7f37;
   border-color: #1a7f37;
 }
 .code-copy-btn {

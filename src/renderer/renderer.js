@@ -1135,31 +1135,52 @@ function renderRichText(container, text, opts = {}) {
   renderChunk(text.slice(lastIndex));
 }
 
-// Small hover-revealed "Copy" button, reused for both a whole chat bubble
-// and an individual fenced code block - Iddo asked for the same one-click
-// copy affordance this chat UI itself has for code/links/text, since
-// Agent Desktop (an Electron app) never had a right-click context menu at
-// all until this same change (see main.js's "context-menu" handler) - there
-// was previously no way to copy anything except a manual drag-select, which
-// is what made "even text" hard, not just links specifically.
+// Static, hard-coded SVG markup only (no external/user-supplied data ever
+// passed through here) - safe to assign via innerHTML.
+const COPY_ICON_SVG =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5.5" y="5.5" width="8" height="9" rx="1.5"/><path d="M3.5 10.5V3a1.5 1.5 0 0 1 1.5-1.5h6.5" stroke-linecap="round"/></svg>';
+const CHECK_ICON_SVG =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8.5l3.2 3.2L13 4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// Small "Copy" button, reused for both a whole chat bubble and an
+// individual fenced code block. Selection-aware: if the user has actually
+// drag-selected some text inside this container, copy exactly that
+// selection - only fall back to the whole block when nothing is selected.
+// Iddo hit this directly: without the mousedown/preventDefault below, a
+// plain click on ANY button first collapses whatever text selection the
+// page had (standard browser behavior, happens before the click handler
+// even runs) - so reading window.getSelection() from a click handler alone
+// always saw an empty selection and this always copied "a big chunk" (the
+// whole block) regardless of what was actually highlighted. Capturing the
+// selection on mousedown, before the browser clears it, is what makes
+// "select exactly what I want, then copy just that" actually work.
 function addCopyButton(container, getText, extraClass) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "copy-btn" + (extraClass ? " " + extraClass : "");
-  btn.title = "Copy";
-  btn.textContent = "Copy";
+  btn.title = "Copy (copies your text selection if you have one, otherwise the whole message)";
+  btn.innerHTML = COPY_ICON_SVG;
+  let capturedSelection = "";
+  btn.addEventListener("mousedown", (e) => {
+    e.preventDefault(); // keep focus/selection exactly as it is
+    const sel = window.getSelection();
+    capturedSelection =
+      sel && !sel.isCollapsed && container.contains(sel.anchorNode) && container.contains(sel.focusNode)
+        ? sel.toString()
+        : "";
+  });
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
-    const text = getText();
+    const text = capturedSelection || getText();
     if (!text) return;
     navigator.clipboard
       .writeText(text)
       .then(() => {
-        btn.textContent = "Copied!";
         btn.classList.add("copied");
+        btn.innerHTML = CHECK_ICON_SVG;
         setTimeout(() => {
-          btn.textContent = "Copy";
           btn.classList.remove("copied");
+          btn.innerHTML = COPY_ICON_SVG;
         }, 1200);
       })
       .catch(() => {});
