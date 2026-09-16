@@ -1587,17 +1587,27 @@ const STUCK_CHECK_INTERVAL_MS = 30 * 1000;
 // manually.
 const STUCK_TURN_THRESHOLD_MS = 3 * 60 * 1000;
 // If recovery itself doesn't hold (the same session wedges again shortly
-// after a fresh redispatch - also observed the same night), don't thrash
-// forever burning API calls on a silent kill/redispatch loop. After this
-// many recoveries inside the window below, stop auto-recovering that agent
-// and leave it for a human - logged either way.
-const MAX_AUTO_RECOVERIES_PER_WINDOW = 3;
+// after a fresh redispatch - also observed the same night), this used to
+// stop auto-recovering after 3 recoveries per 15-minute window and leave the
+// agent stuck for a human to notice and manually restart. Changed 2026-09-17
+// (Iddo, after the watchdog left an agent dead for 3+ hours overnight and
+// manual "Restart Session" clicks landed in the same doomed loop): a bounded
+// recovery cadence (at most one kill/redispatch per STUCK_TURN_THRESHOLD_MS,
+// i.e. ~3 min apart) is not a runaway thrash even run forever, so there's no
+// good reason to ever stop trying - the alternative is a dead agent nobody
+// notices. The count/window tracking is kept purely for visibility (the
+// in-terminal notice below reports it) - recovery itself is never gated on it.
 const AUTO_RECOVERY_WINDOW_MS = 15 * 60 * 1000;
+// Recovery still isn't gated on this - it's just the point past which the
+// in-terminal notice adds a louder "this keeps happening" warning, since a
+// handful of recoveries in a window is normal noise but double digits means
+// something worth a human's attention even though the watchdog is coping.
+const MAX_VISIBLE_RECOVERIES_BEFORE_WARNING = 3;
 
 // Deliberately NOT stored on the ptySessions entry itself: recoverStuckSession()
 // kills the old session object and startTerminalSession() creates a brand
 // new one for the fresh process, which would silently reset any counter
-// kept there - defeating the whole point of a per-agent recovery cap.
+// kept there - defeating the point of tracking recoveries across redispatches.
 const autoRecoveryTracking = new Map(); // agentPath -> { windowStart, count }
 
 const STUCK_WATCHDOG_LOG_PATH = path.join(app.getPath("userData"), "stuck-turn-watchdog.log");
@@ -1609,9 +1619,12 @@ function logStuckWatchdog(line) {
   }
 }
 
-async function recoverStuckSession(agentPath, session) {
+async function recoverStuckSession(agentPath, session, recoveryCount) {
   const { sessionCwd, cols, rows } = session;
-  logStuckWatchdog(`recovering agentPath=${agentPath} - no transcript growth for ${STUCK_TURN_THRESHOLD_MS / 1000}s while working+alive`);
+  logStuckWatchdog(
+    `recovering agentPath=${agentPath} - no transcript growth for ${STUCK_TURN_THRESHOLD_MS / 1000}s while working+alive ` +
+      `(recovery #${recoveryCount} in current ${AUTO_RECOVERY_WINDOW_MS / 60000}min window)`
+  );
   try {
     session.proc.kill();
   } catch (e) {
@@ -1627,11 +1640,17 @@ async function recoverStuckSession(agentPath, session) {
     await startTerminalSession(agentPath, sessionCwd, cols, rows);
     logStuckWatchdog(`recovery dispatched OK for agentPath=${agentPath}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
+      const extra =
+        recoveryCount > MAX_VISIBLE_RECOVERIES_BEFORE_WARNING
+          ? ` This has now happened ${recoveryCount} times in the last ${AUTO_RECOVERY_WINDOW_MS / 60000} min - ` +
+            `if it keeps recurring, this agent's session may need a Reset Session (real /clear) or a fresh "+ New chat".`
+          : "";
       mainWindow.webContents.send("terminal-data", {
         agentPath,
         data:
           "\r\n\x1b[33m[Agent Desktop: this session showed no progress for a while and appeared frozen - " +
-          "automatically restarted. Known upstream Claude Code issue, see agent-desktop\\CLAUDE.md.]\x1b[0m\r\n\r\n",
+          `automatically restarted (recovery #${recoveryCount}). Known upstream Claude Code issue, see ` +
+          `agent-desktop\\CLAUDE.md.${extra}]\x1b[0m\r\n\r\n`,
       });
     }
   } catch (e) {
@@ -1675,17 +1694,13 @@ async function checkForStuckTurns() {
       tracking = { windowStart: now, count: 0 };
       autoRecoveryTracking.set(agentPath, tracking);
     }
-    if (tracking.count >= MAX_AUTO_RECOVERIES_PER_WINDOW) {
-      logStuckWatchdog(
-        `agentPath=${agentPath} stuck again but already auto-recovered ${tracking.count}x in the last ` +
-          `${AUTO_RECOVERY_WINDOW_MS / 60000}min - leaving it for a human rather than thrashing further`
-      );
-      session.stuckWatch = null; // don't re-log every 30s while left alone
-      continue;
-    }
     tracking.count++;
     session.stuckWatch = null;
-    await recoverStuckSession(agentPath, session);
+    // No cap: always recover. STUCK_TURN_THRESHOLD_MS already bounds this to
+    // at most one kill/redispatch roughly every 3 minutes per agent, so even
+    // a persistently-doomed session just costs a bounded, visible retry
+    // cadence rather than being silently abandoned (see 2026-09-17 note above).
+    await recoverStuckSession(agentPath, session, tracking.count);
   }
 }
 // --- end native background-agent backend helpers ---------------------------
