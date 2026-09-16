@@ -15,6 +15,7 @@ const {
   getUsageWindows,
   getLiveTranscriptBlocks,
   getSessionActivity,
+  getLatestTranscriptMtimeMs,
   listConversations,
   setConversationTitle,
 } = require("./archive");
@@ -752,6 +753,9 @@ if (!gotSingleInstanceLock) {
     ensureRemoteControlEnabled();
     reapOrphanedBackgroundAgentProcesses();
     setInterval(reapOrphanedBackgroundAgentProcesses, REAPER_INTERVAL_MS);
+    setInterval(() => {
+      checkForStuckTurns().catch((e) => logStuckWatchdog(`checkForStuckTurns error: ${e.message}`));
+    }, STUCK_CHECK_INTERVAL_MS);
   });
 }
 
@@ -1551,6 +1555,139 @@ async function reapOrphanedBackgroundAgentProcesses() {
 // so 30 minutes is plenty rather than adding startup-only blind spots for a
 // long-running window.
 const REAPER_INTERVAL_MS = 30 * 60 * 1000;
+
+// Mitigation for a confirmed upstream Claude Code CLI bug (see
+// agent-desktop\CLAUDE.md, "ROOT CAUSE FOUND for the session wedged solid
+// mystery", 2026-09-16): the `--bg` + attach code path can leave the CLI's
+// own process alive and "Responding: true" at the OS level, but internally
+// stalled mid-turn forever - proven with a minimal repro outside this app
+// entirely (main.js/Agent Desktop is not the cause and cannot patch the
+// real bug). handlePtyExit()'s existing silent-reattach only fires once the
+// process has actually died, so it never catches this - the process never
+// dies, it just stops making progress. This watchdog catches the
+// "alive but not progressing" case specifically and forces the recovery a
+// human would otherwise have to do by hand (confirmed live, repeatedly,
+// the same night this was written: killing the stuck process and
+// redispatching fresh reliably gets a working session again for a while).
+//
+// Deliberately cheap per check - getSessionActivity() already does the
+// real "is it actually alive" liveness check via a pid-file existence +
+// signal-0 probe (no process enumeration), and getLatestTranscriptMtimeMs()
+// is a plain fs.statSync, no JSON parsing. Safe to run every 30s even with
+// several agents open.
+const STUCK_CHECK_INTERVAL_MS = 30 * 1000;
+// How long a turn can show zero new transcript bytes, while confirmed
+// "working" AND confirmed alive, before it's treated as stuck rather than
+// just a genuinely slow single tool call or thinking step. Tuned against
+// real data from the same investigation: every confirmed real wedge sat at
+// exactly 0 bytes of growth for 100s-500+s; ordinary turns (including a
+// slow multi-part Bash call) kept producing new transcript entries at least
+// every 10-60s. 3 minutes gives real slow turns comfortable headroom while
+// still recovering well before a human would likely have noticed and acted
+// manually.
+const STUCK_TURN_THRESHOLD_MS = 3 * 60 * 1000;
+// If recovery itself doesn't hold (the same session wedges again shortly
+// after a fresh redispatch - also observed the same night), don't thrash
+// forever burning API calls on a silent kill/redispatch loop. After this
+// many recoveries inside the window below, stop auto-recovering that agent
+// and leave it for a human - logged either way.
+const MAX_AUTO_RECOVERIES_PER_WINDOW = 3;
+const AUTO_RECOVERY_WINDOW_MS = 15 * 60 * 1000;
+
+// Deliberately NOT stored on the ptySessions entry itself: recoverStuckSession()
+// kills the old session object and startTerminalSession() creates a brand
+// new one for the fresh process, which would silently reset any counter
+// kept there - defeating the whole point of a per-agent recovery cap.
+const autoRecoveryTracking = new Map(); // agentPath -> { windowStart, count }
+
+const STUCK_WATCHDOG_LOG_PATH = path.join(app.getPath("userData"), "stuck-turn-watchdog.log");
+function logStuckWatchdog(line) {
+  try {
+    fs.appendFileSync(STUCK_WATCHDOG_LOG_PATH, `${new Date().toISOString()} ${line}\n`);
+  } catch (e) {
+    /* logging itself must never be why the watchdog fails */
+  }
+}
+
+async function recoverStuckSession(agentPath, session) {
+  const { sessionCwd, cols, rows } = session;
+  logStuckWatchdog(`recovering agentPath=${agentPath} - no transcript growth for ${STUCK_TURN_THRESHOLD_MS / 1000}s while working+alive`);
+  try {
+    session.proc.kill();
+  } catch (e) {
+    /* already gone - fine, we're about to redispatch regardless */
+  }
+  // Same synchronous-placeholder-then-await pattern the start-terminal IPC
+  // handler uses (see its own comment) - closes the exact "no session
+  // object at all" input-loss window that pattern was built to fix, which
+  // would otherwise briefly reopen here between the kill and the new
+  // dispatch actually landing.
+  ptySessions.set(agentPath, { starting: true, pendingInput: [] });
+  try {
+    await startTerminalSession(agentPath, sessionCwd, cols, rows);
+    logStuckWatchdog(`recovery dispatched OK for agentPath=${agentPath}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("terminal-data", {
+        agentPath,
+        data:
+          "\r\n\x1b[33m[Agent Desktop: this session showed no progress for a while and appeared frozen - " +
+          "automatically restarted. Known upstream Claude Code issue, see agent-desktop\\CLAUDE.md.]\x1b[0m\r\n\r\n",
+      });
+    }
+  } catch (e) {
+    ptySessions.delete(agentPath);
+    logStuckWatchdog(`recovery dispatch FAILED for agentPath=${agentPath}: ${e.message}`);
+  }
+}
+
+async function checkForStuckTurns() {
+  for (const [agentPath, session] of ptySessions) {
+    if (!session || session.starting || !session.proc) continue; // nothing real to check yet
+    let activity;
+    try {
+      activity = getSessionActivity(session.sessionCwd);
+    } catch (e) {
+      continue; // never let a read failure here affect anything else
+    }
+    if (!activity || !activity.working) {
+      // Not working (or the pid-liveness check inside getSessionActivity
+      // already caught it as dead) - nothing to watch right now.
+      session.stuckWatch = null;
+      continue;
+    }
+
+    const mtimeMs = getLatestTranscriptMtimeMs(session.sessionCwd);
+    if (mtimeMs == null) continue;
+
+    if (!session.stuckWatch || session.stuckWatch.mtimeMs !== mtimeMs) {
+      // Either the first time we've seen this agent working, or real new
+      // content landed since the last check - (re)start the clock.
+      session.stuckWatch = { mtimeMs, sinceTs: Date.now() };
+      continue;
+    }
+
+    const stuckForMs = Date.now() - session.stuckWatch.sinceTs;
+    if (stuckForMs < STUCK_TURN_THRESHOLD_MS) continue;
+
+    const now = Date.now();
+    let tracking = autoRecoveryTracking.get(agentPath);
+    if (!tracking || now - tracking.windowStart > AUTO_RECOVERY_WINDOW_MS) {
+      tracking = { windowStart: now, count: 0 };
+      autoRecoveryTracking.set(agentPath, tracking);
+    }
+    if (tracking.count >= MAX_AUTO_RECOVERIES_PER_WINDOW) {
+      logStuckWatchdog(
+        `agentPath=${agentPath} stuck again but already auto-recovered ${tracking.count}x in the last ` +
+          `${AUTO_RECOVERY_WINDOW_MS / 60000}min - leaving it for a human rather than thrashing further`
+      );
+      session.stuckWatch = null; // don't re-log every 30s while left alone
+      continue;
+    }
+    tracking.count++;
+    session.stuckWatch = null;
+    await recoverStuckSession(agentPath, session);
+  }
+}
 // --- end native background-agent backend helpers ---------------------------
 // Shared by proc.onExit() below (the normal path) and the terminal-input/
 // terminal-resize catch blocks further down (the "we only found out the

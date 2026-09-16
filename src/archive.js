@@ -344,6 +344,27 @@ function getSessionActivity(sessionCwd) {
   return { working, sinceMs: working ? Math.max(0, Date.now() - startTs) : 0 };
 }
 
+// Cheap companion to getSessionActivity() for the stuck-turn watchdog in
+// main.js (see checkForStuckTurns()) - a plain fs.statSync per candidate
+// file, no JSON parsing at all, safe to call every few seconds even on a
+// multi-MB transcript. Returns the newest mtime across every JSONL file for
+// this cwd (there can be more than one - old --continue-encoding-bug
+// leftovers, or genuinely multiple past conversations), or null if none
+// exist yet.
+function getLatestTranscriptMtimeMs(sessionCwd) {
+  let latest = null;
+  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+    try {
+      const stat = fs.statSync(jsonlPath);
+      const mtime = stat.mtimeMs;
+      if (latest == null || mtime > latest) latest = mtime;
+    } catch (e) {
+      /* file disappeared between readdir and stat - skip it */
+    }
+  }
+  return latest;
+}
+
 // Each assistant JSONL entry already carries structured token usage for
 // that turn - reused here for the live context/token indicator rather than
 // anything the CLI displays on its own (it doesn't, in the terminal UI).
@@ -889,6 +910,7 @@ module.exports = {
   getUsageWindows,
   getLiveTranscriptBlocks,
   getSessionActivity,
+  getLatestTranscriptMtimeMs,
   listConversations,
   setConversationTitle,
 };
