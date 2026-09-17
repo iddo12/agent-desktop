@@ -2190,7 +2190,25 @@ ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId
 // arrives first wins, and calling it twice is safe (see its own comment).
 ipcMain.on("terminal-input", (event, { agentPath, data }) => {
   const session = ptySessions.get(agentPath);
-  if (!session) return;
+  if (!session) {
+    // No tracked session at all for this agent (as opposed to the "starting"
+    // placeholder case below, which IS tracked and queues correctly) - found
+    // 2026-09-17 while investigating a report of a typed message just
+    // vanishing with no error and no trace anywhere. Previously this branch
+    // silently dropped the input entirely; now it at least surfaces the loss
+    // visibly instead of eating it silently, so a future occurrence reads as
+    // an obvious error to retry rather than an unexplained disappearance.
+    // Root trigger for how ptySessions can lack an entry while the user is
+    // still looking at this agent's chat isn't confirmed - flagging rather
+    // than guessing further.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("terminal-data", {
+        agentPath,
+        data: "\r\n\x1b[31m[Agent Desktop: this message could not be delivered - no active session found. Please resend.]\x1b[0m\r\n\r\n",
+      });
+    }
+    return;
+  }
   // A "starting" placeholder has no real proc yet (background-agent dispatch
   // is async now - see start-terminal below). Confirmed directly, live: a
   // message sent right after opening an agent can land in this brief window
