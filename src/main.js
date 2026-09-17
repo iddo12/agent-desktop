@@ -2,7 +2,7 @@
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
-const { execSync, execFileSync, spawn } = require("child_process");
+const { execSync, execFileSync, execFile, spawn } = require("child_process");
 const pty = require("node-pty");
 const { listAgents, createAgent, updateAgent, deleteAgent, ROOT: AGENTS_ROOT } = require("./agents");
 const { readGroups, writeGroups } = require("./groups");
@@ -1610,6 +1610,45 @@ const MAX_VISIBLE_RECOVERIES_BEFORE_WARNING = 3;
 // kept there - defeating the point of tracking recoveries across redispatches.
 const autoRecoveryTracking = new Map(); // agentPath -> { windowStart, count }
 
+// Found live 2026-09-17 debugging why recovered sessions kept accumulating
+// as zombies: `session.proc.kill()` only signals the top-level pty-hosted
+// process (`claude.exe --bg-pty-host ...`), but that process spawns the
+// actual `--resume` worker as its own OS child - Windows does not kill
+// children when a parent dies unless they're grouped in a job object with
+// KILL_ON_JOB_CLOSE, which node-pty's winpty backend here doesn't set up.
+// So a "successful" kill left the real worker alive and still burning API
+// calls/CPU, un-tracked, while a fresh redispatch started on top of it -
+// confirmed live: after one recovery cycle, both the pre-recovery and
+// post-recovery worker PIDs were simultaneously alive. `taskkill /T` kills
+// the whole process tree, not just the one PID, which is what's actually
+// needed here.
+//
+// CORRECTED same night, after Iddo reported the whole app itself froze and
+// had to be closed and reopened: the first version of this used
+// execFileSync, which runs synchronously ON THE MAIN PROCESS'S ONLY THREAD -
+// if `taskkill` itself ever stalled (e.g. an unresponsive target process),
+// it would freeze all of Agent Desktop, not just the one agent being
+// recovered - every IPC call, every window, everything, exactly matching
+// what Iddo hit. Switched to the async `execFile` with an explicit timeout
+// so a slow/stuck taskkill can never block anything else, and made this
+// fire-and-forget (recovery already doesn't wait for the OS-level kill to
+// fully land before redispatching - same as the pre-existing session.proc.kill()
+// call this replaced never did either).
+function killProcessTree(proc) {
+  if (!proc) return;
+  try {
+    proc.kill();
+  } catch (e) {
+    /* fall through to the tree-kill below regardless */
+  }
+  if (process.platform === "win32" && proc.pid) {
+    execFile("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, timeout: 5000 }, () => {
+      /* best-effort cleanup - nothing more to do whether it succeeded, the
+         process was already gone, or it timed out */
+    });
+  }
+}
+
 const STUCK_WATCHDOG_LOG_PATH = path.join(app.getPath("userData"), "stuck-turn-watchdog.log");
 function logStuckWatchdog(line) {
   try {
@@ -1625,11 +1664,7 @@ async function recoverStuckSession(agentPath, session, recoveryCount) {
     `recovering agentPath=${agentPath} - no transcript growth for ${STUCK_TURN_THRESHOLD_MS / 1000}s while working+alive ` +
       `(recovery #${recoveryCount} in current ${AUTO_RECOVERY_WINDOW_MS / 60000}min window)`
   );
-  try {
-    session.proc.kill();
-  } catch (e) {
-    /* already gone - fine, we're about to redispatch regardless */
-  }
+  killProcessTree(session.proc);
   // Same synchronous-placeholder-then-await pattern the start-terminal IPC
   // handler uses (see its own comment) - closes the exact "no session
   // object at all" input-loss window that pattern was built to fix, which
