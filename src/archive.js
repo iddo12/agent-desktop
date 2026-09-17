@@ -365,6 +365,98 @@ function getLatestTranscriptMtimeMs(sessionCwd) {
   return latest;
 }
 
+// Detects whether the chronologically last transcript entry for this agent
+// is a halted turn - a synthetic message the CLI injects (model:"<synthetic>",
+// isApiErrorMessage:true) when the account's shared usage window (5-hour or
+// weekly) runs out mid-turn, instead of a normal end_turn/stop_sequence
+// completion. getSessionActivity() correctly reads a halt as "not working"
+// (the turn did stop), but that's indistinguishable from ordinary idle rest -
+// with nothing else watching for it, a halted agent just sits there silently
+// until a human happens to notice and retypes something, which is exactly
+// what prompted this (2026-09-17: the Trade Show Agent hit its 5-hour limit
+// answering "Are you working on it?" and nobody saw any signal at all).
+//
+// Only reads the tail of the newest transcript file (a bounded fs.readSync,
+// never a full JSON.parse of the whole file) since these routinely grow past
+// 10MB - safe to call on the same cadence as the stuck-turn watchdog for
+// every agent. Returns null when the last entry isn't a halt (including
+// "file has no entries yet" and "tail read landed mid-line" - a transient
+// mid-line read just means the next tick's read starts from mtime-fresh
+// bytes and gets a clean line next time).
+const HALT_TAIL_READ_BYTES = 65536;
+function getHaltInfo(sessionCwd) {
+  let newestPath = null;
+  let newestMtime = -Infinity;
+  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+    try {
+      const mtime = fs.statSync(jsonlPath).mtimeMs;
+      if (mtime > newestMtime) {
+        newestMtime = mtime;
+        newestPath = jsonlPath;
+      }
+    } catch (e) {
+      /* file disappeared mid-scan - skip it */
+    }
+  }
+  if (!newestPath) return null;
+
+  let lines;
+  try {
+    const size = fs.statSync(newestPath).size;
+    const start = Math.max(0, size - HALT_TAIL_READ_BYTES);
+    const fd = fs.openSync(newestPath, "r");
+    try {
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      lines = buf
+        .toString("utf-8")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    return null;
+  }
+
+  // Every real assistant turn is followed by one or more bookkeeping lines
+  // (type "system"/"turn_duration", cost-state, etc.) - the true last
+  // *message* entry (what getSessionActivity() itself keys off) is rarely
+  // the literal last line of the file. Scan backwards past those and stop
+  // at the first assistant/user entry actually found, matching
+  // getSessionActivity()'s own "chronologically last user/assistant entry"
+  // rule. A user entry here means a fresh human message landed with no
+  // reply yet - genuinely working, not halted (callers already skip this
+  // case via getSessionActivity().working, but check defensively too).
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let obj;
+    try {
+      obj = JSON.parse(lines[i]);
+    } catch (e) {
+      continue; // tail cut landed mid-line for this entry - keep scanning back
+    }
+    if (obj.type === "user") return null;
+    if (obj.type !== "assistant") continue;
+    if (!obj.isApiErrorMessage) return null;
+
+    const quota = obj.quotaLimits || {};
+    return {
+      timestamp: obj.timestamp || null,
+      error: obj.error || null,
+      apiErrorStatus: obj.apiErrorStatus || null,
+      rateLimitType: quota.rateLimitType || null,
+      // Anthropic reports this in epoch SECONDS (confirmed against a real
+      // capture: 1789665600 lines up with "resets 8:20pm" the same evening,
+      // not some date decades away) - normalize to epoch ms for setTimeout/
+      // Date.now() comparisons everywhere else in this app.
+      resetsAt: typeof quota.resetsAt === "number" ? quota.resetsAt * 1000 : null,
+      text: extractText(obj.message && obj.message.content),
+    };
+  }
+  return null;
+}
+
 // Each assistant JSONL entry already carries structured token usage for
 // that turn - reused here for the live context/token indicator rather than
 // anything the CLI displays on its own (it doesn't, in the terminal UI).
@@ -911,6 +1003,7 @@ module.exports = {
   getLiveTranscriptBlocks,
   getSessionActivity,
   getLatestTranscriptMtimeMs,
+  getHaltInfo,
   listConversations,
   setConversationTitle,
 };

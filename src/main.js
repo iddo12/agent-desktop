@@ -1,4 +1,4 @@
-﻿const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard } = require("electron");
+﻿const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, Notification } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
@@ -16,6 +16,7 @@ const {
   getLiveTranscriptBlocks,
   getSessionActivity,
   getLatestTranscriptMtimeMs,
+  getHaltInfo,
   listConversations,
   setConversationTitle,
 } = require("./archive");
@@ -755,6 +756,9 @@ if (!gotSingleInstanceLock) {
     setInterval(reapOrphanedBackgroundAgentProcesses, REAPER_INTERVAL_MS);
     setInterval(() => {
       checkForStuckTurns().catch((e) => logStuckWatchdog(`checkForStuckTurns error: ${e.message}`));
+    }, STUCK_CHECK_INTERVAL_MS);
+    setInterval(() => {
+      checkForHaltedTurns().catch((e) => logStuckWatchdog(`checkForHaltedTurns error: ${e.message}`));
     }, STUCK_CHECK_INTERVAL_MS);
   });
 }
@@ -1738,6 +1742,154 @@ async function checkForStuckTurns() {
     await recoverStuckSession(agentPath, session, tracking.count);
   }
 }
+
+// --- rate-limit halt watchdog ----------------------------------------------
+// Built 2026-09-17 after the exact gap it fixes: the Trade Show Agent hit the
+// account's shared 5-hour usage window mid-turn (answering a plain "Are you
+// working on it?"), the CLI wrote back a synthetic rate_limit halt, and
+// nothing surfaced it anywhere - no notification, no badge, just a session
+// that looked "idle" (correctly, per getSessionActivity's rules - the turn
+// really did stop) with no way to tell that from ordinary rest. On the
+// desktop Claude.ai app a session limit shows as a visible message; Agent
+// Desktop had no equivalent at all. Iddo's ask was explicit: surface it, and
+// don't require a human to notice and retype something once the window
+// clears - auto-continue on its own.
+//
+// Distinguishes a *halt* from a *stuck* turn (the watchdog above): a stuck
+// turn is a frozen process that never finished; a halt is a turn that
+// finished normally, just with an error as its content. Same 30s cadence,
+// same ptySessions scope, but reads getHaltInfo() instead of transcript
+// mtime, and reacts by notifying + scheduling a resume rather than
+// kill+redispatch (killing here would be pointless - the process isn't
+// frozen, it's correctly idle waiting for the window to clear).
+//
+// Wait past the reported resetsAt rather than dispatching exactly on it -
+// Anthropic's own reset boundary is a rolling window edge, not a hard
+// instant guarantee the very next call succeeds.
+const RATE_LIMIT_AUTO_CONTINUE_BUFFER_MS = 90 * 1000;
+const AUTO_CONTINUE_PROMPT =
+  "The Claude usage limit that stopped this turn has now reset - please continue from exactly where you left off.";
+
+// agentPath -> { timestamp (of the halt entry being tracked), notified, autoContinued }
+// Keyed off the halt entry's own timestamp so a NEW halt (a fresh rate-limit
+// hit after a successful resume) is treated as a fresh event needing its own
+// notification/auto-continue, not swallowed as "already handled."
+const haltTracking = new Map();
+
+function notifyHalt(agentPath, halt) {
+  const agentName = path.basename(agentPath);
+  const resetTime = halt.resetsAt ? new Date(halt.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null;
+  const resetText = resetTime ? `auto-resumes around ${resetTime}` : "no reset time reported - will need a manual message";
+
+  try {
+    if (Notification.isSupported()) {
+      const n = new Notification({
+        title: `${agentName}: usage limit hit`,
+        body: `${halt.rateLimitType || "Usage"} limit reached - ${resetText}.`,
+      });
+      n.on("click", () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+        }
+      });
+      n.show();
+    }
+  } catch (e) {
+    /* a notification failure must never break the watchdog itself */
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("terminal-data", {
+      agentPath,
+      data:
+        `\r\n\x1b[33m[Agent Desktop: this session hit its Claude usage limit (${halt.rateLimitType || "rate_limit"}) and stopped. ` +
+        (resetTime ? `It will auto-continue once the window resets around ${resetTime}.]` : `No reset time was reported - send it a message to continue.]`) +
+        `\x1b[0m\r\n\r\n`,
+    });
+  }
+}
+
+// Mirrors renderer.js's submitToAgent() exactly, including its own hard-won
+// finding (see that function's comment): writing a composed message and its
+// trailing "\r" as one fast synchronous pty write gets misread by Claude
+// Code's CLI as pasted content rather than typed-text-then-Enter and never
+// actually submits. The ~80ms gap before the Enter keystroke is what makes
+// real submission happen.
+function autoContinueSession(agentPath, session, halt) {
+  logStuckWatchdog(
+    `auto-continuing agentPath=${agentPath} after rate-limit reset (resetsAt=${halt.resetsAt ? new Date(halt.resetsAt).toISOString() : "unknown"})`
+  );
+  try {
+    session.proc.write(AUTO_CONTINUE_PROMPT);
+    setTimeout(() => {
+      try {
+        session.proc.write("\r");
+      } catch (e) {
+        logStuckWatchdog(`auto-continue Enter write FAILED for agentPath=${agentPath}: ${e.message}`);
+      }
+    }, 80);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("terminal-data", {
+        agentPath,
+        data: `\r\n\x1b[36m[Agent Desktop: usage window reset - automatically resuming this session.]\x1b[0m\r\n\r\n`,
+      });
+    }
+  } catch (e) {
+    logStuckWatchdog(`auto-continue write FAILED for agentPath=${agentPath}: ${e.message}`);
+  }
+}
+
+async function checkForHaltedTurns() {
+  for (const [agentPath, session] of ptySessions) {
+    if (!session || session.starting || !session.proc) continue;
+
+    let activity;
+    try {
+      activity = getSessionActivity(session.sessionCwd);
+    } catch (e) {
+      continue;
+    }
+    if (activity && activity.working) {
+      // A fresh turn is running - any halt tracked before this is stale.
+      haltTracking.delete(agentPath);
+      continue;
+    }
+
+    let halt;
+    try {
+      halt = getHaltInfo(session.sessionCwd);
+    } catch (e) {
+      continue;
+    }
+    if (!halt) {
+      haltTracking.delete(agentPath);
+      continue;
+    }
+
+    let tracking = haltTracking.get(agentPath);
+    if (!tracking || tracking.timestamp !== halt.timestamp) {
+      tracking = { timestamp: halt.timestamp, notified: false, autoContinued: false };
+      haltTracking.set(agentPath, tracking);
+    }
+
+    if (!tracking.notified) {
+      tracking.notified = true;
+      logStuckWatchdog(
+        `halt detected agentPath=${agentPath} error=${halt.error} rateLimitType=${halt.rateLimitType} ` +
+          `resetsAt=${halt.resetsAt ? new Date(halt.resetsAt).toISOString() : "unknown"}`
+      );
+      notifyHalt(agentPath, halt);
+    }
+
+    if (!tracking.autoContinued && halt.resetsAt && Date.now() >= halt.resetsAt + RATE_LIMIT_AUTO_CONTINUE_BUFFER_MS) {
+      tracking.autoContinued = true;
+      autoContinueSession(agentPath, session, halt);
+    }
+  }
+}
+// --- end rate-limit halt watchdog -------------------------------------------
 // --- end native background-agent backend helpers ---------------------------
 // Shared by proc.onExit() below (the normal path) and the terminal-input/
 // terminal-resize catch blocks further down (the "we only found out the
