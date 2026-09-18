@@ -1227,6 +1227,23 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // whenever they scrolled up. Only stick to the bottom if they were already
   // there, or a caller explicitly asks (agent switch, just sent a message).
   const scrollEl = chatMessagesViewEl;
+
+  // Don't rebuild the DOM when nothing changed, or while the user has text
+  // selected in here. Rebuilding via innerHTML = "" destroys any live text
+  // selection, and this runs on every 4s stale poll and every streaming
+  // burst - so selecting text to copy it silently un-selected itself a few
+  // seconds later (Iddo: "copy paste regressed"). The skipped render is
+  // picked up by the next poll once the selection is gone.
+  const sig = activeAgentPath + "" + JSON.stringify(blocks) + "" + JSON.stringify((pendingSent || []).map((p) => p.text));
+  const sel = window.getSelection();
+  const selectionInChat =
+    sel && !sel.isCollapsed && scrollEl.contains(sel.anchorNode) && scrollEl.contains(sel.focusNode);
+  if (scrollEl.childElementCount > 0 && (sig === renderChatBlocks.lastSig || selectionInChat)) {
+    if (opts.forceBottom) scrollEl.scrollTop = scrollEl.scrollHeight;
+    return;
+  }
+  renderChatBlocks.lastSig = sig;
+
   const NEAR_BOTTOM_PX = 60;
   const wasNearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <= NEAR_BOTTOM_PX;
   const prevScrollTop = scrollEl.scrollTop;

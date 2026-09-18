@@ -212,6 +212,21 @@ function getLiveTranscriptBlocks(sessionCwd) {
           for (const q of questions) {
             if (q && q.question) blocks.push({ role: "status", lines: [`[asked: "${q.question}"]`], timestamp: obj.timestamp });
           }
+        } else if (block.type === "tool_use" && block.name === "SendUserFile") {
+          // Files an agent "sends" were invisible here (just "ran
+          // SendUserFile"). Surface them as an agent message: images render
+          // inline (quoted absolute path = IMAGE_PATH_RE in renderer.js),
+          // other files are listed by path.
+          const input = block.input || {};
+          const files = Array.isArray(input.files) ? input.files : [];
+          const lines = [];
+          if (input.caption) lines.push(String(input.caption), "");
+          for (const f of files) {
+            const p = String(f);
+            if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(p) && /^[A-Za-z]:\\/.test(p)) lines.push(`"${p}"`);
+            else lines.push(`File: \`${p}\``);
+          }
+          if (lines.length) blocks.push({ role: "agent", lines: [lines.join("\n")], timestamp: obj.timestamp });
         } else if (block.type === "tool_use" && block.name) {
           blocks.push({ role: "status", lines: [`[used tool: ${block.name}]`], timestamp: obj.timestamp });
         }
