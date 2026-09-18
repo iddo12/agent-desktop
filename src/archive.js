@@ -51,6 +51,32 @@ function findJsonlFiles(sessionCwd) {
   }
 }
 
+// Memoize a pure function of a set of transcript files: recompute only when
+// a file's size/mtime changed. The chat view polls every 4s, the stuck-turn
+// watchdog every 30s per agent and the usage badge account-wide - each used
+// to re-read and re-JSON.parse every transcript in full each time (hundreds
+// of MB across all projects), pinning the Electron MAIN thread at ~100% CPU
+// and making the whole UI sluggish (found 2026-09-19 by CPU-profiling it).
+const fileMemo = new Map();
+function memoByFiles(tag, files, compute) {
+  let sig;
+  try {
+    sig = files
+      .map((f) => {
+        const st = fs.statSync(f);
+        return `${f}:${st.size}:${st.mtimeMs}`;
+      })
+      .join("|");
+  } catch (e) {
+    return compute();
+  }
+  const hit = fileMemo.get(tag);
+  if (hit && hit.sig === sig) return hit.value;
+  const value = compute();
+  fileMemo.set(tag, { sig, value });
+  return value;
+}
+
 // Assistant message content can be a plain string or an array of content
 // blocks (text / tool_use / tool_result / etc.) - only text is kept for a
 // readable transcript; tool calls are noted briefly rather than dumped raw.
@@ -149,6 +175,9 @@ function parseTranscriptEntries(jsonlPath) {
 // entry timestamp (not filesystem mtime, which can be touched by things
 // unrelated to real writes) and keeping only that one file's entries.
 function getLiveTranscriptBlocks(sessionCwd) {
+  return memoByFiles("blocks:" + sessionCwd, findJsonlFiles(sessionCwd), () => computeLiveTranscriptBlocks(sessionCwd));
+}
+function computeLiveTranscriptBlocks(sessionCwd) {
   let currentFileEntries = [];
   let currentFileLatestTs = -Infinity;
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
@@ -259,6 +288,15 @@ function getLiveTranscriptBlocks(sessionCwd) {
 // kept going on its own after a prior end_turn (autonomous multi-step work).
 // Non-message entry types (attachment, metadata) are ignored.
 function getSessionActivity(sessionCwd) {
+  const { lastHumanTs, lastEndTurnTs, last, lastSessionId } = memoByFiles(
+    "activity:" + sessionCwd,
+    findJsonlFiles(sessionCwd),
+    () => readActivitySummary(sessionCwd)
+  );
+  return finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId);
+}
+
+function readActivitySummary(sessionCwd) {
   let entries = [];
   let latestFileTs = -Infinity;
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
@@ -307,7 +345,10 @@ function getSessionActivity(sessionCwd) {
       if (last == null || ts >= last.ts) last = { ts, done: false };
     }
   }
+  return { lastHumanTs, lastEndTurnTs, last, lastSessionId };
+}
 
+function finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId) {
   let working = !!last && !last.done;
 
   // The rule above is a pure transcript heuristic: an assistant tool_use
@@ -487,6 +528,9 @@ function getHaltInfo(sessionCwd) {
 // throttle, not something a single conversation's own files can fully see -
 // see the comment there for the full story of that correction).
 function getLatestUsage(sessionCwd) {
+  return memoByFiles("usage:" + sessionCwd, findJsonlFiles(sessionCwd), () => computeLatestUsage(sessionCwd));
+}
+function computeLatestUsage(sessionCwd) {
   let latestUsage = null;
 
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
@@ -677,6 +721,79 @@ function getConfirmedRateLimits() {
   return { fiveHour, sevenDay };
 }
 
+// Incremental per-file scan for getUsageWindows(). That function runs
+// account-wide (every project's transcripts, hundreds of MB) on every usage
+// refresh; re-reading and JSON.parsing all of it each time pinned the main
+// process at ~100% CPU. Now each file is remembered as a small record
+// (human-message timestamps + token-reminder maxima) and only bytes appended
+// since the last call are read. A shrunk file (rewritten/rotated) is rescanned
+// from scratch. Only complete lines are consumed, so a half-written last
+// line is picked up on the next call.
+const usageFileCache = new Map();
+function updateUsageFileRecord(filePath) {
+  let st;
+  try {
+    st = fs.statSync(filePath);
+  } catch (e) {
+    return null;
+  }
+  let rec = usageFileCache.get(filePath);
+  if (!rec || st.size < rec.offset) {
+    rec = { offset: 0, humanTs: [], dayCounts: new Map(), earliestMs: null, maxTokens: 0, latestTokens: null };
+    usageFileCache.set(filePath, rec);
+  }
+  if (st.size === rec.offset) return rec;
+  let text;
+  try {
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const len = st.size - rec.offset;
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, rec.offset);
+      const lastNl = buf.lastIndexOf(10);
+      if (lastNl < 0) return rec; // no complete line yet
+      text = buf.toString("utf-8", 0, lastNl + 1);
+      rec.offset += lastNl + 1;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    return rec;
+  }
+  for (const line of text.split("\n")) {
+    // Cheap pre-filter: skip the JSON.parse for the vast majority of lines.
+    if (!line || !(/"kind"\s*:\s*"human"/.test(line) || line.includes("total_tokens_reminder"))) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch (e) {
+      continue;
+    }
+    if (!obj.timestamp) continue;
+    if (obj.type === "user" && obj.origin && obj.origin.kind === "human") {
+      const t = new Date(obj.timestamp).getTime();
+      if (!Number.isNaN(t)) {
+        rec.humanTs.push(t);
+        if (rec.earliestMs === null || t < rec.earliestMs) rec.earliestMs = t;
+        const d = new Date(t);
+        const dayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        rec.dayCounts.set(dayKey, (rec.dayCounts.get(dayKey) || 0) + 1);
+      }
+    }
+    if (obj.type === "attachment" && obj.attachment && obj.attachment.type === "total_tokens_reminder") {
+      const match = /total_tokens>\s*([\d,]+)/.exec(obj.attachment.text || "");
+      if (match) {
+        const value = parseInt(match[1].replace(/,/g, ""), 10);
+        if (value > rec.maxTokens) rec.maxTokens = value;
+        if (!rec.latestTokens || new Date(obj.timestamp) > new Date(rec.latestTokens.timestamp)) {
+          rec.latestTokens = { timestamp: obj.timestamp, remaining: value };
+        }
+      }
+    }
+  }
+  return rec;
+}
+
 function getUsageWindows() {
   const now = Date.now();
   const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
@@ -717,46 +834,19 @@ function getUsageWindows() {
       continue;
     }
     for (const file of files) {
-      let raw;
-      try {
-        raw = fs.readFileSync(path.join(dirPath, file), "utf-8");
-      } catch (e) {
-        continue;
+      const rec = updateUsageFileRecord(path.join(dirPath, file));
+      if (!rec) continue;
+      for (const t of rec.humanTs) {
+        if (now - t <= SEVEN_DAYS_MS) {
+          messagesInLast7d++;
+          if (now - t <= FIVE_HOURS_MS) messagesInLast5h++;
+        }
       }
-      for (const line of raw.split("\n")) {
-        if (!line.trim()) continue;
-        let obj;
-        try {
-          obj = JSON.parse(line);
-        } catch (e) {
-          continue;
-        }
-        if (!obj.timestamp) continue;
-
-        if (obj.type === "user" && obj.origin && obj.origin.kind === "human") {
-          const t = new Date(obj.timestamp).getTime();
-          if (!Number.isNaN(t)) {
-            if (now - t <= SEVEN_DAYS_MS) {
-              messagesInLast7d++;
-              if (now - t <= FIVE_HOURS_MS) messagesInLast5h++;
-            }
-            if (earliestTimestampMs === null || t < earliestTimestampMs) earliestTimestampMs = t;
-            const d = new Date(t);
-            const dayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-            dailyMessageCounts.set(dayKey, (dailyMessageCounts.get(dayKey) || 0) + 1);
-          }
-        }
-
-        if (obj.type === "attachment" && obj.attachment && obj.attachment.type === "total_tokens_reminder") {
-          const match = /total_tokens>\s*([\d,]+)/.exec(obj.attachment.text || "");
-          if (match) {
-            const value = parseInt(match[1].replace(/,/g, ""), 10);
-            if (value > maxPlanTokensSeen) maxPlanTokensSeen = value;
-            if (!latestPlanTokens || new Date(obj.timestamp) > new Date(latestPlanTokens.timestamp)) {
-              latestPlanTokens = { timestamp: obj.timestamp, remaining: value };
-            }
-          }
-        }
+      for (const [dayKey, n] of rec.dayCounts) dailyMessageCounts.set(dayKey, (dailyMessageCounts.get(dayKey) || 0) + n);
+      if (rec.earliestMs !== null && (earliestTimestampMs === null || rec.earliestMs < earliestTimestampMs)) earliestTimestampMs = rec.earliestMs;
+      if (rec.maxTokens > maxPlanTokensSeen) maxPlanTokensSeen = rec.maxTokens;
+      if (rec.latestTokens && (!latestPlanTokens || new Date(rec.latestTokens.timestamp) > new Date(latestPlanTokens.timestamp))) {
+        latestPlanTokens = rec.latestTokens;
       }
     }
   }
