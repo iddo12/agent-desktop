@@ -2257,6 +2257,27 @@ ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActiv
 
 ipcMain.handle("get-usage-windows", () => getUsageWindows());
 
+// v1.23.0 guards (handoff-reset + usage-limit warnings) - isolated module, loaded
+// defensively so a bug there can only disable the guards, never the app.
+try {
+  require("./guards-main").init({
+    ipcMain,
+    Notification,
+    getMainWindow: () => mainWindow,
+    sessionCwdFor,
+    archive: require("./archive"),
+    log: (line) => logStuckWatchdog(line),
+  });
+} catch (e) {
+  console.error("guards-main failed to load:", e);
+}
+
+try {
+  require("./voice-main").init({ ipcMain, log: (line) => logStuckWatchdog(line) });
+} catch (e) {
+  console.error("voice-main failed to load:", e);
+}
+
 // --- Chats panel (per-agent conversation list / switch / rename) -----------
 //
 // Each agent's `.claude-session` cwd accumulates one <sessionId>.jsonl per
@@ -2340,7 +2361,27 @@ ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId
 // handlePtyExit() proactively the moment a write/resize proves the process
 // is dead, instead of passively waiting on onExit alone - whichever signal
 // arrives first wins, and calling it twice is safe (see its own comment).
+// Sent-message log (v1.23.2): a long message once reached the CLI with its head missing and no
+// copy existed anywhere to recover it. Every multi-character write to a session is appended here
+// BEFORE it goes to the pty, so a cut message can always be recovered/compared. JSONL, rotated at 5 MB.
+const SENT_LOG_PATH = path.join(app.getPath("userData"), "sent-messages.jsonl");
+function logSentInput(agentPath, data) {
+  try {
+    if (typeof data !== "string" || data.length < 2) return; // skip lone "\r" / keystrokes
+    try {
+      if (fs.statSync(SENT_LOG_PATH).size > 5 * 1024 * 1024) fs.renameSync(SENT_LOG_PATH, SENT_LOG_PATH + ".old");
+    } catch (e) {}
+    // Redact obvious secret shapes (API keys / bearer tokens / key=value secrets); the rest is kept verbatim on purpose.
+    const text = data
+      .replace(/\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})/g, "[REDACTED]")
+      .replace(/(bearer\s+)[A-Za-z0-9._~+\/=-]{16,}/gi, "$1[REDACTED]")
+      .replace(/((?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*)\S+/gi, "$1[REDACTED]");
+    fs.appendFileSync(SENT_LOG_PATH, JSON.stringify({ t: new Date().toISOString(), agent: path.basename(agentPath || ""), len: data.length, text }) + "\n", { mode: 0o600 });
+  } catch (e) {}
+}
+
 ipcMain.on("terminal-input", (event, { agentPath, data }) => {
+  logSentInput(agentPath, data);
   const session = ptySessions.get(agentPath);
   if (!session) {
     // No tracked session at all for this agent (as opposed to the "starting"

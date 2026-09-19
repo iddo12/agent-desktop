@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("api", {
   pickAvatar: () => ipcRenderer.invoke("pick-avatar"),
 
   startTerminal: (agentPath, cols, rows, knownAgentId) => ipcRenderer.invoke("start-terminal", { agentPath, cols, rows, knownAgentId }),
+  transcribeAudio: (wavBase64) => ipcRenderer.invoke("voice-transcribe", { wavBase64 }),
   sendInput: (agentPath, data) => ipcRenderer.send("terminal-input", { agentPath, data }),
   resizeTerminal: (agentPath, cols, rows) => ipcRenderer.send("terminal-resize", { agentPath, cols, rows }),
 
@@ -31,6 +32,10 @@ contextBridge.exposeInMainWorld("api", {
   getUsageWindows: () => ipcRenderer.invoke("get-usage-windows"),
   getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),
   getSessionActivity: (agentPath) => ipcRenderer.invoke("get-session-activity", { agentPath }),
+  getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),
+  archiveHandoff: (agentPath) => ipcRenderer.invoke("guard-archive-handoff", { agentPath }),
+  transcriptHas: (agentPath, needle) => ipcRenderer.invoke("guard-transcript-has", { agentPath, needle }),
+  getLimitStatus: (agentPath) => ipcRenderer.invoke("guard-limit-status", { agentPath }),
 
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
   checkClaudeCodeUpdate: () => ipcRenderer.invoke("check-claude-code-update"),

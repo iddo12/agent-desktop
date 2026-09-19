@@ -174,6 +174,32 @@ function parseTranscriptEntries(jsonlPath) {
 // being written to right now - found by comparing each file's own latest
 // entry timestamp (not filesystem mtime, which can be touched by things
 // unrelated to real writes) and keeping only that one file's entries.
+// 1.23.0 handoff-reset support (see guards.js). The first message of a fresh
+// session after "Save handoff & reset" starts with this tag followed by the
+// absolute path of the archived handoff file; the Chat View turns it into a
+// red reset marker that lists that handoff's LESSONS section.
+const HANDOFF_RESUME_TAG = "[[HANDOFF-RESUME]]";
+function lessonsForResume(text) {
+  try {
+    const m = /^\[\[HANDOFF-RESUME\]\]\s*(.+?\.md)/m.exec(text);
+    if (m) return extractLessons(fs.readFileSync(m[1].trim(), "utf-8"));
+  } catch (e) {
+    /* fall through */
+  }
+  return "(lessons for this reset could not be read from the handoff file)";
+}
+function extractLessons(md) {
+  const out = [];
+  let inSec = false;
+  for (const line of String(md).split(/\r?\n/)) {
+    if (/^##\s*LESSONS/i.test(line)) { inSec = true; continue; }
+    if (inSec && /^##\s/.test(line)) break;
+    if (inSec) out.push(line);
+  }
+  const t = out.join("\n").trim();
+  return t || "(the handoff file has no LESSONS section)";
+}
+
 function getLiveTranscriptBlocks(sessionCwd) {
   return memoByFiles("blocks:" + sessionCwd, findJsonlFiles(sessionCwd), () => computeLiveTranscriptBlocks(sessionCwd));
 }
@@ -216,8 +242,12 @@ function computeLiveTranscriptBlocks(sessionCwd) {
       // Mirrors the same human-vs-tool-result "user" entry filter already
       // proven correct in getUsageWindows() below - a tool_result is also
       // type:"user" in this format but isn't a real message from the user.
-      const text = extractText(obj.message && obj.message.content);
-      if (text) blocks.push({ role: "user", lines: [text], timestamp: obj.timestamp });
+      // The CLI wraps a long typed message in <pasted_content id="N">...</pasted_content id="N">;
+      // strip the wrapper so the bubble matches the optimistic one (no "shown twice") and reads clean.
+      const text = (extractText(obj.message && obj.message.content) || "").replace(/<\/?pasted_content[^>]*>/g, "").trim();
+      if (text && text.startsWith(HANDOFF_RESUME_TAG)) {
+        blocks.push({ role: "reset", lines: [lessonsForResume(text)], timestamp: obj.timestamp });
+      } else if (text) blocks.push({ role: "user", lines: [text], timestamp: obj.timestamp });
     } else if (obj.type === "assistant" && obj.message && Array.isArray(obj.message.content)) {
       // Caught live (2026-08-19): a `model:"<synthetic>"` entry is Claude
       // Code's own internal harness bookkeeping (seen once with the literal
@@ -1109,6 +1139,9 @@ module.exports = {
   getSessionActivity,
   getLatestTranscriptMtimeMs,
   getHaltInfo,
+  getConfirmedRateLimits,
+  extractLessons,
+  lessonsForResume,
   listConversations,
   setConversationTitle,
 };

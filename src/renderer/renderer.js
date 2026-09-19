@@ -1286,6 +1286,38 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       continue;
     }
 
+    // 1.23.0: red "session reset" marker (built in archive.js from the
+    // handoff-resume message) - shows the lessons carried over.
+    if (block.role === "reset") {
+      const wrap = document.createElement("div");
+      wrap.className = "chat-reset-marker";
+      const head = document.createElement("div");
+      head.className = "chat-reset-head";
+      // v1.24.2: collapsed by default (a long lessons list filled the whole chat after a reset and
+      // looked like nothing had been cleared). Click the header to expand; the choice survives the
+      // 4 s chat re-render because it is kept by timestamp.
+      const key = block.timestamp || "reset";
+      const expanded = resetMarkersExpanded.has(key);
+      head.textContent =
+        "SESSION RESET" + (block.timestamp ? " - " + formatBlockTime(block.timestamp) : "") + " - earlier conversation is in History - " + (expanded ? "hide" : "show") + " lessons carried over";
+      head.style.cursor = "pointer";
+      head.title = "Click to show or hide the lessons carried over from the previous session";
+      wrap.appendChild(head);
+      const body = document.createElement("div");
+      body.className = "chat-reset-body";
+      body.hidden = !expanded;
+      renderRichText(body, text, { markdown: true });
+      wrap.appendChild(body);
+      head.addEventListener("click", () => {
+        if (resetMarkersExpanded.has(key)) resetMarkersExpanded.delete(key);
+        else resetMarkersExpanded.add(key);
+        body.hidden = !resetMarkersExpanded.has(key);
+        head.textContent = head.textContent.replace(/(hide|show) lessons carried over$/, (resetMarkersExpanded.has(key) ? "hide" : "show") + " lessons carried over");
+      });
+      chatMessagesViewEl.appendChild(wrap);
+      continue;
+    }
+
     if (block.role === "agent" && HAS_ANSWER_SECTION_MARKER_RE.test(text)) {
       const wrapper = document.createElement("div");
       wrapper.className = "chat-bubble chat-bubble-agent chat-bubble-annotated";
@@ -1343,8 +1375,11 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
 // against a pending optimistic bubble (see submitToAgent) somehow not
 // exactly string-matching its own confirmed transcript entry (incidental
 // whitespace differences) and getting stuck showing twice.
+const resetMarkersExpanded = new Set(); // timestamps of SESSION RESET markers the user expanded (v1.24.2)
 function normalizeForMatch(s) {
-  return s.replace(/\s+/g, " ").trim();
+  // Also drops the CLI's <pasted_content id="N"> wrapper around long messages (2026-09-19: the
+  // handoff request showed twice - optimistic bubble + transcript copy - until the 45 s timeout).
+  return s.replace(/<\/?pasted_content[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 // See rebuildChatView()'s pendingSent-filtering comment for why this
@@ -1421,9 +1456,14 @@ async function rebuildChatView(agentPath, opts = {}) {
   // just quietly disappearing.
   const now = Date.now();
   session.pendingSent = session.pendingSent.filter((pending) => {
-    const stillUnmatched = !blocks.some(
+    let stillUnmatched = !blocks.some(
       (b) => b.role === "user" && normalizeForMatch(b.lines.join(" ")) === normalizeForMatch(pending.text)
     );
+    // v1.23.0: the handoff-resume message is shown as a red "reset" block (archive.js), and
+    // "/clear" never appears as a user block at all - neither would ever match above, so they
+    // pulsed as "sending" until the 45s timeout. Settle them explicitly.
+    if (stillUnmatched && pending.text.startsWith("[[HANDOFF-RESUME]]") && blocks.some((b) => b.role === "reset")) stillUnmatched = false;
+    if (stillUnmatched && pending.text.trim() === "/clear" && now - pending.addedAt > 3000) stillUnmatched = false;
     const notExpired = now - pending.addedAt < PENDING_SENT_TIMEOUT_MS;
     return stillUnmatched && notExpired;
   });
@@ -1537,9 +1577,10 @@ const IDLE_TIMEOUT_MS = 900;
 const ASSUMED_CONTEXT_WINDOW = 200000;
 
 async function refreshContextUsage(agentPath) {
-  const usage = await window.api.getContextUsage(agentPath);
+  let usage = await window.api.getContextUsage(agentPath);
   if (agentPath !== activeAgentPath) return; // user may have switched agents while this was in flight
 
+  if (usage && typeof window.guardUsageIsStale === "function" && window.guardUsageIsStale(agentPath, usage)) usage = null; // pre-reset leftovers
   if (usage && typeof usage.contextTokens === "number") {
     const pct = Math.min(100, Math.round((usage.contextTokens / ASSUMED_CONTEXT_WINDOW) * 100));
     contextUsageEl.textContent = `${pct}% context`;
@@ -2868,9 +2909,138 @@ function stopVoiceHold() {
   }
 }
 
+// v1.23.3: the mic button now records in the app itself and transcribes with Whisper (Cloudflare
+// Workers AI, see voice-main.js) instead of driving the CLI's /voice mode through the pty (which
+// posted the transcript immediately, mixed it into the hidden CLI input line, and could garble or
+// cut messages). Click = start, click again = stop -> the transcript lands in the compose box for
+// review/editing; nothing is sent until Enter/Send. The legacy pty-based path above is kept and
+// can be re-enabled with localStorage.setItem("voiceLegacy","1") (DevTools console) if needed.
+const VOICE_REC_MAX_MS = 120000;
+let voiceRec = null; // { stream, recorder, chunks, timer }
+
+// Visible toast above the compose box (the placeholder alone was too easy to miss - a failed
+// transcription looked like "nothing happened").
+function voiceToast(msg, ms, isError) {
+  let t = document.getElementById("voice-toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "voice-toast";
+    t.style.cssText = "position:fixed;left:50%;bottom:110px;transform:translateX(-50%);max-width:70%;padding:10px 16px;border-radius:8px;font-size:14px;z-index:9999;box-shadow:0 2px 10px rgba(0,0,0,.25);color:#fff;";
+    document.body.appendChild(t);
+  }
+  t.style.background = isError ? "#b3261e" : "#2e6b3a";
+  t.textContent = msg;
+  t.style.display = "block";
+  clearTimeout(voiceToast._t);
+  if (ms) voiceToast._t = setTimeout(() => { t.style.display = "none"; }, ms);
+}
+
+function voiceNote(msg, ms) {
+  voiceToast(msg, ms, /error|could not|failed|used up|not found|nothing/i.test(msg));
+  const old = chatInputEl.dataset.voiceOldPlaceholder !== undefined ? chatInputEl.dataset.voiceOldPlaceholder : chatInputEl.placeholder;
+  chatInputEl.dataset.voiceOldPlaceholder = old;
+  chatInputEl.placeholder = msg;
+  clearTimeout(voiceNote._t);
+  voiceNote._t = setTimeout(() => {
+    chatInputEl.placeholder = chatInputEl.dataset.voiceOldPlaceholder;
+    delete chatInputEl.dataset.voiceOldPlaceholder;
+  }, ms || 6000);
+}
+
+async function blobToWav16k(blob) {
+  const buf = await blob.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  let decoded;
+  try {
+    decoded = await ctx.decodeAudioData(buf);
+  } finally {
+    ctx.close();
+  }
+  const rate = 16000;
+  const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(decoded.duration * rate)), rate);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  const pcm = (await off.startRendering()).getChannelData(0);
+  const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); out.setUint32(4, 36 + pcm.length * 2, true); w(8, "WAVEfmt "); out.setUint32(16, 16, true);
+  out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, rate, true); out.setUint32(28, rate * 2, true);
+  out.setUint16(32, 2, true); out.setUint16(34, 16, true); w(36, "data"); out.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) out.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 0x7fff, true);
+  const bytes = new Uint8Array(out.buffer);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+async function startVoiceRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const recorder = new MediaRecorder(stream);
+    const rec = { stream, recorder, chunks: [], timer: null };
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) rec.chunks.push(e.data); };
+    recorder.onstop = () => finishVoiceRecording(rec);
+    recorder.start();
+    rec.timer = setTimeout(stopVoiceRecording, VOICE_REC_MAX_MS);
+    voiceRec = rec;
+    voiceInputBtn.classList.add("recording");
+    voiceNote("Recording... click the mic again to stop and transcribe", VOICE_REC_MAX_MS);
+  } catch (e) {
+    voiceRec = null;
+    voiceInputBtn.classList.remove("recording");
+    voiceNote("Could not use the microphone: " + e.message + " (check Windows Settings > Privacy > Microphone allows desktop apps)", 10000);
+  }
+}
+
+function stopVoiceRecording() {
+  if (!voiceRec) return;
+  clearTimeout(voiceRec.timer);
+  voiceInputBtn.classList.remove("recording");
+  try { voiceRec.recorder.stop(); } catch (e) {}
+  voiceRec.stream.getTracks().forEach((t) => t.stop());
+}
+
+async function finishVoiceRecording(rec) {
+  voiceRec = null;
+  try {
+    voiceNote("Transcribing...", 60000);
+    voiceInputBtn.disabled = true;
+    const blob = new Blob(rec.chunks, { type: rec.recorder.mimeType || "audio/webm" });
+    const wav = await blobToWav16k(blob);
+    const res = await window.api.transcribeAudio(wav);
+    if (!res || !res.ok) {
+      voiceNote((res && res.error) || "Transcription failed.", 12000);
+      return;
+    }
+    if (!res.text) {
+      voiceNote("Nothing was heard - try again a bit closer to the mic.", 6000);
+      return;
+    }
+    const cur = chatInputEl.value;
+    chatInputEl.value = cur && !/\s$/.test(cur) ? cur + " " + res.text : cur + res.text;
+    autoGrowChatInput();
+    chatInputEl.focus();
+    chatInputEl.setSelectionRange(chatInputEl.value.length, chatInputEl.value.length);
+    voiceNote("Transcribed - review it, then press Enter to send", 5000);
+  } catch (e) {
+    voiceNote("Voice input error: " + e.message, 10000);
+  } finally {
+    voiceInputBtn.disabled = false;
+  }
+}
+
 voiceInputBtn.addEventListener("click", () => {
-  if (voiceHeld) stopVoiceHold();
-  else startVoiceHold();
+  let legacy = false;
+  try { legacy = localStorage.getItem("voiceLegacy") === "1"; } catch (e) {}
+  if (legacy || !window.api.transcribeAudio) {
+    if (voiceHeld) stopVoiceHold();
+    else startVoiceHold();
+    return;
+  }
+  if (voiceRec) stopVoiceRecording();
+  else startVoiceRecording();
 });
 
 // Pure visual reminder/shortcut - just prefills the compose box, doesn't
@@ -3489,50 +3659,62 @@ resetSessionBtn.addEventListener("click", async () => {
     "Reset this session? This clears the agent's current conversation context and starts fresh. The full conversation stays available in History either way."
   );
   if (!confirmed) return;
-  const agentPath = activeAgentPath;
-  if (!historyViewEl.classList.contains("hidden")) {
-    setHistoryMode(false);
+  try {
+    await performSessionReset(activeAgentPath);
+  } catch (e) {
+    alert("Reset failed: " + (e.message || String(e)));
   }
-  if (!conversationsViewEl.classList.contains("hidden")) {
-    setConversationsMode(false);
-  }
-  setRawTerminalMode(true);
-  submitToAgent(agentPath, "/clear");
-  const session = terminals.get(agentPath);
-  if (session) {
-    session.term.scrollToBottom();
-    // A deliberate /clear is the one case where the Chat View SHOULD go
-    // blank - without this, rebuildChatView()'s guard against accidental
-    // blanking (see its own comment) would fight this intentional reset and
-    // keep showing the pre-clear conversation.
-    session.hasShownRealContent = false;
-  }
+});
 
-  // Live progress on the button itself (visible even while Raw Terminal
-  // mode hides the Chat View) instead of a blind fixed-length wait that
-  // used to hand focus back at 600ms - genuinely shorter than /clear's own
-  // measured 1149-1796ms, meaning the old code returned control before
-  // /clear had actually finished, every single time.
-  resetSessionBtn.disabled = true;
+// Split out of the click handler (1.23.0) so guards.js's "Save handoff & reset"
+// flow can reuse the exact same, live-tested reset sequence without the confirm().
+//
+// v1.24.0: NO LONGER TYPES /clear. Reproduced/observed 2026-09-19 on two agents' handoffs
+// (Optimization 15:18, IBC 19:41): after /clear on a large `--bg`+`attach` session the CLI
+// process stayed alive and reported itself idle but silently ignored everything typed into the
+// pty afterwards - the resume message AND the user's own next message were logged as sent by
+// this app (sent-messages.jsonl) yet never reached the transcript. Same signature as the
+// long-standing "/clear hang" occurrences documented in CLAUDE.md. A small session's /clear
+// works fine (tested), so it bites exactly the big sessions a handoff exists to reset.
+// Instead: stop the bg process and dispatch a fresh one (the same switch-conversation path as
+// the Chats panel's "+ New chat"): a new conversation with a clean process, old one stays in
+// History/Chats. The caller (guards.js) then delivers its first message and VERIFIES it landed.
+async function performSessionReset(agentPath) {
+  if (switchingConversation) throw new Error("another conversation switch is already in progress");
+  switchingConversation = true;
+  const isActive = activeAgentPath === agentPath;
+  if (isActive) {
+    if (!historyViewEl.classList.contains("hidden")) setHistoryMode(false);
+    if (!conversationsViewEl.classList.contains("hidden")) setConversationsMode(false);
+    resetSessionBtn.disabled = true;
+  }
   const tickStartedAt = Date.now();
   const tick = setInterval(() => {
+    if (!isActive) return;
     const elapsedSec = ((Date.now() - tickStartedAt) / 1000).toFixed(1);
     resetSessionBtn.textContent =
       Date.now() - tickStartedAt > RESET_SESSION_SLOW_HINT_MS ? `Resetting… ${elapsedSec}s (longer than usual)` : `Resetting… ${elapsedSec}s`;
   }, 100);
-
-  const { timedOut } = await waitForPtyQuiet(agentPath, { minMs: RESET_SESSION_MIN_MS, quietMs: RESET_SESSION_QUIET_MS });
-  clearInterval(tick);
-  resetSessionBtn.textContent = timedOut ? "Reset (slow)" : "✓ Reset";
-  setTimeout(() => {
-    resetSessionBtn.textContent = "Reset Session";
-    resetSessionBtn.disabled = false;
-  }, 1200);
-
-  if (activeAgentPath !== agentPath) return; // switched agents in the meantime - leave it alone
-  setRawTerminalMode(false);
-  chatInputEl.focus();
-});
+  try {
+    const result = await window.api.switchConversation(agentPath, { newConversation: true });
+    if (result && result.agentId) pendingKnownAgentIdByPath.set(agentPath, result.agentId);
+    // Same teardown the Chats panel uses: drop the cached terminal so the next
+    // showTerminalFor() builds a fresh one and attaches to the new bg process.
+    reloadAgentSessionView(agentPath);
+    const agent = agents.find((a) => a.path === agentPath);
+    if (agent && activeAgentPath === agentPath) selectAgent(agent);
+    // Not the active agent: it re-attaches to the new process the next time it is opened.
+    if (isActive) resetSessionBtn.textContent = "✓ Reset";
+  } finally {
+    clearInterval(tick);
+    switchingConversation = false;
+    setTimeout(() => {
+      resetSessionBtn.textContent = "Reset Session";
+      resetSessionBtn.disabled = false;
+    }, 1200);
+  }
+  if (activeAgentPath === agentPath) chatInputEl.focus();
+}
 
 // Restart Session: kill and re-dispatch this agent's `claude --bg` process,
 // resuming the SAME conversation (`--bg --resume <id>`), so scrollback and
