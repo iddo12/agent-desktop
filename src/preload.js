@@ -37,6 +37,8 @@ contextBridge.exposeInMainWorld("api", {
   transcriptHas: (agentPath, needle) => ipcRenderer.invoke("guard-transcript-has", { agentPath, needle }),
   getLimitStatus: (agentPath) => ipcRenderer.invoke("guard-limit-status", { agentPath }),
 
+  getUiFlags: () => ipcRenderer.invoke("ui-flags-get"),
+  setUiFlag: (key, value) => ipcRenderer.invoke("ui-flag-set", { key, value }),
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
   checkClaudeCodeUpdate: () => ipcRenderer.invoke("check-claude-code-update"),
   updateClaudeCode: () => ipcRenderer.invoke("update-claude-code"),

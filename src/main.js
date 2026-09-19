@@ -346,6 +346,31 @@ function isVersionNewer(latest, current) {
 // that could drift from the real version.
 ipcMain.handle("get-app-version", () => app.getVersion());
 
+// Small persistent "already shown / dismissed" flags for one-time UI notes. Kept in a plain JSON file
+// in userData (survives app updates, and unlike the renderer's localStorage it cannot be silently
+// lost - the groups note kept coming back after being dismissed, 2026-09-19/20).
+const UI_FLAGS_PATH = path.join(app.getPath("userData"), "ui-flags.json");
+function readUiFlags() {
+  try {
+    const v = JSON.parse(fs.readFileSync(UI_FLAGS_PATH, "utf-8"));
+    return v && typeof v === "object" ? v : {};
+  } catch (e) {
+    return {};
+  }
+}
+ipcMain.handle("ui-flags-get", () => readUiFlags());
+ipcMain.handle("ui-flag-set", (event, { key, value }) => {
+  try {
+    if (typeof key !== "string" || !key) return false;
+    const flags = readUiFlags();
+    flags[key] = value;
+    fs.writeFileSync(UI_FLAGS_PATH, JSON.stringify(flags, null, 2));
+    return true;
+  } catch (e) {
+    return false;
+  }
+});
+
 ipcMain.handle("check-claude-code-update", async () => {
   const current = getInstalledClaudeCodeVersion();
   const latest = await getLatestClaudeCodeVersion();

@@ -91,8 +91,11 @@ function renderAvatarEl(agent) {
   return div;
 }
 
+let uiFlags = null; // persistent one-time-note flags from main (ui-flags.json); null until loaded
+
 async function loadAgents() {
-  const [agentList, gDoc] = await Promise.all([window.api.listAgents(), window.api.listGroups()]);
+  const [agentList, gDoc, flags] = await Promise.all([window.api.listAgents(), window.api.listGroups(), window.api.getUiFlags().catch(() => ({}))]);
+  uiFlags = flags || {};
   agents = agentList;
   groupsDoc = gDoc && Array.isArray(gDoc.groups) ? gDoc : { version: 1, groups: [] };
   renderAgentList();
@@ -2196,12 +2199,18 @@ const GROUPS_NOTE_KEY = "agentGroupsNoteDismissed";
 const agentGroupsNoteEl = document.getElementById("agent-groups-note");
 
 function updateAgentGroupsNote() {
-  const show = groupsDoc.groups.length > 0 && !localStorage.getItem(GROUPS_NOTE_KEY);
+  // Never show until the persistent flags are loaded (avoids a flash), and treat either store as "dismissed".
+  const dismissed = !uiFlags || uiFlags[GROUPS_NOTE_KEY] || localStorage.getItem(GROUPS_NOTE_KEY);
+  const show = groupsDoc.groups.length > 0 && !dismissed;
   agentGroupsNoteEl.classList.toggle("hidden", !show);
 }
 
 document.getElementById("agent-groups-note-dismiss").addEventListener("click", () => {
-  localStorage.setItem(GROUPS_NOTE_KEY, "1");
+  try {
+    localStorage.setItem(GROUPS_NOTE_KEY, "1");
+  } catch (e) {}
+  if (uiFlags) uiFlags[GROUPS_NOTE_KEY] = true;
+  window.api.setUiFlag(GROUPS_NOTE_KEY, true);
   agentGroupsNoteEl.classList.add("hidden");
 });
 
