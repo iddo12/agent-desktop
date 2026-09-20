@@ -1556,6 +1556,22 @@ async function rebuildChatView(agentPath, opts = {}) {
     let stillUnmatched = !blocks.some(
       (b) => b.role === "user" && normalizeForMatch(b.lines.join(" ")) === normalizeForMatch(pending.text)
     );
+    // 2026-09-20: exact match alone misses a real, confirmed case -
+    // splitLongMessage()'s pieces, sent close together, can get merged by
+    // Claude Code's own CLI into a single stored block with an EARLIER
+    // piece's own opening text trimmed off (the same "arrives without its
+    // start" corruption seen with an unsplit long paste, just spread
+    // across pieces). The tail end of a piece survives that merge even
+    // when its start doesn't, so fall back to "does a solid trailing
+    // fragment of this piece appear anywhere in the transcript" - catches
+    // an actually-delivered-but-merged piece the strict check above can't,
+    // without touching how or when anything is sent.
+    if (stillUnmatched) {
+      const fingerprint = normalizeForMatch(pending.text).slice(-80).trim();
+      if (fingerprint.length >= 30 && blocks.some((b) => b.role === "user" && normalizeForMatch(b.lines.join(" ")).includes(fingerprint))) {
+        stillUnmatched = false;
+      }
+    }
     // v1.23.0: the handoff-resume message is shown as a red "reset" block (archive.js), and
     // "/clear" never appears as a user block at all - neither would ever match above, so they
     // pulsed as "sending" until the 45s timeout. Settle them explicitly.
