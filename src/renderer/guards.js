@@ -49,7 +49,7 @@
   const headerBtn = document.createElement("button");
   headerBtn.id = "handoff-reset-btn";
   headerBtn.textContent = "Handoff & reset";
-  headerBtn.title = "Ask the agent to save lessons to memory and write a handoff file, then reset the session and resume from that handoff (cuts the cost of long conversations)";
+  headerBtn.title = "A smarter Reset Session: first asks the agent to save its lessons/open items to memory and a handoff file, THEN wipes the conversation and starts fresh from that handoff - so the next session doesn't have to re-learn what this one already figured out. Worth it once a conversation gets long and expensive.";
   const resetBtn = document.getElementById("reset-session-btn");
   if (resetBtn && resetBtn.parentNode) resetBtn.parentNode.insertBefore(headerBtn, resetBtn);
   headerBtn.addEventListener("click", () => startFlow(activeAgentPath, true));
@@ -227,7 +227,7 @@
   const allBtn = document.createElement("button");
   allBtn.id = "handoff-all-btn";
   allBtn.textContent = "Handoff all";
-  allBtn.title = "Run the handoff & reset for every agent whose conversation is over " + Math.round(CONTEXT_WARN_TOKENS / 1000) + "K tokens, one at a time, biggest first";
+  allBtn.title = "Runs Handoff & reset (save lessons, then wipe and restart from that handoff) on every agent whose conversation is over " + Math.round(CONTEXT_WARN_TOKENS / 1000) + "K tokens - one agent at a time, most expensive first.";
   if (resetBtn && resetBtn.parentNode) resetBtn.parentNode.insertBefore(allBtn, resetBtn);
   allBtn.addEventListener("click", () => startAll());
 

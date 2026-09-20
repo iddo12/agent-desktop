@@ -645,6 +645,11 @@ function selectAgent(agent) {
   localStorage.setItem("lastSelectedAgentPath", agent.path);
   renderAgentList();
   updatePauseButton(agent);
+  // A restart-status banner is a single shared element, not per-agent -
+  // clear it on every switch so it can't linger and look like it applies
+  // to whichever agent you've now switched to.
+  const rsb = document.getElementById("restart-status-banner");
+  if (rsb) rsb.className = "restart-status-banner hidden";
 
   emptyStateEl.classList.add("hidden");
   chatViewEl.classList.remove("hidden");
@@ -3904,6 +3909,25 @@ async function performSessionReset(agentPath) {
 // conversation.
 const restartSessionBtn = document.getElementById("restart-session-btn");
 
+// 2026-09-20: Iddo's ask - the button's own text ("Restarting… Ns" / "✓
+// Restarted") was the ONLY feedback, and it's easy to miss (small, in a
+// row of other buttons, reverts after 1.5s). This mirrors that same
+// button-text state as a much harder-to-miss banner directly above the
+// conversation itself, and stays up long enough to actually read.
+const restartStatusBannerEl = document.getElementById("restart-status-banner");
+let restartStatusHideTimer = null;
+function showRestartStatusBanner(kind, text) {
+  clearTimeout(restartStatusHideTimer);
+  restartStatusBannerEl.className = "restart-status-banner " + kind;
+  restartStatusBannerEl.textContent = text;
+}
+function hideRestartStatusBannerSoon(delayMs) {
+  clearTimeout(restartStatusHideTimer);
+  restartStatusHideTimer = setTimeout(() => {
+    restartStatusBannerEl.className = "restart-status-banner hidden";
+  }, delayMs);
+}
+
 restartSessionBtn.addEventListener("click", async () => {
   if (!activeAgentPath || switchingConversation) return;
   const agentPath = activeAgentPath;
@@ -3930,8 +3954,11 @@ restartSessionBtn.addEventListener("click", async () => {
   switchingConversation = true;
   restartSessionBtn.disabled = true;
   const startedAt = Date.now();
+  showRestartStatusBanner("info", "🔄 Restarting this agent's process… 0s (conversation is kept - this can take a few seconds)");
   const tick = setInterval(() => {
-    restartSessionBtn.textContent = `Restarting… ${Math.round((Date.now() - startedAt) / 1000)}s`;
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    restartSessionBtn.textContent = `Restarting… ${secs}s`;
+    showRestartStatusBanner("info", `🔄 Restarting this agent's process… ${secs}s (conversation is kept - this can take a few seconds)`);
   }, 250);
   try {
     if (!historyViewEl.classList.contains("hidden")) setHistoryMode(false);
@@ -3941,8 +3968,12 @@ restartSessionBtn.addEventListener("click", async () => {
     const agent = agents.find((a) => a.path === agentPath);
     if (agent) selectAgent(agent);
     restartSessionBtn.textContent = "✓ Restarted";
+    showRestartStatusBanner("success", "✓ Finished restarting - conversation kept, go ahead.");
+    hideRestartStatusBannerSoon(4000);
   } catch (e) {
     restartSessionBtn.textContent = "Restart failed";
+    showRestartStatusBanner("error", "✗ Restart failed: " + (e.message || String(e)));
+    hideRestartStatusBannerSoon(8000);
     alert("Restart failed: " + (e.message || String(e)));
   } finally {
     clearInterval(tick);

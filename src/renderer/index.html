@@ -53,14 +53,14 @@
           <div id="monthly-usage" class="hidden" title=""></div>
           <div id="context-usage" class="hidden" title=""></div>
           <div id="cache-status" class="hidden" title=""></div>
-          <button id="reset-session-btn" title="Clear this agent's current conversation context and start fresh (full history stays available in History)">Reset Session</button>
-          <button id="restart-session-btn" title="Restart this agent's process, keeping the current conversation — use it to pick up changes to the agent's settings (.claude/settings.local.json) or CLAUDE.md">Restart Session</button>
-          <button id="pause-agent-btn" title="Stop this agent's background process until you resume it — the always-on keep-alive won't restart it while paused. You can still open its chat tab manually any time.">Pause Agent</button>
-          <button id="raw-terminal-toggle-btn" title="Switch to the raw terminal (needed for things like the Model picker's arrow keys)">Raw Terminal</button>
-          <button id="model-picker-btn" title="Choose which Claude model this agent uses">Model</button>
-          <button id="chats-toggle-btn" title="Switch between this agent's past conversations, start a new one, or rename them">Chats</button>
-          <button id="history-toggle-btn" title="View past conversation history">History</button>
-          <button id="save-to-master-btn" title="Prefill the message box with a 'save this to the master file' reminder">Save to master file</button>
+          <button id="reset-session-btn" title="WIPES this agent's current conversation and starts a brand-new one (like /clear) - the old conversation isn't deleted, it stays viewable under History. Use this to start over from nothing.">Reset Session</button>
+          <button id="restart-session-btn" title="Restarts this agent's background process WITHOUT losing the conversation - use it after editing the agent's CLAUDE.md or settings.local.json so the change actually takes effect. Nothing is cleared.">Restart Session</button>
+          <button id="pause-agent-btn" title="Stops this agent's background process until you click Resume. While paused, the always-on keep-alive won't bring it back on its own - opening its chat tab still works and starts it again.">Pause Agent</button>
+          <button id="raw-terminal-toggle-btn" title="Switch from the normal chat bubbles to the plain text terminal Claude Code actually runs in - needed for a few things the chat view can't do, like using arrow keys in the Model picker below.">Raw Terminal</button>
+          <button id="model-picker-btn" title="Choose which Claude model (e.g. Sonnet, Opus) this agent uses for its replies.">Model</button>
+          <button id="chats-toggle-btn" title="See this agent's other past/parallel conversations (from Reset Session or /clear), switch to one, start a new one, or rename them.">Chats</button>
+          <button id="history-toggle-btn" title="Browse this agent's full message history day by day, including anything wiped by a past Reset Session.">History</button>
+          <button id="save-to-master-btn" title="Puts a ready-made reminder in the message box asking this agent to save its findings to the shared master file - saves you typing it out yourself.">Save to master file</button>
         </div>
 
         <div id="no-instructions-banner" class="hidden">
@@ -68,6 +68,8 @@
           <button id="add-instructions-btn">Add instructions</button>
           <button id="dismiss-instructions-banner-btn" class="dismiss-btn" title="Hide">&times;</button>
         </div>
+
+        <div id="restart-status-banner" class="hidden"></div>
 
         <div id="chat-body">
           <div id="chat-messages-view"></div>

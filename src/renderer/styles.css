@@ -1780,6 +1780,15 @@ button.danger:not(:disabled):hover { filter: brightness(1.1); }
 .guard-blue { background: #e4eefb; color: #17365f; border-color: #a9c4ea; }
 .guard-green { background: #e3f4e3; color: #1d4a1d; border-color: #a5d3a5; }
 #handoff-reset-btn, #handoff-all-btn { -webkit-app-region: no-drag; }
+
+/* 2026-09-20: visible feedback for Restart Session, above the conversation
+   itself - the button's own text ("Restarting… Ns") was easy to miss. Same
+   color language as the guard-* banners above for consistency. */
+.restart-status-banner { padding: 8px 14px; font-size: 0.85rem; border-bottom: 1px solid var(--border); }
+.restart-status-banner.hidden { display: none; }
+.restart-status-banner.info { background: #e4eefb; color: #17365f; border-color: #a9c4ea; }
+.restart-status-banner.success { background: #e3f4e3; color: #1d4a1d; border-color: #a5d3a5; }
+.restart-status-banner.error { background: #fde3e1; color: #7a1710; border-color: #e69a94; }
 .chat-reset-marker { margin: 18px 0; border-top: 3px solid #d32f2f; padding-top: 6px; }
 .chat-reset-head { color: #d32f2f; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.05em; margin-bottom: 6px; }
 .chat-reset-body { font-size: 0.85rem; color: var(--text); background: #fdf1f0; border-radius: 8px; padding: 8px 12px; }
