@@ -2762,35 +2762,56 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
 // call, somewhere in node-pty's ConPTY layer or in Claude Code's own stdin
 // reading on the other end of the pipe - a large one-shot burst (over
 // 2KB in the confirmed failures) apparently doesn't survive intact.
-// Mitigation: write it in small chunks with a short delay between them
-// instead of one synchronous call, closer to how real typing (or a
-// well-behaved paste) actually arrives - short inputs are unaffected
-// (single chunk, immediate, byte-for-byte the same as before).
-const PTY_WRITE_CHUNK_SIZE = 200;
-const PTY_WRITE_CHUNK_DELAY_MS = 20;
+// Mitigation at the time: write it in small chunks with a short delay
+// between them instead of one synchronous call.
+//
+// 2026-09-21 correction (part 1): that diagnosis was half-confounded. A
+// second, independent mechanism was ALSO in play - a raw pty write with no
+// bracketed-paste marker is exactly what a real terminal never sends for an
+// actual paste, so the CLI's own heuristics for telling "one paste" apart
+// from "fast individual keystrokes" had nothing to go on. submitToAgent()
+// in renderer.js now wraps long sends in the standard \x1b[200~ ... \x1b[201~
+// bracketed-paste escape codes for exactly that reason. First attempt at
+// this fix made this function do one synchronous proc.write() of the whole
+// bracket-wrapped string, no chunking at all, on the theory that the ORIGINAL
+// ~2KB failure boundary was entirely a symptom of the missing bracket marker
+// and would disappear once that was fixed.
+//
+// 2026-09-21 correction (part 2, same night): it didn't disappear. Live-
+// bisected against the Testing agent post-bracket-paste: 1000/2000/2200
+// bytes landed clean, 2500/3000/5866 bytes silently vanished - never reached
+// the CLI at all (confirmed via `claude agents --json` showing the process
+// idle/done, and the Raw Terminal view showing no trace of the message
+// arriving). That boundary lines up almost exactly with the ORIGINAL
+// pre-bracket-paste measurement two sections up (~1800 safe / ~2420+ fails),
+// which means that measurement was never fully explained by the missing
+// bracket marker - there is a genuine separate size ceiling on one raw
+// synchronous write to this pty (node-pty's ConPTY layer on Windows, or a
+// buffer somewhere in Claude Code's own stdin reading), independent of the
+// paste-vs-typing ambiguity bracketed paste addresses. The two bugs happened
+// to share the same rough byte count, which is what made this look solved
+// after v1.32.0 when it wasn't.
+//
+// 2026-09-21 correction (part 3, same night): tried chunking at a safe size
+// with zero artificial delay (1500-byte pieces via setImmediate, replacing
+// the theory above) and re-bisected. It did NOT help - a fresh 2500-char
+// message, chunked this way, failed identically to an unchunked one. That
+// rules out single-write byte size as the mechanism entirely: however this
+// app writes the bytes, in whatever pieces, at whatever cadence, the CLI's
+// own reading side still can't handle the same total ~2.2-2.5KB of pasted
+// input. This is not fixable from this app's write path - it's a limit on
+// Claude Code's own side, outside this repo. The one thing that actually
+// worked both nights was never attempting it: `LONG_MESSAGE_FILE_THRESHOLD`
+// in renderer.js is now set safely under this boundary (1800), so anything
+// long enough to be at risk is written to a file and read instead of typed.
+// Back to a single plain write - no chunking, since chunking demonstrably
+// doesn't address the real cause and only adds complexity.
 function writeToPtyChunked(proc, agentPath, data) {
-  if (typeof data !== "string" || data.length <= PTY_WRITE_CHUNK_SIZE) {
-    try {
-      proc.write(data);
-    } catch (e) {
-      handlePtyExit(agentPath);
-    }
-    return;
+  try {
+    proc.write(data);
+  } catch (e) {
+    handlePtyExit(agentPath);
   }
-  let i = 0;
-  const sendNextChunk = () => {
-    if (i >= data.length) return;
-    const chunk = data.slice(i, i + PTY_WRITE_CHUNK_SIZE);
-    i += PTY_WRITE_CHUNK_SIZE;
-    try {
-      proc.write(chunk);
-    } catch (e) {
-      handlePtyExit(agentPath);
-      return; // process is gone - no point scheduling more chunks against it
-    }
-    if (i < data.length) setTimeout(sendNextChunk, PTY_WRITE_CHUNK_DELAY_MS);
-  };
-  sendNextChunk();
 }
 
 ipcMain.on("terminal-resize", (event, { agentPath, cols, rows }) => {

@@ -2920,8 +2920,29 @@ function submitToAgent(agentPath, text) {
   // fast typing all session - chunking the write (v1.28.0) and splitting
   // into pieces (v1.30.0) both worked AROUND that ambiguity rather than
   // resolving it; this addresses it the way a real terminal already would.
-  window.api.sendInput(agentPath, "\x1b[200~" + text + "\x1b[201~");
-  setTimeout(() => window.api.sendInput(agentPath, "\r"), 80);
+  //
+  // 2026-09-21: caught live via a controlled test (Testing agent, ScreenGuide
+  // watching) - even with the whole bracket-wrapped block sent as one
+  // synchronous write, the trailing END marker itself could arrive corrupted:
+  // a "Q7" message sent with END-MARKER-Q7 as its last content came out the
+  // other end, in the CLI's OWN stored transcript (not just the UI), as
+  // "END-MARKER-Q701~" - the ESC/[/2 prefix of \x1b[201~ was consumed
+  // silently but the trailing "01~" leaked through as three literal
+  // characters appended straight onto the real content. Most likely
+  // explanation: the terminator landed glued onto the tail of one large
+  // write, and whatever's on the reading end (Claude Code's own key-sequence
+  // parser, disambiguating a lone ESC keypress from the start of a longer
+  // sequence) partially timed out mid-parse before the rest of the six-byte
+  // marker arrived. Fix: give the end marker its own short, isolated write -
+  // a small gap after the content and before the marker, so it's never
+  // sharing a single low-level write with a large content blob, then the
+  // existing gap before "\r". Needs the same live-test confirmation this
+  // caught the bug with before it's trusted further.
+  window.api.sendInput(agentPath, "\x1b[200~" + text);
+  setTimeout(() => {
+    window.api.sendInput(agentPath, "\x1b[201~");
+    setTimeout(() => window.api.sendInput(agentPath, "\r"), 80);
+  }, 30);
 }
 
 // 2026-09-20: Iddo's direct ask after the whole splitLongMessage() saga -
@@ -2938,7 +2959,34 @@ function submitToAgent(agentPath, text) {
 // instead of typing/pasting it at all (same reliable file-reference
 // mechanism a pasted image already uses), rather than typed/pasted in any
 // form. No more multi-piece splitting for anything in between.
-const LONG_MESSAGE_FILE_THRESHOLD = 6000;
+//
+// 2026-09-21: this threshold was dangerously too high. Live-bisected against
+// the Testing agent (ScreenGuide open, ground-truth-checked against the raw
+// transcript, not the UI): messages at 1000/2000/2200 chars landed clean,
+// but 2500/3000/5866 chars silently never reached the CLI at all - not
+// merely un-echoed but genuinely stuck, confirmed via `claude agents --json`
+// showing the process idle with nothing pending. Worse: those "lost"
+// messages weren't actually gone - restarting Agent Desktop (which
+// reattaches to the same still-running `claude --bg` process, per this
+// file's own architecture notes) caused the CLI to suddenly flush them all
+// at once as ONE garbled turn, with content dropped from the front/middle of
+// each and no separator between them - the exact "two messages collided"
+// symptom Iddo independently reported the same night. Tried chunking
+// `writeToPtyChunked()`'s writes at a safe size with no artificial delay
+// (main.js, PTY_WRITE_CHUNK_SIZE) on the theory this was a single-write size
+// limit - retested at 2500 chars post-fix and it still failed identically,
+// which rules that theory out: this isn't about how Agent Desktop splits its
+// writes, it's a limit somewhere on Claude Code's own reading/input-widget
+// side that no write pattern from this app can route around. Matches almost
+// exactly what an earlier, pre-bracketed-paste measurement already found
+// (~1800 safe / ~2420+ fails, see the v1.30.0 changelog entry) - that
+// finding was real and never actually superseded by bracketed paste, it
+// just looked that way because most testing that night happened to stay
+// under this ceiling. Lowered to 1800 - safely under every confirmed-safe
+// measurement from both nights - so anything at real risk goes through the
+// proven-reliable file-handoff path instead of ever attempting the risky
+// raw-typing path near its failure boundary.
+const LONG_MESSAGE_FILE_THRESHOLD = 1800;
 
 async function sendChatInput() {
   const text = chatInputEl.value;
