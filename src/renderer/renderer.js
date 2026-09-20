@@ -1416,8 +1416,35 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // in rebuildChatView() for why.
   for (const pending of pendingSent || []) {
     const el = document.createElement("div");
-    el.className = "chat-bubble chat-bubble-user chat-bubble-pending";
+    el.className = "chat-bubble chat-bubble-user " + (pending.failed ? "chat-bubble-failed" : "chat-bubble-pending");
     renderRichText(el, pending.text, { markdown: true });
+    if (pending.failed) {
+      // See rebuildChatView()'s pendingSent-filtering comment: this never
+      // reached the agent's transcript at all (already auto-requeued once
+      // to retry when the session next goes idle) - a visible warning +
+      // manual resend beats the old behavior of just silently disappearing.
+      const warn = document.createElement("div");
+      warn.className = "chat-bubble-failed-notice";
+      warn.textContent = "⚠ Not delivered - queued to retry automatically";
+      const resendBtn = document.createElement("button");
+      resendBtn.textContent = "Resend now";
+      resendBtn.addEventListener("click", () => {
+        const session = terminals.get(activeAgentPath);
+        if (!session) return;
+        session.pendingSent = session.pendingSent.filter((p) => p !== pending);
+        const idx = session.sendQueue.indexOf(pending.text);
+        if (idx !== -1) session.sendQueue.splice(idx, 1);
+        renderQueue(activeAgentPath);
+        if (session.busy) {
+          session.sendQueue.unshift(pending.text);
+          renderQueue(activeAgentPath);
+        } else {
+          submitToAgent(activeAgentPath, pending.text);
+        }
+      });
+      warn.appendChild(resendBtn);
+      el.appendChild(warn);
+    }
     chatMessagesViewEl.appendChild(el);
   }
   if (opts.forceBottom || wasNearBottom) {
@@ -1520,8 +1547,35 @@ async function rebuildChatView(agentPath, opts = {}) {
     // pulsed as "sending" until the 45s timeout. Settle them explicitly.
     if (stillUnmatched && pending.text.startsWith("[[HANDOFF-RESUME]]") && blocks.some((b) => b.role === "reset")) stillUnmatched = false;
     if (stillUnmatched && pending.text.trim() === "/clear" && now - pending.addedAt > 3000) stillUnmatched = false;
-    const notExpired = now - pending.addedAt < PENDING_SENT_TIMEOUT_MS;
-    return stillUnmatched && notExpired;
+    if (!stillUnmatched) return false; // matched - a real transcript entry now carries it, drop the optimistic copy
+
+    // 2026-09-20: this used to just silently vanish here once expired, on
+    // the reasoning that "either it succeeded and matching missed it, or
+    // something else happened, but a permanently-pulsing bubble is worse."
+    // Confirmed live this was hiding a real, recurring failure mode -
+    // Claude Code's CLI drops input sent while it's still generating a
+    // response instead of queueing it (documented above at setRawTerminalMode/
+    // IDLE_TIMEOUT_MS), and this app's own busy-detection (900ms of pty
+    // silence = assumed idle) is a timing heuristic that can be wrong,
+    // especially right at a turn boundary or during a quiet background
+    // subagent call - a false "idle" sends directly instead of queuing, the
+    // CLI drops it, and the message is gone with no trace in the transcript
+    // at all. Iddo lost a long, detailed reply this way with zero warning.
+    // Now: past the timeout with no match, treat it as a genuine delivery
+    // failure - mark it (kept in the array, not dropped) so it renders with
+    // a warning + Resend instead of disappearing, auto-requeue it once so it
+    // gets retried the next time the session is confirmed idle, and notify
+    // in case Iddo isn't looking at this tab right now.
+    if (now - pending.addedAt >= PENDING_SENT_TIMEOUT_MS) {
+      if (!pending.failed) {
+        pending.failed = true;
+        session.sendQueue.push(pending.text);
+        renderQueue(agentPath);
+        window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+      }
+      return true; // keep it visible as a failed bubble, not silently gone
+    }
+    return true; // still within the timeout, still legitimately pending
   });
   renderChatBlocks(blocks, session.pendingSent, { forceBottom: !!opts.forceBottom });
 }
@@ -1736,7 +1790,7 @@ const PLAN_FIVE_HOUR_ESTIMATES = {
   max5x: { label: "Max 5x", fiveHourMessages: 225 },
   max20x: { label: "Max 20x", fiveHourMessages: 900 },
 };
-const DEFAULT_PLAN_ID = "pro";
+const DEFAULT_PLAN_ID = "max5x"; // 2026-09-20: Iddo's actual current plan - see infrastructure_facts.md
 const PLAN_STORAGE_KEY = "agentDesktop.selectedPlanId";
 
 function getSelectedPlanId() {
@@ -1747,6 +1801,32 @@ function getSelectedPlanId() {
 function setSelectedPlanId(planId) {
   if (!PLAN_FIVE_HOUR_ESTIMATES[planId]) return;
   localStorage.setItem(PLAN_STORAGE_KEY, planId);
+}
+
+// 2026-09-20: the dropdown above stored the plan as a one-time manual pick
+// with nothing keeping it in sync - confirmed live, it was still "Pro" long
+// after Iddo actually upgraded to Max 5x, silently showing a ~5x-inflated
+// fallback percentage. infrastructure_facts.md's "Current plan:" line is
+// this workspace's single source of truth for exactly this fact (root
+// CLAUDE.md), so prefer it whenever it can be read/parsed - self-healingly
+// syncing localStorage AND the visible dropdown to match, so a future plan
+// change (edited into that one file, per the existing workspace habit)
+// takes effect here automatically instead of also needing a separate click
+// in this app. Falls back to the plain stored/default value only if the
+// shared file is missing or its "Current plan" line doesn't parse.
+async function getEffectivePlanId() {
+  let inferred = null;
+  try {
+    inferred = await window.api.getInferredPlanId();
+  } catch (e) {}
+  if (inferred && PLAN_FIVE_HOUR_ESTIMATES[inferred]) {
+    if (getSelectedPlanId() !== inferred) {
+      setSelectedPlanId(inferred);
+      if (typeof syncPlanDropdown === "function") syncPlanDropdown();
+    }
+    return inferred;
+  }
+  return getSelectedPlanId();
 }
 
 // Must match RATE_LIMIT_REFRESH_INTERVAL_SECONDS in main.js - only used
@@ -1805,7 +1885,7 @@ async function refreshUsageWindows() {
     else if (pct >= 70) fiveHourUsageEl.classList.add("warning");
     if (age.stale) fiveHourUsageEl.classList.add("stale");
   } else {
-    const plan = PLAN_FIVE_HOUR_ESTIMATES[getSelectedPlanId()];
+    const plan = PLAN_FIVE_HOUR_ESTIMATES[await getEffectivePlanId()];
     const fivePct = Math.min(100, Math.round((windows.messagesInLast5h / plan.fiveHourMessages) * 100));
     fiveHourUsageEl.textContent = `${windows.messagesInLast5h} msgs (~${fivePct}%, 5h)`;
     fiveHourUsageEl.title =
@@ -3858,10 +3938,17 @@ for (const [planId, plan] of Object.entries(PLAN_FIVE_HOUR_ESTIMATES)) {
   planSelectEl.appendChild(option);
 }
 planSelectEl.value = getSelectedPlanId();
+getEffectivePlanId(); // sync the dropdown to infrastructure_facts.md right away, not only once the fallback estimate happens to be needed
 planSelectEl.addEventListener("change", () => {
   setSelectedPlanId(planSelectEl.value);
   refreshUsageWindows();
 });
+// Keeps the dropdown showing whatever getEffectivePlanId() (above) just
+// synced into localStorage from infrastructure_facts.md, so it never sits
+// visibly stale even though nothing here required Iddo to click it.
+function syncPlanDropdown() {
+  planSelectEl.value = getSelectedPlanId();
+}
 
 // --------------------------------------------------- Claude Code updates --
 //

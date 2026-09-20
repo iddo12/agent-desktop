@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld("api", {
   switchConversation: (agentPath, opts) => ipcRenderer.invoke("switch-conversation", { agentPath, ...opts }),
   getContextUsage: (agentPath) => ipcRenderer.invoke("get-context-usage", { agentPath }),
   getUsageWindows: () => ipcRenderer.invoke("get-usage-windows"),
+  getInferredPlanId: () => ipcRenderer.invoke("get-inferred-plan-id"),
+  notifySendFailed: (agentPath, text) => ipcRenderer.invoke("notify-send-failed", { agentPath, text }),
   getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),
   getSessionActivity: (agentPath) => ipcRenderer.invoke("get-session-activity", { agentPath }),
   getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),

@@ -2483,6 +2483,73 @@ ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActiv
 
 ipcMain.handle("get-usage-windows", () => getUsageWindows());
 
+// 2026-09-20: renderer.js's PLAN_FIVE_HOUR_ESTIMATES fallback (used only
+// when Anthropic's own confirmed rate_limits figure isn't available yet)
+// used to depend entirely on a manually-set sidebar dropdown, stored in
+// localStorage, with no connection to reality - confirmed live: it was
+// still set to "Pro" (45 msgs/5h) hours after Iddo actually upgraded to Max
+// 5x (225 msgs/5h), silently showing a ~5x-inflated, falsely alarming
+// percentage. infrastructure_facts.md's "Current plan:" line is this
+// workspace's single source of truth for exactly this fact (root
+// CLAUDE.md: "agent docs must reference it, never restate those facts") -
+// so read the plan from there instead of asking Iddo to separately keep a
+// second copy of the same fact in sync inside this app. mtime-gated so a
+// plain-text file this small still isn't re-read on every single call.
+const INFRA_FACTS_PATH = path.join(AGENTS_ROOT, "infrastructure_facts.md");
+let infraFactsPlanCache = { mtimeMs: null, planId: null };
+function getInferredPlanId() {
+  try {
+    const mtimeMs = fs.statSync(INFRA_FACTS_PATH).mtimeMs;
+    if (infraFactsPlanCache.mtimeMs === mtimeMs) return infraFactsPlanCache.planId;
+    const text = fs.readFileSync(INFRA_FACTS_PATH, "utf-8");
+    const m = /^-\s*\*\*Current plan:\*\*\s*Claude\s*\*\*([^*]+)\*\*/im.exec(text);
+    let planId = null;
+    if (m) {
+      const label = m[1].trim().toLowerCase();
+      if (label === "pro") planId = "pro";
+      else if (label.includes("max 5x") || label.includes("max5x")) planId = "max5x";
+      else if (label.includes("max 20x") || label.includes("max20x")) planId = "max20x";
+    }
+    infraFactsPlanCache = { mtimeMs, planId };
+    return planId;
+  } catch (e) {
+    return null; // file missing/unreadable/unparseable - caller falls back to its own stored default
+  }
+}
+ipcMain.handle("get-inferred-plan-id", () => getInferredPlanId());
+
+// 2026-09-20: pairs with renderer.js's rebuildChatView() pendingSent-expiry
+// handling - a message that never landed in the transcript within
+// PENDING_SENT_TIMEOUT_MS used to just silently vanish from the chat view
+// with no signal anywhere. Iddo lost a long, detailed reply to the Trade
+// Show agent this way and only noticed because the agent's next reply
+// didn't reflect it. This fires an OS notification so a delivery failure is
+// visible even if Agent Desktop isn't the focused window at the time.
+ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
+  try {
+    if (Notification.isSupported()) {
+      const agentName = path.basename(agentPath);
+      const preview = (text || "").replace(/\s+/g, " ").trim().slice(0, 120);
+      const n = new Notification({
+        title: `${agentName}: your message wasn't delivered`,
+        body: `It never reached the agent's transcript - re-queued to retry automatically. "${preview}${text && text.length > 120 ? "…" : ""}"`,
+      });
+      n.on("click", () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+        }
+      });
+      n.show();
+    }
+  } catch (e) {
+    /* a notification failure must never break anything else */
+  }
+  logStuckWatchdog(`notify-send-failed: ${agentPath} - message never landed in transcript, re-queued`);
+  return { ok: true };
+});
+
 // v1.23.0 guards (handoff-reset + usage-limit warnings) - isolated module, loaded
 // defensively so a bug there can only disable the guards, never the app.
 try {

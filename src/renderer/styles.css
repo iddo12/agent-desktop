@@ -1179,6 +1179,27 @@ html, body {
   50% { opacity: 0.9; }
 }
 
+/* 2026-09-20: a pendingSent bubble that timed out with no matching
+   transcript entry used to just silently disappear (see rebuildChatView's
+   pendingSent-filtering comment) - now stays visible, clearly marked as
+   failed, instead of leaving no trace that a message was lost. */
+.chat-bubble-failed {
+  border: 1px solid #e69a94;
+  background: #fde3e1;
+}
+.chat-bubble-failed-notice {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: #7a1710;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chat-bubble-failed-notice button {
+  font-size: 0.78rem;
+  padding: 2px 8px;
+}
+
 /* xterm's fit() addon measures #terminal-container's own box directly, so
    that element must have zero padding/border of its own for accurate cols/
    rows calculation (a mismatch here is what caused content to overlap the
