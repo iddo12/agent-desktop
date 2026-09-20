@@ -1038,6 +1038,22 @@ ipcMain.handle("save-pasted-image", (event, { base64, ext }) => {
   return filePath;
 });
 
+// 2026-09-20: for a message long enough to risk the terminal-input
+// corruption documented at writeToPtyChunked() below (confirmed live,
+// repeatedly, well past what bracketed-paste alone reliably fixed) - write
+// it to a plain text file and tell the agent to read it with its own Read
+// tool instead of typing/pasting it at all. This is the same reliable
+// mechanism a pasted image already uses (a file reference, not raw
+// keystrokes) and sidesteps the terminal-input pipeline entirely rather
+// than trying to make a large paste survive it.
+const LONG_MESSAGE_DIR = path.join(app.getPath("temp"), "agent-desktop-long-messages");
+ipcMain.handle("save-long-message", (event, { text }) => {
+  fs.mkdirSync(LONG_MESSAGE_DIR, { recursive: true });
+  const filePath = path.join(LONG_MESSAGE_DIR, `message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`);
+  fs.writeFileSync(filePath, text, "utf-8");
+  return filePath;
+});
+
 // -------------------------------------------------------------- terminal --
 
 // Claude Code keys sessions purely by working directory. Spawning directly in

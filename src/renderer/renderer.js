@@ -1440,20 +1440,14 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
         const idx = session.sendQueue.indexOf(pending.text);
         if (idx !== -1) session.sendQueue.splice(idx, 1);
         renderQueue(activeAgentPath);
-        // Split before resubmitting - a failed message that was long enough
-        // to trip the delivery bug in the first place would just fail the
-        // same way again unsplit (see splitLongMessage()'s own comment).
-        const resendPieces = splitLongMessage(pending.text, MESSAGE_SPLIT_THRESHOLD);
+        // No more splitting into pieces here - submitToAgent()'s bracketed-
+        // paste wrapping is what's meant to make a single resend reliable
+        // now (see its own comment), not breaking it up further.
         if (session.busy) {
-          session.sendQueue.unshift(...resendPieces);
+          session.sendQueue.unshift(pending.text);
           renderQueue(activeAgentPath);
         } else {
-          const [first, ...rest] = resendPieces;
-          if (rest.length) {
-            session.sendQueue.unshift(...rest);
-            renderQueue(activeAgentPath);
-          }
-          submitToAgent(activeAgentPath, first);
+          submitToAgent(activeAgentPath, pending.text);
         }
       });
       warn.appendChild(resendBtn);
@@ -1556,15 +1550,16 @@ async function rebuildChatView(agentPath, opts = {}) {
     let stillUnmatched = !blocks.some(
       (b) => b.role === "user" && normalizeForMatch(b.lines.join(" ")) === normalizeForMatch(pending.text)
     );
-    // 2026-09-20: exact match alone misses a real, confirmed case -
-    // splitLongMessage()'s pieces, sent close together, can get merged by
-    // Claude Code's own CLI into a single stored block with an EARLIER
-    // piece's own opening text trimmed off (the same "arrives without its
-    // start" corruption seen with an unsplit long paste, just spread
-    // across pieces). The tail end of a piece survives that merge even
-    // when its start doesn't, so fall back to "does a solid trailing
-    // fragment of this piece appear anywhere in the transcript" - catches
-    // an actually-delivered-but-merged piece the strict check above can't,
+    // 2026-09-20: exact match alone misses a real, confirmed case - Claude
+    // Code's own CLI can merge a message into an adjacent stored block with
+    // its own opening text trimmed off (the "arrives without its start"
+    // corruption chased most of this session, since fixed at the source by
+    // submitToAgent()'s bracketed-paste wrapping - kept as a defensive
+    // fallback here regardless, e.g. for anything sent before a restart
+    // picks that fix up). The tail end of a message survives that kind of
+    // merge even when its start doesn't, so fall back to "does a solid
+    // trailing fragment of it appear anywhere in the transcript" - catches
+    // an actually-delivered-but-merged message the strict check above can't,
     // without touching how or when anything is sent.
     if (stillUnmatched) {
       const fingerprint = normalizeForMatch(pending.text).slice(-80).trim();
@@ -2916,54 +2911,36 @@ function submitToAgent(agentPath, text) {
       updateThinkingIndicator();
     }
   }
-  window.api.sendInput(agentPath, text);
+  // 2026-09-20: wrap in bracketed-paste escape codes (\x1b[200~ ... \x1b[201~) -
+  // the standard terminal mechanism that tells a receiving program "this
+  // whole block is one paste, not individual keystrokes". A raw write
+  // without this is exactly what a real terminal emulator never sends for
+  // an actual user paste, and is very likely the real reason Claude Code's
+  // own CLI has been unable to reliably tell a longer message apart from
+  // fast typing all session - chunking the write (v1.28.0) and splitting
+  // into pieces (v1.30.0) both worked AROUND that ambiguity rather than
+  // resolving it; this addresses it the way a real terminal already would.
+  window.api.sendInput(agentPath, "\x1b[200~" + text + "\x1b[201~");
   setTimeout(() => window.api.sendInput(agentPath, "\r"), 80);
 }
 
-// 2026-09-20: root cause of the long-message delivery bug narrowed down
-// further today - chunking the raw pty write (v1.28.0) did NOT fix it, and
-// sent-messages.jsonl proves the full correct text was already reaching
-// session.proc.write() every time regardless, so the corruption is
-// downstream of anything this app writes. Checked the actual length
-// distribution of everything sent to one agent today: every message under
-// ~1800 chars landed fine; every one at 2420+ chars either vanished
-// entirely or came back to the model garbled/missing its own start
-// (confirmed from the AGENT's own reply noticing missing content, not just
-// a transcript-file quirk - so whatever's truncating it happens before the
-// model ever sees the full text, likely a fixed-size input buffer inside
-// Claude Code's own interactive text widget, not anything Agent Desktop or
-// node-pty controls). Rather than keep chasing that from the write side,
-// this splits anything long into several separate, safely-sized turns
-// BEFORE it's ever sent - exactly what the agent itself had already been
-// telling Iddo to do by hand ("send it in a few short pieces"), just
-// automatic. Each piece is prefixed with a part marker so the receiving
-// agent knows to wait for the rest before replying in full.
-const MESSAGE_SPLIT_THRESHOLD = 1200; // comfortably under the smallest confirmed failure (2420 chars)
-function splitLongMessage(text, maxLen) {
-  if (text.length <= maxLen) return [text];
-  const pieces = [];
-  let remaining = text;
-  while (remaining.length > maxLen) {
-    const window = remaining.slice(0, maxLen);
-    // Prefer a natural break (paragraph, then line, then sentence, then
-    // word) as long as it's not so early it'd make a tiny useless piece;
-    // otherwise just hard-cut at maxLen rather than search forever.
-    let cut = window.lastIndexOf("\n\n");
-    if (cut < maxLen * 0.5) cut = window.lastIndexOf("\n");
-    if (cut < maxLen * 0.5) cut = window.lastIndexOf(". ");
-    if (cut < maxLen * 0.5) cut = window.lastIndexOf(" ");
-    if (cut < 1) cut = maxLen;
-    pieces.push(remaining.slice(0, cut).trimEnd());
-    remaining = remaining.slice(cut).trimStart();
-  }
-  if (remaining) pieces.push(remaining);
-  return pieces.map(
-    (p, i) =>
-      `[Message ${i + 1}/${pieces.length} - ${i + 1 < pieces.length ? "more follows, please wait for the rest before replying" : "end of message"}]\n${p}`
-  );
-}
+// 2026-09-20: Iddo's direct ask after the whole splitLongMessage() saga -
+// "find a working way to send the entire message in one go" - rather than
+// keep splitting into pieces (which itself turned out to have its own
+// failure modes: pieces getting merged by the CLI, a delay-based fix that
+// silently lost a piece entirely). Two real changes together: (1)
+// submitToAgent() below now wraps the text in bracketed-paste escape codes,
+// the actual standard mechanism for telling a terminal program "this is one
+// paste" - almost certainly the real fix, since a raw write without it is
+// exactly what a real terminal never sends for an actual user paste. (2)
+// anything still long enough to feel risky even bracketed - past this
+// threshold - is written to a file and the agent is asked to read it
+// instead of typing/pasting it at all (same reliable file-reference
+// mechanism a pasted image already uses), rather than typed/pasted in any
+// form. No more multi-piece splitting for anything in between.
+const LONG_MESSAGE_FILE_THRESHOLD = 6000;
 
-function sendChatInput() {
+async function sendChatInput() {
   const text = chatInputEl.value;
   const attachmentText = pendingAttachments.map((a) => `"${a.path}"`).join(" ");
   // 2026-09-20: joining with a plain space put a long message's very first
@@ -2982,9 +2959,20 @@ function sendChatInput() {
   // write "here's a file" then start a new line for the actual message.
   const combined = [attachmentText, text].filter(Boolean).join("\n");
   if (!combined.trim() || !activeAgentPath) return;
-  const pieces = splitLongMessage(combined, MESSAGE_SPLIT_THRESHOLD);
+  const agentPath = activeAgentPath; // pin - the save-to-file await below could otherwise straddle a mid-flight agent switch
 
-  const session = terminals.get(activeAgentPath);
+  let toSend = combined;
+  if (combined.length > LONG_MESSAGE_FILE_THRESHOLD) {
+    try {
+      const filePath = await window.api.saveLongMessage(combined);
+      toSend = `This message was too long to paste directly, so it was saved to a file - please read it: "${filePath}"`;
+    } catch (e) {
+      console.error("[agent-desktop] saveLongMessage failed - sending inline instead:", e);
+    }
+  }
+  if (agentPath !== activeAgentPath) return; // switched agents while the file save was in flight - don't send it to the wrong one
+
+  const session = terminals.get(agentPath);
   // !session.started covers a real, confirmed-live bug: window.api.startTerminal()
   // is only issued from a requestAnimationFrame callback in showTerminalFor()
   // (deferred so layout has settled), so there's a brief real window, right
@@ -3002,25 +2990,11 @@ function sendChatInput() {
     // Stay typeable at all times rather than blocking - queue it instead;
     // setBusy() sends it automatically once the agent's actually free, and
     // showTerminalFor()'s startTerminal().then() does the same once a
-    // freshly-opened agent's session has actually started. Multiple pieces
-    // queue in order and drain one at a time exactly like any other queued
-    // message - no different from a person typing several messages while
-    // the agent is busy.
-    for (const piece of pieces) session.sendQueue.push(piece);
-    renderQueue(activeAgentPath);
-  } else if (session) {
-    // Submit the first piece now; queue the rest so they go out one at a
-    // time as each prior one's turn actually completes (submitToAgent alone
-    // can't wait for a reply - the queue's own idle-drain does that part).
-    const [first, ...rest] = pieces;
-    for (const piece of rest) session.sendQueue.push(piece);
-    if (rest.length) renderQueue(activeAgentPath);
-    submitToAgent(activeAgentPath, first);
+    // freshly-opened agent's session has actually started.
+    session.sendQueue.push(toSend);
+    renderQueue(agentPath);
   } else {
-    // No session object at all yet (see the !session.started comment above) -
-    // this edge case predates message-splitting and stays as it was: send
-    // the whole thing as one shot through submitToAgent's own fallback path.
-    submitToAgent(activeAgentPath, combined);
+    submitToAgent(agentPath, toSend);
   }
 
   chatInputEl.value = "";
