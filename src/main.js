@@ -2535,7 +2535,7 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
       const preview = (text || "").replace(/\s+/g, " ").trim().slice(0, 120);
       const n = new Notification({
         title: `${agentName}: your message wasn't delivered`,
-        body: `It never reached the agent's transcript - re-queued to retry automatically. "${preview}${text && text.length > 120 ? "…" : ""}"`,
+        body: `It never reached the agent's transcript - open Agent Desktop and click Resend to try again. "${preview}${text && text.length > 120 ? "…" : ""}"`,
       });
       n.on("click", () => {
         if (mainWindow && !mainWindow.isDestroyed()) {

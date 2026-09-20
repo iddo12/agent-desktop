@@ -1425,12 +1425,12 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     renderRichText(el, pending.text, { markdown: true });
     if (pending.failed) {
       // See rebuildChatView()'s pendingSent-filtering comment: this never
-      // reached the agent's transcript at all (already auto-requeued once
-      // to retry when the session next goes idle) - a visible warning +
-      // manual resend beats the old behavior of just silently disappearing.
+      // reached the agent's transcript at all. v1.27.1 auto-requeued it;
+      // reverted in v1.27.3 (two overlapping auto-retries corrupted a real
+      // message) - resending is manual-only now, one click at a time.
       const warn = document.createElement("div");
       warn.className = "chat-bubble-failed-notice";
-      warn.textContent = "⚠ Not delivered - queued to retry automatically";
+      warn.textContent = "⚠ Not delivered - click Resend to try again";
       const resendBtn = document.createElement("button");
       resendBtn.textContent = "Resend now";
       resendBtn.addEventListener("click", () => {
