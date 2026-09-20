@@ -1650,7 +1650,25 @@ function scheduleRebuildChatView(agentPath) {
 // re-render.
 const CHAT_VIEW_STALE_POLL_MS = 4000;
 setInterval(() => {
-  if (activeAgentPath && !rawTerminalMode) rebuildChatView(activeAgentPath);
+  if (!activeAgentPath || rawTerminalMode) return;
+  // 2026-09-20: this poll's own implicit assumption - a terminal/session
+  // object always exists for the active agent - can silently stop holding.
+  // Confirmed live: reloadAgentSessionView() (Restart Session's own cleanup)
+  // deletes the terminals-map entry outright and relies entirely on the
+  // selectAgent() call right after it to recreate one via showTerminalFor();
+  // if that recreation is ever skipped or a later bug removes the entry some
+  // other way, rebuildChatView()'s own `if (!session) return` makes THIS
+  // poll a silent, permanent no-op from then on - looking exactly like a
+  // frozen chat view (confirmed: 90+ seconds stale, self-fixed the instant
+  // Iddo switched agents and back, which recreates the session via
+  // selectAgent -> showTerminalFor). Self-heal instead of quietly assuming
+  // the session still exists.
+  if (!terminals.get(activeAgentPath)) {
+    const agent = agents.find((a) => a.path === activeAgentPath);
+    if (agent) showTerminalFor(agent);
+    return; // let the freshly (re)created session's own activity drive the next real rebuild
+  }
+  rebuildChatView(activeAgentPath);
 }, CHAT_VIEW_STALE_POLL_MS);
 
 // Raw terminal is the fallback/advanced view for anything that genuinely
