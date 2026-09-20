@@ -311,7 +311,7 @@ function buildGroupHeader(group) {
 
 function renderAgentItem(agent, groupId) {
   const item = document.createElement("div");
-  item.className = "agent-item" + (agent.path === activeAgentPath ? " active" : "");
+  item.className = "agent-item" + (agent.path === activeAgentPath ? " active" : "") + (agent.paused ? " agent-item-paused" : "");
   item.draggable = true;
   item.dataset.folderName = agent.folderName;
   item.dataset.groupId = groupId || "";
@@ -322,6 +322,12 @@ function renderAgentItem(agent, groupId) {
   const nameEl = document.createElement("div");
   nameEl.className = "agent-item-name";
   nameEl.textContent = agent.displayName;
+  if (agent.paused) {
+    const pausedBadge = document.createElement("span");
+    pausedBadge.className = "paused-badge";
+    pausedBadge.textContent = "Paused";
+    nameEl.appendChild(pausedBadge);
+  }
   const roleEl = document.createElement("div");
   roleEl.className = "agent-item-role";
   roleEl.textContent = agent.role || agent.status;
@@ -516,6 +522,14 @@ function openAgentItemMenu(agent, buttonEl) {
     menu.appendChild(sep);
   }
 
+  const pauseMenuBtn = document.createElement("button");
+  pauseMenuBtn.textContent = agent.paused ? "Resume" : "Pause";
+  pauseMenuBtn.addEventListener("click", () => {
+    closeAgentItemMenu();
+    toggleAgentPaused(agent);
+  });
+  menu.appendChild(pauseMenuBtn);
+
   const deleteBtn = document.createElement("button");
   deleteBtn.className = "danger-text";
   deleteBtn.textContent = "Delete";
@@ -588,10 +602,49 @@ function openGroupMenu(group, buttonEl) {
   buttonEl.classList.add("open");
 }
 
+// 2026-09-20: the actual "stop an agent" mechanism, shared by the chat
+// header's Pause Agent button and the sidebar item's "⋮" menu, so pausing
+// doesn't require opening the agent's tab first. Persists via set-agent-paused
+// (main.js), which also tears down any live process/pty and, on resume,
+// redispatches it right away rather than waiting for the next keep-alive
+// sweep - see that handler's own comment for why this flag exists at all
+// (the always-on background-agent sweep would otherwise fight a deliberate
+// stop, e.g. a runaway/looping agent, a project on hold, freeing up the
+// machine for something heavy).
+async function toggleAgentPaused(agent) {
+  const wantPaused = !agent.paused;
+  const ok = confirm(
+    wantPaused
+      ? `Pause ${agent.displayName}? Its background process stops immediately, and the always-on keep-alive won't bring it back until you resume it. You can still open its chat tab manually any time.`
+      : `Resume ${agent.displayName}? It's dispatched again in the background right away.`
+  );
+  if (!ok) return;
+  try {
+    const r = await window.api.setAgentPaused(agent.path, wantPaused);
+    agent.paused = !!(r && r.paused);
+  } catch (e) {
+    alert("Failed: " + (e.message || String(e)));
+    return;
+  }
+  renderAgentList();
+  if (activeAgentPath === agent.path) updatePauseButton(agent);
+}
+
+const pauseAgentBtn = document.getElementById("pause-agent-btn");
+function updatePauseButton(agent) {
+  if (!pauseAgentBtn) return;
+  pauseAgentBtn.textContent = agent && agent.paused ? "Resume Agent" : "Pause Agent";
+}
+pauseAgentBtn.addEventListener("click", () => {
+  const agent = agents.find((a) => a.path === activeAgentPath);
+  if (agent) toggleAgentPaused(agent);
+});
+
 function selectAgent(agent) {
   activeAgentPath = agent.path;
   localStorage.setItem("lastSelectedAgentPath", agent.path);
   renderAgentList();
+  updatePauseButton(agent);
 
   emptyStateEl.classList.add("hidden");
   chatViewEl.classList.remove("hidden");

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("api", {
   listAgents: () => ipcRenderer.invoke("list-agents"),
+  setAgentPaused: (agentPath, paused) => ipcRenderer.invoke("set-agent-paused", { agentPath, paused }),
   listGroups: () => ipcRenderer.invoke("list-groups"),
   saveGroups: (doc) => ipcRenderer.invoke("save-groups", { doc }),
   // Dropped File objects don't carry their real filesystem path directly in a

@@ -102,6 +102,27 @@ function loadAgentConfig(agentDir) {
   return { display_name: path.basename(agentDir), role: "", avatar: null };
 }
 
+// 2026-09-20: added alongside the always-on background-agent sweep in
+// main.js (ensureAllAgentsBackgrounded), which keeps every configured
+// agent's `claude --bg` process dispatched and running at all times so
+// cross-agent SendMessage/ListAgents works without a chat tab ever having
+// been opened. That sweep would otherwise resurrect ANY stopped agent
+// within its own re-check interval - including one Iddo deliberately
+// stopped (a runaway/looping agent, a project on hold, freeing up the
+// machine for something heavy) - since delete-agent was previously the
+// only way to stop a background process at all. `paused` is the escape
+// hatch: the sweep skips (and setPaused actively stops) any agent with
+// this flag set, and only an explicit Resume clears it - opening the
+// agent's chat tab manually still works as normal either way, since
+// start-terminal doesn't consult this flag.
+function setAgentPaused(agentPath, paused) {
+  if (!fs.existsSync(agentPath)) throw new Error("Agent folder not found");
+  const config = loadAgentConfig(agentPath);
+  config.paused = !!paused;
+  withFsRetry(() => fs.writeFileSync(path.join(agentPath, CONFIG_FILENAME), JSON.stringify(config, null, 2), "utf-8"));
+  return config.paused;
+}
+
 function avatarDataUrl(agentDir, config) {
   if (!config.avatar) return null;
   const avatarPath = path.join(agentDir, config.avatar);
@@ -158,6 +179,7 @@ function listAgents() {
       tasks: parsed.tasks,
       updated: parsed.updated,
       hasState,
+      paused: !!config.paused,
     };
   });
 }
@@ -253,4 +275,4 @@ function deleteAgent(agentPath) {
   fs.rmSync(resolved, { recursive: true, force: true });
 }
 
-module.exports = { ROOT, listAgents, createAgent, updateAgent, deleteAgent, SESSIONS_DIRNAME };
+module.exports = { ROOT, listAgents, createAgent, updateAgent, deleteAgent, setAgentPaused, SESSIONS_DIRNAME };

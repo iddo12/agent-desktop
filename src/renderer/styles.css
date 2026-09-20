@@ -229,6 +229,8 @@ html, body {
 }
 .agent-item:hover { background: var(--bg-hover); }
 .agent-item.active { background: var(--bg-active); }
+.agent-item-paused { opacity: 0.55; }
+.paused-badge { font-size: 0.68rem; color: #7a1710; background: #fde3e1; border-radius: 4px; padding: 1px 6px; margin-left: 6px; font-weight: 600; }
 
 .avatar {
   width: 36px;
@@ -1756,7 +1758,7 @@ button.danger:not(:disabled):hover { filter: brightness(1.1); }
 .guard-red { background: #fde3e1; color: #7a1710; border-color: #e69a94; }
 .guard-blue { background: #e4eefb; color: #17365f; border-color: #a9c4ea; }
 .guard-green { background: #e3f4e3; color: #1d4a1d; border-color: #a5d3a5; }
-#handoff-reset-btn { -webkit-app-region: no-drag; }
+#handoff-reset-btn, #handoff-all-btn { -webkit-app-region: no-drag; }
 .chat-reset-marker { margin: 18px 0; border-top: 3px solid #d32f2f; padding-top: 6px; }
 .chat-reset-head { color: #d32f2f; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.05em; margin-bottom: 6px; }
 .chat-reset-body { font-size: 0.85rem; color: var(--text); background: #fdf1f0; border-radius: 8px; padding: 8px 12px; }

@@ -4,7 +4,7 @@ const fs = require("fs");
 const https = require("https");
 const { execSync, execFileSync, execFile, spawn } = require("child_process");
 const pty = require("node-pty");
-const { listAgents, createAgent, updateAgent, deleteAgent, ROOT: AGENTS_ROOT } = require("./agents");
+const { listAgents, createAgent, updateAgent, deleteAgent, setAgentPaused, ROOT: AGENTS_ROOT } = require("./agents");
 const { readGroups, writeGroups } = require("./groups");
 const {
   syncArchive,
@@ -792,6 +792,16 @@ if (!gotSingleInstanceLock) {
         logStuckWatchdog(`checkForAuthFailure error: ${e.message}`);
       }
     }, STUCK_CHECK_INTERVAL_MS);
+    // Give the app's own startup (window, statusline, reaper) a moment to
+    // settle before launching a CLI process per configured agent. Respects
+    // the `paused` flag (agents.js setAgentPaused) - see that function's
+    // and this sweep's own comments for why that flag exists.
+    setTimeout(() => {
+      ensureAllAgentsBackgrounded().catch((e) => logStuckWatchdog(`ensureAllAgentsBackgrounded startup error: ${e.message}`));
+    }, 10000);
+    setInterval(() => {
+      ensureAllAgentsBackgrounded().catch((e) => logStuckWatchdog(`ensureAllAgentsBackgrounded interval error: ${e.message}`));
+    }, ENSURE_AGENTS_ALIVE_INTERVAL_MS);
   });
 }
 
@@ -958,6 +968,58 @@ ipcMain.handle("delete-agent", async (event, { agentPath }) => {
   await stopBackgroundAgentForCwd(sessionCwdFor(agentPath));
   await deleteAgentWithRetry(agentPath);
   return { ok: true };
+});
+
+// 2026-09-20: the actual "stop an agent" Iddo asked for, distinct from
+// delete-agent (which also removes the folder) - a real reason to want this
+// short of deleting anything: a runaway/looping agent burning usage, a
+// project on hold, freeing up the machine for something heavy. Persists via
+// agents.js's setAgentPaused() so ensureAllAgentsBackgrounded()'s periodic
+// sweep (elsewhere in this file) skips it and won't resurrect it - without
+// this flag, that sweep would otherwise bring back ANY stopped agent within
+// its own re-check interval, since delete was previously the only way to
+// stop a background process at all. Pausing tears down the live pty (same
+// pattern as delete-agent, just without removing the folder) and stops the
+// underlying `claude --bg` process; resuming immediately re-dispatches it in
+// the background (no pty attach - that only happens if/when the chat tab is
+// actually opened) so it's reachable again right away rather than waiting
+// for the next sweep.
+ipcMain.handle("set-agent-paused", async (event, { agentPath, paused }) => {
+  const newState = setAgentPaused(agentPath, paused);
+  if (newState) {
+    const session = ptySessions.get(agentPath);
+    if (session) {
+      try {
+        clearInterval(session.archiveTimer);
+      } catch (e) {}
+      ptySessions.delete(agentPath);
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        try {
+          session.proc.onExit(finish);
+          session.proc.kill();
+        } catch (e) {
+          finish();
+        }
+        setTimeout(finish, 2000);
+      });
+    }
+    await stopBackgroundAgentForCwd(sessionCwdFor(agentPath));
+  } else {
+    try {
+      const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
+      const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
+      await findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwdFor(agentPath));
+    } catch (e) {
+      logStuckWatchdog(`set-agent-paused resume dispatch failed for ${agentPath}: ${e.message}`);
+    }
+  }
+  return { ok: true, paused: newState };
 });
 
 // A pasted clipboard image (as opposed to a dragged real file) has no
@@ -1437,11 +1499,14 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
 // This does NOT extend the stuck-turn/halted-turn watchdogs above, which key
 // off ptySessions (the attached view) specifically - that remains the
 // documented limitation it always was for an agent whose tab was never
-// opened this run. It also means a background process Iddo explicitly wants
-// stopped (there is no "pause" action, only delete-agent, which stops it via
-// stopBackgroundAgentForCwd) will get silently re-dispatched by the next
-// sweep unless the agent's folder is actually deleted - an intentional
-// tradeoff for "always reachable," flagged here rather than assumed away.
+// opened this run.
+//
+// An "always keep everything alive" sweep would otherwise fight any
+// deliberate stop (a runaway/looping agent, a project on hold, freeing up
+// the machine for something heavy) - resurrecting it within one sweep
+// interval, with delete-agent as the only escape. Fixed by the `paused` flag
+// (agents.js setAgentPaused(), set via the "set-agent-paused" IPC handler
+// above delete-agent): this sweep skips any agent with it set.
 const ENSURE_AGENTS_ALIVE_INTERVAL_MS = 15 * 60 * 1000;
 const ENSURE_AGENTS_ALIVE_STAGGER_MS = 2000; // don't launch every configured agent's CLI process in the same instant
 async function ensureAllAgentsBackgrounded() {
@@ -1455,6 +1520,7 @@ async function ensureAllAgentsBackgrounded() {
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
   for (const agent of agents) {
+    if (agent.paused) continue; // Iddo explicitly stopped this one - see set-agent-paused above
     try {
       const sessionCwd = sessionCwdFor(agent.path);
       const existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
