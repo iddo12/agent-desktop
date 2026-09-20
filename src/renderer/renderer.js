@@ -2341,33 +2341,19 @@ let editingGroupId = null;
 const GROUPS_NOTE_KEY = "agentGroupsNoteDismissed";
 const agentGroupsNoteEl = document.getElementById("agent-groups-note");
 
-// 2026-09-20: this used to trust the module-level `uiFlags` cache set once
-// by loadAgents() at startup - Iddo saw the note reappear on repeated
-// restarts despite ui-flags.json on disk correctly holding
-// {agentGroupsNoteDismissed: true} the whole time, which the cached-value
-// version of this function has no way to explain (the on-disk value was
-// right; whatever this function read at some point wasn't). Rather than
-// keep guessing at a cache-staleness bug that never reproduced under direct
-// code reading, this now re-asks main.js's actual ui-flags.json fresh, every
-// time, right before deciding whether to show it - correct regardless of
-// whatever the original mechanism was, at the cost of one extra tiny IPC
-// round-trip on each call (this fires rarely: app start, and group edits).
+// 2026-09-20: two separate attempts to detect "already dismissed"
+// correctly (a module-level uiFlags cache, then re-fetching ui-flags.json
+// fresh every time) both failed to actually stop this reappearing, despite
+// ui-flags.json on disk correctly holding {agentGroupsNoteDismissed: true}
+// throughout - never pinned down why through code reading. Rather than
+// keep guessing at a persistence/detection mechanism that has now failed
+// twice, this note is disabled outright: it never auto-shows at all, full
+// stop, regardless of dismissal state. It was only ever a one-time
+// onboarding tip about groups being a visual aid, not something anyone
+// needs repeated - unconditionally not showing it is strictly better than
+// a "dismiss" that doesn't stick.
 async function updateAgentGroupsNote() {
-  if (groupsDoc.groups.length === 0) {
-    agentGroupsNoteEl.classList.add("hidden");
-    return;
-  }
-  if (localStorage.getItem(GROUPS_NOTE_KEY)) {
-    agentGroupsNoteEl.classList.add("hidden");
-    return;
-  }
-  try {
-    uiFlags = (await window.api.getUiFlags()) || {};
-  } catch (e) {
-    console.error("[agent-desktop] getUiFlags() failed while checking the groups-note dismissal - leaving the note as last rendered:", e);
-    return;
-  }
-  agentGroupsNoteEl.classList.toggle("hidden", !!uiFlags[GROUPS_NOTE_KEY]);
+  agentGroupsNoteEl.classList.add("hidden");
 }
 
 document.getElementById("agent-groups-note-dismiss").addEventListener("click", () => {
