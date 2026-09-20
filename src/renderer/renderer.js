@@ -2026,12 +2026,6 @@ function refreshMonthlyUsage(monthly) {
 // a while.
 const LONG_BUSY_HINT_MS = 20000;
 
-// See setBusy()'s own comment at its one use below - a real gap between
-// automatically-queued sends (chiefly splitLongMessage()'s pieces), not
-// just "busy flipped false", so Claude Code's CLI doesn't perceive
-// back-to-back pieces as one continuous paste.
-const QUEUE_DRAIN_DELAY_MS = 3000;
-
 function setBusy(agentPath, session, busy) {
   if (busy && !session.busy) session.busyStartedAt = Date.now();
   session.busy = busy;
@@ -2045,24 +2039,21 @@ function setBusy(agentPath, session, busy) {
     // the rest of the queue through this same idle-transition path rather
     // than firing them all at once.
     //
-    // 2026-09-20: the QUEUE_DRAIN_DELAY_MS pause before actually sending it
-    // is new - found live, via the actual stored transcript entries, that
-    // consecutive split-message pieces (splitLongMessage()) sent back to
-    // back the moment the session went idle (as little as ~1.1s apart, for
-    // a quick reply) can get MERGED by Claude Code's own CLI into a single
-    // stored transcript entry with the first piece's own opening text
-    // missing - the same "arrives without its start" corruption as an
-    // unsplit long paste, just spread across what should have been
-    // separate turns. The model itself still answered correctly (its reply
-    // showed it received all the pieces), so this isn't data loss - but it
-    // broke this app's own pendingSent-vs-transcript matching (expects one
-    // block per piece), showing already-delivered pieces as falsely
-    // "Not delivered". Giving the CLI a real gap between pieces, not just
-    // "busy flipped false", is intended to stop it perceiving them as one
-    // continuous burst.
+    // 2026-09-20: briefly tried delaying this by QUEUE_DRAIN_DELAY_MS (see
+    // git history) to stop rapid-fire split-message pieces from getting
+    // merged by Claude Code's CLI - reverted the same session, live: it
+    // caused an actual, worse regression (a queued piece silently never
+    // sent at all - confirmed directly against the transcript, no growth
+    // for 5+ minutes - not just mis-displayed). Root cause of that
+    // regression not confirmed (a bare setTimeout across a page
+    // reload/navigation would explain a silent loss like that, but wasn't
+    // proven), so not worth re-attempting without a more robust mechanism
+    // than an unprotected setTimeout. Back to sending immediately - a false
+    // "Not delivered" display for an already-successful piece is a real but
+    // lesser problem than a piece never being sent at all.
     const next = session.sendQueue.shift();
+    submitToAgent(agentPath, next);
     renderQueue(agentPath);
-    setTimeout(() => submitToAgent(agentPath, next), QUEUE_DRAIN_DELAY_MS);
   }
   if (agentPath === activeAgentPath) {
     updateComposeAvailability();
