@@ -1538,6 +1538,14 @@ async function rebuildChatView(agentPath, opts = {}) {
   // sending" bubble is a worse, more misleading UI state than the bubble
   // just quietly disappearing.
   const now = Date.now();
+  // Deferred until after the filter below finishes and reassigns
+  // session.pendingSent - calling submitToAgent() from inside the filter
+  // callback would push a fresh optimistic entry onto the SAME array
+  // object filter() is still iterating (by reference, before the
+  // reassignment), and that push would then be silently discarded the
+  // instant `session.pendingSent = session.pendingSent.filter(...)` below
+  // replaces the array with filter's own (already-snapshotted) result.
+  const toResendNow = [];
   session.pendingSent = session.pendingSent.filter((pending) => {
     let stillUnmatched = !blocks.some(
       (b) => b.role === "user" && normalizeForMatch(b.lines.join(" ")) === normalizeForMatch(pending.text)
@@ -1569,14 +1577,27 @@ async function rebuildChatView(agentPath, opts = {}) {
     if (now - pending.addedAt >= PENDING_SENT_TIMEOUT_MS) {
       if (!pending.failed) {
         pending.failed = true;
-        session.sendQueue.push(pending.text);
-        renderQueue(agentPath);
         window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+        // setBusy()'s drain only fires at the MOMENT busy flips true->false -
+        // pushing here doesn't trigger it if the session has already been
+        // sitting idle since before this timeout fired (confirmed live: the
+        // very first real test of this fix left a message queued for
+        // several minutes with nothing to drain it - the session was long
+        // since idle by the time the 45s timeout marked it failed). Submit
+        // immediately when idle right now; only actually queue-and-wait when
+        // genuinely still busy.
+        if (session.busy) {
+          session.sendQueue.push(pending.text);
+          renderQueue(agentPath);
+        } else {
+          toResendNow.push(pending.text);
+        }
       }
       return true; // keep it visible as a failed bubble, not silently gone
     }
     return true; // still within the timeout, still legitimately pending
   });
+  for (const text of toResendNow) submitToAgent(agentPath, text);
   renderChatBlocks(blocks, session.pendingSent, { forceBottom: !!opts.forceBottom });
 }
 
