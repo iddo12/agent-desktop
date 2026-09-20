@@ -384,6 +384,45 @@
     }
   }
 
+  // 2026-09-20: the auth-broken banner used to just print `claude auth login`
+  // as text, which fails from a plain PowerShell window on this machine
+  // (claude.cmd is a symlink Windows can't always resolve - memory
+  // claude-cmd-symlink-flakiness) and forced Iddo to hunt down the real
+  // claude.exe path by hand. This button calls guard-trigger-login (main.js),
+  // which reuses the app's own resolveClaudeExecutable() and opens a normal
+  // console window running it - one click instead of a path hunt.
+  function loginButton() {
+    return {
+      label: "Log in now",
+      onClick: async (e) => {
+        const btn = e && e.target;
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "Opening…";
+        }
+        try {
+          const r = await window.api.triggerClaudeLogin();
+          if (btn) btn.textContent = r && r.ok ? "Opened - finish in the browser" : "Failed - see Raw Terminal";
+        } catch (err) {
+          if (btn) btn.textContent = "Failed to open";
+        }
+      },
+    };
+  }
+
+  // Delegates to the real Restart Session button rather than re-implementing
+  // its logic (conversation lookup, the busy-turn confirm dialog, the
+  // switch-conversation IPC call, button state during the restart).
+  function restartButton() {
+    return {
+      label: "Restart Session",
+      onClick: () => {
+        const btn = document.getElementById("restart-session-btn");
+        if (btn) btn.click();
+      },
+    };
+  }
+
   let lastLimit = null;
   function render() {
     try {
@@ -393,10 +432,10 @@
         limitBanner.className = "guard-banner hidden";
       } else if (lastLimit.authBroken) {
         // Global - shown on any agent's tab, even one that hasn't tried and failed yet itself.
-        show(limitBanner, "guard-red", "NOT RESPONDING - Claude login expired for ALL agents (not a usage limit). Open a terminal, run: claude /login  - then Restart Session on each agent.", []);
+        show(limitBanner, "guard-red", "NOT RESPONDING - Claude login expired for ALL agents (not a usage limit).", [loginButton(), restartButton()]);
       } else if (lastLimit.halt && lastLimit.halt.error === "authentication_failed") {
         // Not a usage limit: the CLI's login expired/was signed out, so every prompt fails instantly.
-        show(limitBanner, "guard-red", "NOT RESPONDING - Claude login expired (not a usage limit). Open a terminal, run: claude /login  - then click Restart Session for this agent.", []);
+        show(limitBanner, "guard-red", "NOT RESPONDING - Claude login expired (not a usage limit).", [loginButton(), restartButton()]);
       } else if (lastLimit.halt && lastLimit.halt.resetsAt && Date.now() > lastLimit.halt.resetsAt) {
         // The window this halt was waiting on has already reset (2026-09-20:
         // Trade Show agent showed a red STOPPED banner hours after its 5h

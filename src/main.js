@@ -1417,6 +1417,58 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   return match[1];
 }
 
+// --- Always-on background agents (2026-09-20) ------------------------------
+// Iddo's requirement: agents must be able to reach each other via
+// SendMessage/ListAgents even when one hasn't been opened in Agent Desktop
+// for a day or two - a hard need for the planned COO agent, which will need
+// to reach every other agent on its own initiative, not only ones with a
+// chat tab already open. Confirmed cross-session messaging discovers a "bg"
+// peer purely by whether a `claude --bg` process is currently running for
+// that cwd - NOT by whether Agent Desktop has an attached pty/chat-view for
+// it (~/.claude/daemon/pty-pids/*.pid and daemon.log's "bg spawned"/"bg
+// settled" lines are written by the CLI's own shared daemon for every --bg
+// dispatch, independent of any attach). So the fix is simply making sure
+// every configured agent's `claude --bg` process is dispatched and stays
+// alive - deliberately NOT also attaching an interactive pty
+// (startTerminalSession's job, only when a chat tab is actually opened), so
+// this stays cheap: one background CLI process per agent, no ConPTY/terminal
+// overhead until Iddo opens it.
+//
+// This does NOT extend the stuck-turn/halted-turn watchdogs above, which key
+// off ptySessions (the attached view) specifically - that remains the
+// documented limitation it always was for an agent whose tab was never
+// opened this run. It also means a background process Iddo explicitly wants
+// stopped (there is no "pause" action, only delete-agent, which stops it via
+// stopBackgroundAgentForCwd) will get silently re-dispatched by the next
+// sweep unless the agent's folder is actually deleted - an intentional
+// tradeoff for "always reachable," flagged here rather than assumed away.
+const ENSURE_AGENTS_ALIVE_INTERVAL_MS = 15 * 60 * 1000;
+const ENSURE_AGENTS_ALIVE_STAGGER_MS = 2000; // don't launch every configured agent's CLI process in the same instant
+async function ensureAllAgentsBackgrounded() {
+  let agents;
+  try {
+    agents = listAgents();
+  } catch (e) {
+    logStuckWatchdog(`ensureAllAgentsBackgrounded: listAgents failed: ${e.message}`);
+    return;
+  }
+  const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
+  const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
+  for (const agent of agents) {
+    try {
+      const sessionCwd = sessionCwdFor(agent.path);
+      const existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+      if (existing) continue;
+      const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+      logStuckWatchdog(`ensureAllAgentsBackgrounded: dispatched ${agent.folderName} -> ${id}`);
+    } catch (e) {
+      // One agent's own hiccup must never block the rest of the sweep.
+      logStuckWatchdog(`ensureAllAgentsBackgrounded: ${agent.folderName} failed: ${e.message}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, ENSURE_AGENTS_ALIVE_STAGGER_MS));
+  }
+}
+
 // Returns { id, freshlyDispatched } rather than a bare id - startTerminalSession
 // uses freshlyDispatched to know whether this is a brand-new bg process (needs
 // registerRemoteControl(), below) or one it's simply reattaching to (already
@@ -2375,6 +2427,7 @@ try {
     sessionCwdFor,
     archive: require("./archive"),
     log: (line) => logStuckWatchdog(line),
+    resolveClaudeExecutable,
   });
 } catch (e) {
   console.error("guards-main failed to load:", e);

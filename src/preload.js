@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("api", {
   archiveHandoff: (agentPath) => ipcRenderer.invoke("guard-archive-handoff", { agentPath }),
   transcriptHas: (agentPath, needle) => ipcRenderer.invoke("guard-transcript-has", { agentPath, needle }),
   getLimitStatus: (agentPath) => ipcRenderer.invoke("guard-limit-status", { agentPath }),
+  triggerClaudeLogin: () => ipcRenderer.invoke("guard-trigger-login"),
 
   getUiFlags: () => ipcRenderer.invoke("ui-flags-get"),
   setUiFlag: (key, value) => ipcRenderer.invoke("ui-flag-set", { key, value }),

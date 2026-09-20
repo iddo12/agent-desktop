@@ -17,8 +17,35 @@ const path = require("path");
 const THRESHOLDS = [80, 90, 95];
 const POLL_MS = 60 * 1000;
 
-function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, log }) {
+function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, log, resolveClaudeExecutable }) {
   const say = typeof log === "function" ? log : () => {};
+
+  // 2026-09-20 follow-up: the auth-broken banner used to just print
+  // `claude auth login` as text - which then fails from a plain PowerShell
+  // window on this machine (claude.cmd is a symlink Windows can't always
+  // resolve, see memory claude-cmd-symlink-flakiness), forcing Iddo to hunt
+  // down the real claude.exe path by hand every time. This button reuses
+  // main.js's own resolveClaudeExecutable() (the same lookup that already
+  // handles that symlink) and opens a normal, visible console window running
+  // it - not a fully hidden spawn - since the login flow's own behavior
+  // (does it need a keypress after the browser step completes?) isn't
+  // something to gamble on hiding from view.
+  ipcMain.handle("guard-trigger-login", () => {
+    try {
+      const claudeExe = typeof resolveClaudeExecutable === "function" ? resolveClaudeExecutable() : "claude";
+      const child = require("child_process").spawn("cmd.exe", ["/c", "start", '""', `"${claudeExe}"`, "auth", "login"], {
+        detached: true,
+        stdio: "ignore",
+        windowsVerbatimArguments: true,
+      });
+      child.unref();
+      say(`guard-trigger-login: launched ${claudeExe} auth login in a new console window`);
+      return { ok: true };
+    } catch (e) {
+      say(`guard-trigger-login failed: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  });
 
   ipcMain.handle("guard-handoff-info", (event, { agentPath }) => {
     try {
