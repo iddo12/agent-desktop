@@ -213,6 +213,154 @@
   }
   setInterval(tickResume, 2000);
 
+  // ------------------------------------------------------------ fleet handoff (v1.25.0)
+  // "Handoff all": runs the same per-agent flow (startFlow) over every agent above the context
+  // threshold, ONE AT A TIME, biggest first, so nobody has to click through 15 agents. It opens each
+  // agent (selectAgent) because the flow needs the agent's terminal session; the view follows the run
+  // and returns to the agent you were on. Busy agents are waited for (2 min) then skipped; the run
+  // stops early if the 5-hour window is >= 90% or the weekly one >= 97% (each handoff costs usage).
+  const allBanner = el("guard-all-banner");
+  chatView.insertBefore(allBanner, limitBanner);
+  let allRun = null; // { queue:[{agent,tokens}], results:[{name,status}], current, cancelled, finished, originalPath }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const allBtn = document.createElement("button");
+  allBtn.id = "handoff-all-btn";
+  allBtn.textContent = "Handoff all";
+  allBtn.title = "Run the handoff & reset for every agent whose conversation is over " + Math.round(CONTEXT_WARN_TOKENS / 1000) + "K tokens, one at a time, biggest first";
+  if (resetBtn && resetBtn.parentNode) resetBtn.parentNode.insertBefore(allBtn, resetBtn);
+  allBtn.addEventListener("click", () => startAll());
+
+  function renderAll() {
+    if (!allRun) {
+      allBanner.className = "guard-banner hidden";
+      return;
+    }
+    const r = allRun;
+    const done = r.results.length;
+    if (!r.finished) {
+      show(
+        allBanner,
+        "guard-blue",
+        "Handoff all: " + done + " of " + r.queue.length + " done" + (r.current ? " - working on " + r.current : "") + ". The view switches between agents while this runs.",
+        [{ label: "Cancel", onClick: () => { r.cancelled = true; renderAll(); } }]
+      );
+      return;
+    }
+    const failed = r.results.filter((x) => /^(FAILED|timed out|stopped)/.test(x.status)).length;
+    const lines = r.results.map((x) => x.name + ": " + x.status).join(" | ");
+    const notRun = r.queue.length - done;
+    show(
+      allBanner,
+      failed || notRun ? "guard-amber" : "guard-green",
+      "Handoff all finished. " + lines + (notRun > 0 ? " | " + notRun + " not started" + (r.cancelled ? " (cancelled)" : "") : ""),
+      [{ label: "Dismiss", onClick: () => { allRun = null; renderAll(); } }]
+    );
+  }
+
+  async function startAll() {
+    if (allRun && !allRun.finished) return;
+    const cands = [];
+    for (const a of agents) {
+      try {
+        const u = await window.api.getContextUsage(a.path);
+        let t = u && typeof u.contextTokens === "number" ? u.contextTokens : 0;
+        if (t && window.guardUsageIsStale(a.path, u)) t = 0;
+        if (t >= CONTEXT_WARN_TOKENS) cands.push({ agent: a, tokens: t });
+      } catch (e) {}
+    }
+    cands.sort((x, y) => y.tokens - x.tokens);
+    if (!cands.length) {
+      alert("No agent is above " + Math.round(CONTEXT_WARN_TOKENS / 1000) + "K tokens of context - nothing to hand off.");
+      return;
+    }
+    const list = cands.map((c) => "  " + c.agent.displayName + " - " + Math.round(c.tokens / 1000) + "K tokens").join("\n");
+    if (
+      !confirm(
+        "Hand off " + cands.length + " agent(s), one at a time, biggest first?\n\n" + list +
+          "\n\nEach agent saves its lessons + a handoff file, then gets a fresh session. The view will switch between agents while this runs (it returns to your current agent at the end). Busy agents are skipped."
+      )
+    )
+      return;
+    allRun = { queue: cands, results: [], current: null, cancelled: false, finished: false, originalPath: activeAgentPath };
+    renderAll();
+    runAll();
+  }
+
+  async function runAll() {
+    const run = allRun;
+    try {
+      for (const c of run.queue) {
+        if (run.cancelled) break;
+        const name = c.agent.displayName;
+        run.current = name;
+        renderAll();
+        const lim = await window.api.getLimitStatus(c.agent.path).catch(() => null);
+        const five = lim && lim.fiveHour && lim.fiveHour.usedPct;
+        const week = lim && lim.sevenDay && lim.sevenDay.usedPct;
+        if (five >= 90 || week >= 97) {
+          run.results.push({ name, status: "stopped - usage window at " + Math.round(Math.max(five || 0, week || 0)) + "% (each handoff costs usage)" });
+          break;
+        }
+        let outcome;
+        try {
+          outcome = await handoffOne(c.agent, run);
+        } catch (e) {
+          outcome = { status: "FAILED: " + e.message };
+        }
+        run.results.push({ name, status: outcome.status });
+      }
+    } finally {
+      run.finished = true;
+      run.current = null;
+      try {
+        if (run.originalPath && run.originalPath !== activeAgentPath) {
+          const back = agents.find((a) => a.path === run.originalPath);
+          if (back) selectAgent(back);
+        }
+      } catch (e) {}
+      renderAll();
+    }
+  }
+
+  async function handoffOne(agent, run) {
+    const ap = agent.path;
+    if (flows.has(ap)) return { status: "skipped (a handoff is already running)" };
+    selectAgent(agent); // opens/attaches it if it was never opened this run
+    const t0 = Date.now();
+    while (Date.now() - t0 < 60000) {
+      const s0 = terminals.get(ap);
+      if (s0 && s0.started && Date.now() - t0 > 6000) break;
+      if (run.cancelled) return { status: "cancelled" };
+      await sleep(1000);
+    }
+    const s = terminals.get(ap);
+    if (!s || !s.started) return { status: "skipped (could not attach)" };
+    const t1 = Date.now();
+    while ((s.busy || s.transcriptWorking) && Date.now() - t1 < 120000) {
+      if (run.cancelled) return { status: "cancelled" };
+      await sleep(2000);
+    }
+    if (s.busy || s.transcriptWorking) return { status: "skipped (busy)" };
+    await startFlow(ap, false);
+    const t2 = Date.now();
+    while (Date.now() - t2 < 25 * 60 * 1000) {
+      if (run.cancelled) return { status: "cancelled during its handoff (that one keeps running)" };
+      const f = flows.get(ap);
+      if (!f || f.phase === "done") return { status: "done" };
+      if (f.phase === "failed") {
+        const err = f.error || "failed";
+        clearInterval(f.timer);
+        flows.delete(ap);
+        pendingResume.delete(ap);
+        render();
+        return { status: "FAILED: " + err };
+      }
+      await sleep(2000);
+    }
+    return { status: "timed out waiting for it" };
+  }
+
   function fmtReset(sec) {
     if (!sec) return "";
     const d = new Date(sec > 1e12 ? sec : sec * 1000);
@@ -243,8 +391,21 @@
       // --- limit banner
       if (!ap || !lastLimit) {
         limitBanner.className = "guard-banner hidden";
+      } else if (lastLimit.authBroken) {
+        // Global - shown on any agent's tab, even one that hasn't tried and failed yet itself.
+        show(limitBanner, "guard-red", "NOT RESPONDING - Claude login expired for ALL agents (not a usage limit). Open a terminal, run: claude /login  - then Restart Session on each agent.", []);
+      } else if (lastLimit.halt && lastLimit.halt.error === "authentication_failed") {
+        // Not a usage limit: the CLI's login expired/was signed out, so every prompt fails instantly.
+        show(limitBanner, "guard-red", "NOT RESPONDING - Claude login expired (not a usage limit). Open a terminal, run: claude /login  - then click Restart Session for this agent.", []);
+      } else if (lastLimit.halt && lastLimit.halt.resetsAt && Date.now() > lastLimit.halt.resetsAt) {
+        // The window this halt was waiting on has already reset (2026-09-20:
+        // Trade Show agent showed a red STOPPED banner hours after its 5h
+        // window rolled over, because the halt message stays the last
+        // transcript entry until the agent is next prompted). Not stopped any
+        // more - just idle; say so instead of alarming.
+        show(limitBanner, "guard-amber", "This agent hit a usage limit earlier, but that window has since reset - it is idle, not blocked. Send any message (or \"continue\") to resume.", []);
       } else if (lastLimit.halt) {
-        const t = lastLimit.halt.resetsAt ? " - resets around " + new Date(lastLimit.halt.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + ", then this agent auto-continues" : "";
+        const t =lastLimit.halt.resetsAt ? " - resets around " + new Date(lastLimit.halt.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + ", then this agent auto-continues" : "";
         show(limitBanner, "guard-red", "STOPPED - Claude " + (lastLimit.halt.rateLimitType || "usage") + " limit reached" + t, []);
       } else {
         const parts = [];

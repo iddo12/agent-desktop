@@ -76,12 +76,34 @@ function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, lo
     }
   });
 
+  // 2026-09-20 incident: the shared ~/.claude/.credentials.json OAuth login
+  // silently expired overnight (the CLI's own background daemon logged
+  // "proactive refresh failed, signalling re-auth required" then just quietly
+  // polled the keychain instead of surfacing anything). Every agent then
+  // failed EVERY turn instantly with authentication_failed, which the old
+  // code lumped in with "usage limit reached" - actively misleading, since
+  // the real fix (re-login) is nothing like waiting out a rate limit.
+  // Checked here (not just per-agent halt detection) so the banner shows on
+  // ANY agent tab even one that hasn't tried and failed yet itself.
+  function isAuthBroken() {
+    try {
+      const raw = fs.readFileSync(path.join(require("os").homedir(), ".claude", ".credentials.json"), "utf-8");
+      const oauth = JSON.parse(raw).claudeAiOauth;
+      return !oauth || !oauth.accessToken || !oauth.refreshToken;
+    } catch (e) {
+      return false; // file missing/unreadable isn't this signature - don't false-alarm
+    }
+  }
+
   ipcMain.handle("guard-limit-status", (event, { agentPath }) => {
-    const out = { halt: null, fiveHour: null, sevenDay: null };
+    const out = { halt: null, fiveHour: null, sevenDay: null, authBroken: false };
     try {
       const c = archive.getConfirmedRateLimits();
       out.fiveHour = c.fiveHour;
       out.sevenDay = c.sevenDay;
+    } catch (e) {}
+    try {
+      out.authBroken = isAuthBroken();
     } catch (e) {}
     try {
       if (agentPath) out.halt = archive.getHaltInfo(sessionCwdFor(agentPath));

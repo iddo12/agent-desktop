@@ -785,6 +785,13 @@ if (!gotSingleInstanceLock) {
     setInterval(() => {
       checkForHaltedTurns().catch((e) => logStuckWatchdog(`checkForHaltedTurns error: ${e.message}`));
     }, STUCK_CHECK_INTERVAL_MS);
+    setInterval(() => {
+      try {
+        checkForAuthFailure();
+      } catch (e) {
+        logStuckWatchdog(`checkForAuthFailure error: ${e.message}`);
+      }
+    }, STUCK_CHECK_INTERVAL_MS);
   });
 }
 
@@ -1605,6 +1612,73 @@ const REAPER_INTERVAL_MS = 30 * 60 * 1000;
 // is a plain fs.statSync, no JSON parsing. Safe to run every 30s even with
 // several agents open.
 const STUCK_CHECK_INTERVAL_MS = 30 * 1000;
+
+// --- Global auth-failure watchdog (2026-09-20) -----------------------------
+// Root cause of the incident this fixes: the CLI's own shared background
+// daemon proactively refreshes the OAuth login on a self-scheduled timer
+// (see ~/.claude/daemon.log: repeated "auth: proactive refresh succeeded").
+// Overnight, one such refresh genuinely failed ("proactive refresh failed,
+// signalling re-auth required") - the daemon has no way to reach a human, so
+// it just wrote the login out as empty tokens and quietly polled the OS
+// keychain every 30s waiting for someone to run `claude auth login`, forever
+// if nobody happened to notice. Every claude --bg agent then failed EVERY
+// turn instantly with authentication_failed - the Trade Show agent sat like
+// that for ~7 hours until Iddo noticed it wasn't responding.
+// checkForHaltedTurns() (below) only ever notices this via a given agent's
+// OWN transcript, and only for agents already attached in ptySessions this
+// run - so an agent that never tried a message, or was never opened this
+// run, gave zero signal. This check is independent of both: it reads the
+// shared credentials file directly on the same 30s timer, so it fires within
+// seconds of the break no matter which (if any) agent tab is open, and
+// re-notifies periodically (not every 30s - that would be pure noise) for as
+// long as it stays broken, since a single dismissed toast is easy to miss.
+const AUTH_RENOTIFY_INTERVAL_MS = 15 * 60 * 1000;
+let authWasBroken = false;
+let lastAuthNotifiedAt = 0;
+
+function isCredentialsFileBroken() {
+  try {
+    const credPath = path.join(require("os").homedir(), ".claude", ".credentials.json");
+    const oauth = JSON.parse(fs.readFileSync(credPath, "utf-8")).claudeAiOauth;
+    // Confirmed broken-state signature from the real incident: accessToken
+    // and refreshToken both wiped to "", expiresAt reset to 0.
+    return !oauth || !oauth.accessToken || !oauth.refreshToken;
+  } catch (e) {
+    return false; // missing/unreadable file isn't this signature - don't false-alarm
+  }
+}
+
+function checkForAuthFailure() {
+  const broken = isCredentialsFileBroken();
+  if (!broken) {
+    if (authWasBroken) logStuckWatchdog("auth: credentials recovered - login restored");
+    authWasBroken = false;
+    return;
+  }
+  const now = Date.now();
+  if (authWasBroken && now - lastAuthNotifiedAt < AUTH_RENOTIFY_INTERVAL_MS) return;
+  authWasBroken = true;
+  lastAuthNotifiedAt = now;
+  logStuckWatchdog("auth: credentials.json is in the logged-out state - every agent will fail instantly until re-login");
+  try {
+    if (Notification.isSupported()) {
+      const n = new Notification({
+        title: "Claude Code login expired - ALL agents are down",
+        body: "Not a usage limit. Run `claude auth login` from a terminal (or the claude.exe path if `claude` isn't on PATH), then Restart Session on each agent.",
+      });
+      n.on("click", () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+        }
+      });
+      n.show();
+    }
+  } catch (e) {
+    /* a notification failure must never break the watchdog itself */
+  }
+}
 // How long a turn can show zero new transcript bytes, while confirmed
 // "working" AND confirmed alive, before it's treated as stuck rather than
 // just a genuinely slow single tool call or thinking step. Tuned against
@@ -1803,6 +1877,15 @@ const haltTracking = new Map();
 
 function notifyHalt(agentPath, halt) {
   const agentName = path.basename(agentPath);
+  if (halt.error === "authentication_failed") {
+    try {
+      if (Notification.isSupported()) new Notification({ title: `${agentName}: Claude login expired`, body: "Not a usage limit. Run `claude /login` in a terminal, then Restart Session." }).show();
+    } catch (e) {}
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("terminal-data", { agentPath, data: "\r\n\x1b[31m[Agent Desktop: this session's Claude login expired (authentication_failed) - NOT a usage limit. Run `claude /login` in a terminal, then Restart Session.]\x1b[0m\r\n\r\n" });
+    }
+    return;
+  }
   const resetTime = halt.resetsAt ? new Date(halt.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null;
   const resetText = resetTime ? `auto-resumes around ${resetTime}` : "no reset time reported - will need a manual message";
 
