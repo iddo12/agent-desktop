@@ -1440,11 +1440,20 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
         const idx = session.sendQueue.indexOf(pending.text);
         if (idx !== -1) session.sendQueue.splice(idx, 1);
         renderQueue(activeAgentPath);
+        // Split before resubmitting - a failed message that was long enough
+        // to trip the delivery bug in the first place would just fail the
+        // same way again unsplit (see splitLongMessage()'s own comment).
+        const resendPieces = splitLongMessage(pending.text, MESSAGE_SPLIT_THRESHOLD);
         if (session.busy) {
-          session.sendQueue.unshift(pending.text);
+          session.sendQueue.unshift(...resendPieces);
           renderQueue(activeAgentPath);
         } else {
-          submitToAgent(activeAgentPath, pending.text);
+          const [first, ...rest] = resendPieces;
+          if (rest.length) {
+            session.sendQueue.unshift(...rest);
+            renderQueue(activeAgentPath);
+          }
+          submitToAgent(activeAgentPath, first);
         }
       });
       warn.appendChild(resendBtn);
@@ -2864,6 +2873,49 @@ function submitToAgent(agentPath, text) {
   setTimeout(() => window.api.sendInput(agentPath, "\r"), 80);
 }
 
+// 2026-09-20: root cause of the long-message delivery bug narrowed down
+// further today - chunking the raw pty write (v1.28.0) did NOT fix it, and
+// sent-messages.jsonl proves the full correct text was already reaching
+// session.proc.write() every time regardless, so the corruption is
+// downstream of anything this app writes. Checked the actual length
+// distribution of everything sent to one agent today: every message under
+// ~1800 chars landed fine; every one at 2420+ chars either vanished
+// entirely or came back to the model garbled/missing its own start
+// (confirmed from the AGENT's own reply noticing missing content, not just
+// a transcript-file quirk - so whatever's truncating it happens before the
+// model ever sees the full text, likely a fixed-size input buffer inside
+// Claude Code's own interactive text widget, not anything Agent Desktop or
+// node-pty controls). Rather than keep chasing that from the write side,
+// this splits anything long into several separate, safely-sized turns
+// BEFORE it's ever sent - exactly what the agent itself had already been
+// telling Iddo to do by hand ("send it in a few short pieces"), just
+// automatic. Each piece is prefixed with a part marker so the receiving
+// agent knows to wait for the rest before replying in full.
+const MESSAGE_SPLIT_THRESHOLD = 1200; // comfortably under the smallest confirmed failure (2420 chars)
+function splitLongMessage(text, maxLen) {
+  if (text.length <= maxLen) return [text];
+  const pieces = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    const window = remaining.slice(0, maxLen);
+    // Prefer a natural break (paragraph, then line, then sentence, then
+    // word) as long as it's not so early it'd make a tiny useless piece;
+    // otherwise just hard-cut at maxLen rather than search forever.
+    let cut = window.lastIndexOf("\n\n");
+    if (cut < maxLen * 0.5) cut = window.lastIndexOf("\n");
+    if (cut < maxLen * 0.5) cut = window.lastIndexOf(". ");
+    if (cut < maxLen * 0.5) cut = window.lastIndexOf(" ");
+    if (cut < 1) cut = maxLen;
+    pieces.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+  if (remaining) pieces.push(remaining);
+  return pieces.map(
+    (p, i) =>
+      `[Message ${i + 1}/${pieces.length} - ${i + 1 < pieces.length ? "more follows, please wait for the rest before replying" : "end of message"}]\n${p}`
+  );
+}
+
 function sendChatInput() {
   const text = chatInputEl.value;
   const attachmentText = pendingAttachments.map((a) => `"${a.path}"`).join(" ");
@@ -2883,6 +2935,7 @@ function sendChatInput() {
   // write "here's a file" then start a new line for the actual message.
   const combined = [attachmentText, text].filter(Boolean).join("\n");
   if (!combined.trim() || !activeAgentPath) return;
+  const pieces = splitLongMessage(combined, MESSAGE_SPLIT_THRESHOLD);
 
   const session = terminals.get(activeAgentPath);
   // !session.started covers a real, confirmed-live bug: window.api.startTerminal()
@@ -2902,10 +2955,24 @@ function sendChatInput() {
     // Stay typeable at all times rather than blocking - queue it instead;
     // setBusy() sends it automatically once the agent's actually free, and
     // showTerminalFor()'s startTerminal().then() does the same once a
-    // freshly-opened agent's session has actually started.
-    session.sendQueue.push(combined);
+    // freshly-opened agent's session has actually started. Multiple pieces
+    // queue in order and drain one at a time exactly like any other queued
+    // message - no different from a person typing several messages while
+    // the agent is busy.
+    for (const piece of pieces) session.sendQueue.push(piece);
     renderQueue(activeAgentPath);
+  } else if (session) {
+    // Submit the first piece now; queue the rest so they go out one at a
+    // time as each prior one's turn actually completes (submitToAgent alone
+    // can't wait for a reply - the queue's own idle-drain does that part).
+    const [first, ...rest] = pieces;
+    for (const piece of rest) session.sendQueue.push(piece);
+    if (rest.length) renderQueue(activeAgentPath);
+    submitToAgent(activeAgentPath, first);
   } else {
+    // No session object at all yet (see the !session.started comment above) -
+    // this edge case predates message-splitting and stays as it was: send
+    // the whole thing as one shot through submitToAgent's own fallback path.
     submitToAgent(activeAgentPath, combined);
   }
 
