@@ -2863,7 +2863,21 @@ function submitToAgent(agentPath, text) {
 function sendChatInput() {
   const text = chatInputEl.value;
   const attachmentText = pendingAttachments.map((a) => `"${a.path}"`).join(" ");
-  const combined = [attachmentText, text].filter(Boolean).join(" ");
+  // 2026-09-20: joining with a plain space put a long message's very first
+  // characters right after a quoted image path with nothing but a space
+  // between them - e.g. `"C:\...\pasted-123.png" 1. My long discussion...`.
+  // Confirmed live, repeatedly, across multiple retries and app restarts: a
+  // long multi-paragraph message combined with a pasted-image attachment
+  // this way never reached the transcript at all, or arrived missing its
+  // own first characters ("Your message arrived without its start") - Iddo
+  // lost real content to this twice. Root cause is inside Claude Code's own
+  // CLI input handling (out of this app's control), not confirmed further
+  // than that, but a newline instead of a space - putting the attachment
+  // reference unambiguously on its own line rather than run into the start
+  // of the message - is a low-risk change that gives the CLI a much less
+  // ambiguous boundary to parse, and matches how a person would naturally
+  // write "here's a file" then start a new line for the actual message.
+  const combined = [attachmentText, text].filter(Boolean).join("\n");
   if (!combined.trim() || !activeAgentPath) return;
 
   const session = terminals.get(activeAgentPath);
