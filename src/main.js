@@ -2371,8 +2371,11 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     toSend.forEach((data, i) => {
       // Still staggered, not blasted as one synchronous burst - see
       // submitToAgent() in renderer.js for why a composed message and its
-      // trailing "\r" must land as two separately-timed writes.
-      setTimeout(() => proc.write(data), i * 80);
+      // trailing "\r" must land as two separately-timed writes. Each
+      // individual item is itself now chunked if long - see
+      // writeToPtyChunked()'s own comment for why a large single write can
+      // arrive at the CLI garbled or truncated.
+      setTimeout(() => writeToPtyChunked(proc, agentPath, data), i * 80);
     });
   }
 
@@ -2709,12 +2712,48 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
     session.pendingInput.push(data);
     return;
   }
-  try {
-    session.proc.write(data);
-  } catch (e) {
-    handlePtyExit(agentPath);
-  }
+  writeToPtyChunked(session.proc, agentPath, data);
 });
+
+// 2026-09-20: root-caused a long-running "long messages arrive garbled or
+// truncated" report by checking sent-messages.jsonl (logSentInput, above) -
+// the FULL, correct text was already being handed to this handler every
+// single time, byte for byte, confirmed on repeated failing attempts. So
+// the corruption was never in this app's own code up to this point; it was
+// happening downstream of one single large synchronous session.proc.write()
+// call, somewhere in node-pty's ConPTY layer or in Claude Code's own stdin
+// reading on the other end of the pipe - a large one-shot burst (over
+// 2KB in the confirmed failures) apparently doesn't survive intact.
+// Mitigation: write it in small chunks with a short delay between them
+// instead of one synchronous call, closer to how real typing (or a
+// well-behaved paste) actually arrives - short inputs are unaffected
+// (single chunk, immediate, byte-for-byte the same as before).
+const PTY_WRITE_CHUNK_SIZE = 200;
+const PTY_WRITE_CHUNK_DELAY_MS = 20;
+function writeToPtyChunked(proc, agentPath, data) {
+  if (typeof data !== "string" || data.length <= PTY_WRITE_CHUNK_SIZE) {
+    try {
+      proc.write(data);
+    } catch (e) {
+      handlePtyExit(agentPath);
+    }
+    return;
+  }
+  let i = 0;
+  const sendNextChunk = () => {
+    if (i >= data.length) return;
+    const chunk = data.slice(i, i + PTY_WRITE_CHUNK_SIZE);
+    i += PTY_WRITE_CHUNK_SIZE;
+    try {
+      proc.write(chunk);
+    } catch (e) {
+      handlePtyExit(agentPath);
+      return; // process is gone - no point scheduling more chunks against it
+    }
+    if (i < data.length) setTimeout(sendNextChunk, PTY_WRITE_CHUNK_DELAY_MS);
+  };
+  sendNextChunk();
+}
 
 ipcMain.on("terminal-resize", (event, { agentPath, cols, rows }) => {
   const session = ptySessions.get(agentPath);
