@@ -1538,14 +1538,6 @@ async function rebuildChatView(agentPath, opts = {}) {
   // sending" bubble is a worse, more misleading UI state than the bubble
   // just quietly disappearing.
   const now = Date.now();
-  // Deferred until after the filter below finishes and reassigns
-  // session.pendingSent - calling submitToAgent() from inside the filter
-  // callback would push a fresh optimistic entry onto the SAME array
-  // object filter() is still iterating (by reference, before the
-  // reassignment), and that push would then be silently discarded the
-  // instant `session.pendingSent = session.pendingSent.filter(...)` below
-  // replaces the array with filter's own (already-snapshotted) result.
-  const toResendNow = [];
   session.pendingSent = session.pendingSent.filter((pending) => {
     let stillUnmatched = !blocks.some(
       (b) => b.role === "user" && normalizeForMatch(b.lines.join(" ")) === normalizeForMatch(pending.text)
@@ -1571,33 +1563,30 @@ async function rebuildChatView(agentPath, opts = {}) {
     // at all. Iddo lost a long, detailed reply this way with zero warning.
     // Now: past the timeout with no match, treat it as a genuine delivery
     // failure - mark it (kept in the array, not dropped) so it renders with
-    // a warning + Resend instead of disappearing, auto-requeue it once so it
-    // gets retried the next time the session is confirmed idle, and notify
-    // in case Iddo isn't looking at this tab right now.
+    // a warning + Resend instead of disappearing, and notify in case Iddo
+    // isn't looking at this tab right now.
+    //
+    // v1.27.1 had this AUTO-resubmit once when the session looked idle -
+    // reverted the same day, live: two independent failed sends (Iddo
+    // retried by hand while this was also auto-retrying) landed as
+    // overlapping/interleaved submitToAgent() calls, and the resulting raw
+    // pty writes corrupted each other mid-flight - confirmed in the actual
+    // transcript as the same sentence duplicated with garbled characters
+    // in between and the rest cut off. Auto-resubmitting a failed send is
+    // fundamentally unsafe without a hard guarantee that only ONE resend of
+    // ONE message can ever be in flight for a session at a time, which
+    // this app does not have. Manual-only from here: Resend is a real
+    // click, one at a time, by a person who can see whether the last one
+    // already went through before trying again.
     if (now - pending.addedAt >= PENDING_SENT_TIMEOUT_MS) {
       if (!pending.failed) {
         pending.failed = true;
         window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
-        // setBusy()'s drain only fires at the MOMENT busy flips true->false -
-        // pushing here doesn't trigger it if the session has already been
-        // sitting idle since before this timeout fired (confirmed live: the
-        // very first real test of this fix left a message queued for
-        // several minutes with nothing to drain it - the session was long
-        // since idle by the time the 45s timeout marked it failed). Submit
-        // immediately when idle right now; only actually queue-and-wait when
-        // genuinely still busy.
-        if (session.busy) {
-          session.sendQueue.push(pending.text);
-          renderQueue(agentPath);
-        } else {
-          toResendNow.push(pending.text);
-        }
       }
       return true; // keep it visible as a failed bubble, not silently gone
     }
     return true; // still within the timeout, still legitimately pending
   });
-  for (const text of toResendNow) submitToAgent(agentPath, text);
   renderChatBlocks(blocks, session.pendingSent, { forceBottom: !!opts.forceBottom });
 }
 
