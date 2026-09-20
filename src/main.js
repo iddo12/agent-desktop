@@ -1539,10 +1539,32 @@ async function ensureAllAgentsBackgrounded() {
     if (agent.paused) continue; // Iddo explicitly stopped this one - see set-agent-paused above
     try {
       const sessionCwd = sessionCwdFor(agent.path);
-      const existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
-      if (existing) continue;
-      const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
-      logStuckWatchdog(`ensureAllAgentsBackgrounded: dispatched ${agent.folderName} -> ${id}`);
+      let alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+      if (!alive) {
+        const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+        logStuckWatchdog(`ensureAllAgentsBackgrounded: dispatched ${agent.folderName} -> ${id}`);
+        alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd); // re-fetch for its full sessionId, below
+      }
+      // 2026-09-20: Iddo's ask, after the Trade Show agent reported "no
+      // Product Development agent is running" - confirmed live it actually
+      // WAS running the whole time, just under a cross-session name
+      // ("subscription tier migration") that reflected its current
+      // conversation topic, not which configured agent it is. Claude
+      // Code's own SendMessage/ListAgents match by exact name, so a
+      // perfectly live, reachable agent was invisible to a peer searching
+      // for it by role. Pin the cross-session-visible name to the agent's
+      // own folder name every sweep - overwrites whatever topical title the
+      // conversation itself accumulated, deliberately: reliable agent-to-
+      // agent addressability matters more here than a descriptive title
+      // (Iddo already identifies each agent by its own sidebar tab, not by
+      // this name).
+      if (alive && alive.sessionId) {
+        try {
+          setConversationTitle(sessionCwd, alive.sessionId, agent.folderName);
+        } catch (e) {
+          /* non-fatal - a rename failure shouldn't stop the alive-check sweep */
+        }
+      }
     } catch (e) {
       // One agent's own hiccup must never block the rest of the sweep.
       logStuckWatchdog(`ensureAllAgentsBackgrounded: ${agent.folderName} failed: ${e.message}`);
