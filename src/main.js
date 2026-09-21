@@ -19,6 +19,7 @@ const {
   getHaltInfo,
   listConversations,
   setConversationTitle,
+  repinAgentName,
 } = require("./archive");
 const { withFsRetryAsync } = require("./fsRetry");
 
@@ -802,6 +803,7 @@ if (!gotSingleInstanceLock) {
     setInterval(() => {
       ensureAllAgentsBackgrounded().catch((e) => logStuckWatchdog(`ensureAllAgentsBackgrounded interval error: ${e.message}`));
     }, ENSURE_AGENTS_ALIVE_INTERVAL_MS);
+    setInterval(repinAllAgentNames, REPIN_AGENT_NAMES_INTERVAL_MS);
   });
 }
 
@@ -1570,6 +1572,39 @@ async function ensureAllAgentsBackgrounded() {
       logStuckWatchdog(`ensureAllAgentsBackgrounded: ${agent.folderName} failed: ${e.message}`);
     }
     await new Promise((resolve) => setTimeout(resolve, ENSURE_AGENTS_ALIVE_STAGGER_MS));
+  }
+}
+
+// The 15-minute sweep above pins each agent's cross-session name once per
+// pass, but cannot hold it: Claude Code's own auto-namer re-derives a topical
+// name from the conversation and appends a fresh agent-name record whenever
+// the conversation moves on, and the last record wins. That is what made the
+// Product Development Agent invisible to the Trade Show agent on 2026-09-20 -
+// live and reachable the whole time, but listed as "subscription tier
+// migration", so a peer looking for it by role found nothing and silently
+// took its "agent not reachable" fallback path instead of messaging it.
+//
+// This reclaims the name roughly once a minute. It is deliberately cheap and
+// fully synchronous-filesystem: no CLI process, no transcript parsing, one
+// stat per quiet agent per pass (see repinAgentName()'s own comments).
+const REPIN_AGENT_NAMES_INTERVAL_MS = 60 * 1000;
+function repinAllAgentNames() {
+  let agents;
+  try {
+    agents = listAgents();
+  } catch (e) {
+    return; // the alive-sweep logs listAgents failures already; don't double-log every minute
+  }
+  for (const agent of agents) {
+    if (agent.paused) continue; // deliberately stopped - leave its conversation alone
+    try {
+      const result = repinAgentName(sessionCwdFor(agent.path), agent.folderName);
+      if (result) {
+        logStuckWatchdog(`repinAgentNames: ${agent.folderName} renamed back from "${result.from}"`);
+      }
+    } catch (e) {
+      logStuckWatchdog(`repinAgentNames: ${agent.folderName} failed: ${e.message}`);
+    }
   }
 }
 

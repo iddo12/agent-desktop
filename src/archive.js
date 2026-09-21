@@ -1128,6 +1128,106 @@ function setConversationTitle(sessionCwd, sessionId, title) {
   return { ok: true, title: clean };
 }
 
+// --- Keeping an agent's cross-session name pinned (2026-09-21) -------------
+// ensureAllAgentsBackgrounded() pins each live conversation's name to the
+// agent's folder name so peers can find it by role via ListAgents/SendMessage.
+// That alone turned out not to be enough: Claude Code's own auto-namer
+// re-derives a topical name from the conversation and appends a FRESH
+// {"type":"agent-name"} record whenever the conversation moves on, and the
+// LAST such record wins. Confirmed in a live transcript (Product Development
+// Agent, session e9531ff3): the sweep wrote "Product Development Agent" at
+// lines 50-53, and the CLI overwrote it with "subscription tier migration" at
+// line 57 - so a peer searching for the agent by role found nothing, and the
+// Trade Show agent concluded "no Product Development agent is running" and
+// silently fell back to writing a pending-notes file instead of messaging it.
+//
+// A 15-minute sweep can't hold a name against that, so this is a cheap
+// dedicated check meant to run about once a minute. It never spawns a CLI
+// process and never parses a whole transcript: it stats the project dir,
+// reads only the tail of the newest .jsonl, and re-appends the rename records
+// only when the last agent-name actually differs. Files whose size+mtime are
+// unchanged since the previous pass are skipped outright, so a quiet agent
+// costs one stat per minute (the same memoization shape getUsageWindows()
+// needed after it was caught re-parsing 647 MB per call).
+const AGENT_NAME_TAIL_BYTES = 64 * 1024;
+const repinSeen = new Map(); // jsonlPath -> "<size>:<mtimeMs>" last inspected
+
+function readTail(jsonlPath, bytes) {
+  const fd = fs.openSync(jsonlPath, "r");
+  try {
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - bytes);
+    const buf = Buffer.alloc(size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    return buf.toString("utf-8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Returns the chronologically newest .jsonl for this cwd - the conversation
+// `--continue` resumes, i.e. the one a peer's ListAgents actually sees.
+function newestTranscript(sessionCwd) {
+  let best = null;
+  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+    try {
+      const stat = fs.statSync(jsonlPath);
+      if (!best || stat.mtimeMs > best.mtimeMs) best = { jsonlPath, mtimeMs: stat.mtimeMs, size: stat.size };
+    } catch (e) {
+      /* file disappeared between readdir and stat - skip it */
+    }
+  }
+  return best;
+}
+
+// Re-pins the newest conversation's cross-session name to `name` if the CLI
+// has renamed it since. Returns null when nothing needed doing (the common
+// case), otherwise { jsonlPath, from, to }.
+function repinAgentName(sessionCwd, name) {
+  const clean = String(name || "").replace(/[\r\n\t]+/g, " ").trim().slice(0, 200);
+  if (!clean) return null;
+  const newest = newestTranscript(sessionCwd);
+  if (!newest) return null;
+  const stamp = `${newest.size}:${newest.mtimeMs}`;
+  if (repinSeen.get(newest.jsonlPath) === stamp) return null; // untouched since last pass
+  repinSeen.set(newest.jsonlPath, stamp);
+
+  let tail;
+  try {
+    tail = readTail(newest.jsonlPath, AGENT_NAME_TAIL_BYTES);
+  } catch (e) {
+    return null;
+  }
+  // Last occurrence wins, same rule the CLI reads by.
+  let current = null;
+  const re = /"type":"agent-name","agentName":"([^"]*)"/g;
+  let m;
+  while ((m = re.exec(tail)) !== null) current = m[1];
+  // No agent-name in the tail at all means either a brand-new conversation or
+  // one whose only naming records sit further back than the tail window. Both
+  // are safe to (re)pin: an extra identical record is a no-op on read.
+  if (current !== null) {
+    let decoded = current;
+    try {
+      decoded = JSON.parse(`"${current}"`);
+    } catch (e) {
+      /* keep the raw form - only used for the equality check and the log */
+    }
+    if (decoded === clean) return null;
+    current = decoded;
+  }
+  const sessionId = path.basename(newest.jsonlPath, ".jsonl");
+  setConversationTitle(sessionCwd, sessionId, clean);
+  // Our own append just changed size/mtime; re-stamp so the next pass skips it.
+  try {
+    const stat = fs.statSync(newest.jsonlPath);
+    repinSeen.set(newest.jsonlPath, `${stat.size}:${stat.mtimeMs}`);
+  } catch (e) {
+    repinSeen.delete(newest.jsonlPath);
+  }
+  return { jsonlPath: newest.jsonlPath, from: current, to: clean };
+}
+
 module.exports = {
   syncArchive,
   listArchivedDays,
@@ -1144,4 +1244,5 @@ module.exports = {
   lessonsForResume,
   listConversations,
   setConversationTitle,
+  repinAgentName,
 };
