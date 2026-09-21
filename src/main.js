@@ -1600,7 +1600,13 @@ function repinAllAgentNames() {
     try {
       const result = repinAgentName(sessionCwdFor(agent.path), agent.folderName);
       if (result) {
-        logStuckWatchdog(`repinAgentNames: ${agent.folderName} renamed back from "${result.from}"`);
+        // result.from is null when the tail held no agent-name at all (a fresh
+        // conversation, or one whose naming records predate the tail window).
+        logStuckWatchdog(
+          result.from === null
+            ? `repinAgentNames: ${agent.folderName} pinned (no prior name in transcript tail)`
+            : `repinAgentNames: ${agent.folderName} renamed back from "${result.from}"`
+        );
       }
     } catch (e) {
       logStuckWatchdog(`repinAgentNames: ${agent.folderName} failed: ${e.message}`);
