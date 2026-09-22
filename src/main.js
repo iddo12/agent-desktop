@@ -773,6 +773,14 @@ function createWindow() {
                     document.head.appendChild(s);
                     return true; })()`
         );
+        // The JS half of a proposal (restructured header, task panel). Runs
+        // after the CSS so the styles it relies on already exist. It never
+        // reimplements behaviour - it hides the original controls and clicks
+        // them through - so a failure here is cosmetic, not functional.
+        const js = fs.readFileSync(path.join(__dirname, "renderer", "experimental.js"), "utf-8");
+        mainWindow.webContents.executeJavaScript(js).catch((e) =>
+          logStuckWatchdog(`experimental JS failed: ${e.message}`)
+        );
       } catch (e) {
         logStuckWatchdog(`experimental CSS not applied: ${e.message}`);
       }
