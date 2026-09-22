@@ -158,11 +158,18 @@
     "Trade Show Agent - halted on an API error 67 min ago",
     "Product Development - 174K context, needs a handoff",
   ];
+  // Two different facts, and the first draft conflated them: Iddo read
+  // "In flight" as "what the agent is doing right now", when it only showed
+  // how many items were on its list - an agent with six open tasks can be
+  // sitting idle. Both are worth knowing and they answer different questions
+  // ("is anything stalled?" vs "is anyone overloaded?"), so both are shown.
+  // The live half comes from the same session-activity check that drives the
+  // "Working... 13s" indicator; the count comes from the agent's task list.
   const GLOBAL_INFLIGHT = [
-    "Security - 6 open",
-    "Trade Show Agent (IBC) - 4 open",
-    "Product Development Agent - 4 open",
-    "Agent Desktop backlog - 3 open",
+    "Security - working now - 6 on its list",
+    "Trade Show Agent (IBC) - idle - 4 on its list",
+    "Product Development Agent - working now - 4 on its list",
+    "Agent Desktop backlog - not an agent - 3 on the list",
   ];
 
   const AGENT_TASKS = [
@@ -254,7 +261,7 @@
       } else {
         body.appendChild(section("Waiting on you", "Approvals and unplaced tasks, across every agent.", GLOBAL_WAITING, true));
         body.appendChild(section("Needs attention", "Halted, stuck, or out of room - nothing else surfaces these.", GLOBAL_ATTENTION, false));
-        body.appendChild(section("In flight", "Open work per agent.", GLOBAL_INFLIGHT, false));
+        body.appendChild(section("Agents", "What each one is doing now, and how much is on its list.", GLOBAL_INFLIGHT, false));
       }
       const foot = document.createElement("p");
       foot.className = "xp-foot";
