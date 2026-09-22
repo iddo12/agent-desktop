@@ -37,6 +37,8 @@ contextBridge.exposeInMainWorld("api", {
   notifySendFailed: (agentPath, text) => ipcRenderer.invoke("notify-send-failed", { agentPath, text }),
   getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),
   getSessionActivity: (agentPath) => ipcRenderer.invoke("get-session-activity", { agentPath }),
+  getAgentOverview: () => ipcRenderer.invoke("get-agent-overview"),
+  approveTelegramTasks: (ids) => ipcRenderer.invoke("approve-telegram-tasks", { ids }),
   getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),
   archiveHandoff: (agentPath) => ipcRenderer.invoke("guard-archive-handoff", { agentPath }),
   transcriptHas: (agentPath, needle) => ipcRenderer.invoke("guard-transcript-has", { agentPath, needle }),

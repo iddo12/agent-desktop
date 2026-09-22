@@ -23,6 +23,7 @@ const {
 } = require("./archive");
 const { withFsRetryAsync } = require("./fsRetry");
 const testMode = require("./testMode");
+const overview = require("./overview");
 
 // Must run before ANY app.getPath("userData") call, including the module-scope
 // consts further down (UI_FLAGS_PATH, SENT_LOG_PATH, the watchdog logs) - they
@@ -775,10 +776,15 @@ function createWindow() {
   // so the live app cannot pick them up even accidentally. This is what lets a
   // proposed redesign be looked at in the sandbox first and then kept or
   // thrown away - see styles-experimental.css for the current one.
-  if (testMode.TEST_MODE) {
+  // v1.37.0: the header/Tasks-panel experiment graduated to index.html, so
+  // there may be no experiment at all - absent files are the normal case now,
+  // not an error. Drop a new styles-experimental.css / experimental.js into
+  // renderer\ to start the next one.
+  const xpCss = path.join(__dirname, "renderer", "styles-experimental.css");
+  if (testMode.TEST_MODE && fs.existsSync(xpCss)) {
     mainWindow.webContents.on("did-finish-load", () => {
       try {
-        const css = fs.readFileSync(path.join(__dirname, "renderer", "styles-experimental.css"), "utf-8");
+        const css = fs.readFileSync(xpCss, "utf-8");
         // A real <style> element appended to <head>, NOT webContents.insertCSS.
         // insertCSS injects at the user-stylesheet level, which loses to the
         // app's own author styles on equal specificity - confirmed live: the
@@ -797,10 +803,12 @@ function createWindow() {
         // after the CSS so the styles it relies on already exist. It never
         // reimplements behaviour - it hides the original controls and clicks
         // them through - so a failure here is cosmetic, not functional.
-        const js = fs.readFileSync(path.join(__dirname, "renderer", "experimental.js"), "utf-8");
-        mainWindow.webContents.executeJavaScript(js).catch((e) =>
-          logStuckWatchdog(`experimental JS failed: ${e.message}`)
-        );
+        const xpJs = path.join(__dirname, "renderer", "experimental.js");
+        if (fs.existsSync(xpJs)) {
+          mainWindow.webContents.executeJavaScript(fs.readFileSync(xpJs, "utf-8")).catch((e) =>
+            logStuckWatchdog(`experimental JS failed: ${e.message}`)
+          );
+        }
       } catch (e) {
         logStuckWatchdog(`experimental CSS not applied: ${e.message}`);
       }
@@ -2918,6 +2926,10 @@ ipcMain.handle("get-context-usage", (event, { agentPath }) => getLatestUsage(ses
 ipcMain.handle("get-live-transcript", (event, { agentPath }) => getLiveTranscriptBlocks(sessionCwdFor(agentPath)));
 
 ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActivity(sessionCwdFor(agentPath)));
+// Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
+ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor));
+ipcMain.handle("approve-telegram-tasks", (event, { ids }) =>
+  overview.approveTelegramTasks(ids, path.join(AGENTS_ROOT, "Security", "Tools", "TelegramBridge")));
 
 ipcMain.handle("get-usage-windows", () => getUsageWindows());
 

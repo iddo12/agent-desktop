@@ -1,15 +1,9 @@
-/* Sandbox-only UI experiments. NEVER loaded by the live app.
+/* Header controls, Tasks panel and session-state rings (live since v1.37.0).
  *
- * main.js injects this with webContents.insertCSS only when TEST_MODE is set,
- * so a proposed redesign can be looked at in the sandbox and then either
- * folded into styles.css or thrown away, without ever reaching the instance
- * Iddo works in. This is the answer to "I want to see it before we put it on
- * the actual Agent Desktop" - and it is also the cheap version of the code
- * isolation Windows Sandbox would give, for the one kind of change (styling)
- * where seeing it matters more than running it in a separate OS.
- *
- * Keep this file additive and override-only. It must never be something the
- * app depends on to look correct, because the live app never loads it.
+ * Began as a sandbox-only experiment injected by main.js in TEST_MODE, so
+ * Iddo could see it before it reached his instance; linked from index.html
+ * since it graduated. Kept as its own file, loaded after styles.css, so the
+ * whole redesign still reverts by removing one <link>.
  *
  * ---------------------------------------------------------------------------
  * CURRENT EXPERIMENT (2026-09-22): header control system.
@@ -375,3 +369,8 @@ body.xp-header .xp-controls { margin-left: 0; }
 .xp-sw-working { background: var(--state-working); }
 .xp-sw-ready { background: var(--state-ready); }
 .xp-sw-idle { background: var(--state-idle); }
+
+/* v1.37.0 additions for real data */
+.xp-empty { margin: 4px 0 8px; font-size: 12px; opacity: 0.6; }
+.xp-approve-status { font-size: 11px; opacity: 0.75; margin-left: 6px; align-self: center; }
+.xp-count.xp-count-alert { background: #d97706; color: #fff; }

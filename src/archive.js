@@ -1266,4 +1266,5 @@ module.exports = {
   listConversations,
   setConversationTitle,
   repinAgentName,
+  newestTranscript,
 };
