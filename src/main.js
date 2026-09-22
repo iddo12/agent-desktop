@@ -22,6 +22,21 @@ const {
   repinAgentName,
 } = require("./archive");
 const { withFsRetryAsync } = require("./fsRetry");
+const testMode = require("./testMode");
+
+// Must run before ANY app.getPath("userData") call, including the module-scope
+// consts further down (UI_FLAGS_PATH, SENT_LOG_PATH, the watchdog logs) - they
+// are evaluated at require time, so redirecting later would leave half this
+// instance writing into the live instance's state.
+if (testMode.TEST_MODE) {
+  try {
+    app.setPath("userData", path.join(app.getPath("appData"), "agent-desktop-test"));
+  } catch (e) {
+    // Better to refuse to start than to run a test instance that shares the
+    // live one's logs, sent-message history and UI flags.
+    throw new Error("Test mode could not redirect userData: " + e.message);
+  }
+}
 
 let mainWindow;
 const ptySessions = new Map(); // agentPath -> { proc, sessionCwd, archiveTimer }
@@ -693,7 +708,12 @@ function createWindow() {
     height: 820,
     minWidth: 900,
     minHeight: 600,
-    title: "Agent Desktop",
+    // A sandbox must be unmistakable at a glance. Two instances of the same
+    // app side by side, one of which can pause agents and spend tokens, is
+    // exactly the situation where an identical title bar causes a mistake.
+    title: testMode.TEST_MODE
+      ? "Agent Desktop - SANDBOX" + (testMode.ALLOW_LIVE_AGENTS ? " (live agents allowed)" : " (fixtures only)")
+      : "Agent Desktop",
     backgroundColor: "#0f1115",
     icon: path.join(__dirname, "..", "build", "icon.ico"),
     webPreferences: {
@@ -804,6 +824,11 @@ if (!gotSingleInstanceLock) {
       ensureAllAgentsBackgrounded().catch((e) => logStuckWatchdog(`ensureAllAgentsBackgrounded interval error: ${e.message}`));
     }, ENSURE_AGENTS_ALIVE_INTERVAL_MS);
     setInterval(repinAllAgentNames, REPIN_AGENT_NAMES_INTERVAL_MS);
+    if (testMode.TEST_MODE) {
+      logStuckWatchdog(`starting as ${testMode.describe()}`);
+      enforceTestTokenBudget();
+      setInterval(enforceTestTokenBudget, TEST_BUDGET_CHECK_INTERVAL_MS);
+    }
   });
 }
 
@@ -1528,6 +1553,14 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
 const ENSURE_AGENTS_ALIVE_INTERVAL_MS = 15 * 60 * 1000;
 const ENSURE_AGENTS_ALIVE_STAGGER_MS = 2000; // don't launch every configured agent's CLI process in the same instant
 async function ensureAllAgentsBackgrounded() {
+  // Tier 1/2 sandboxes must never dispatch a real `claude --bg` process: that
+  // spends real quota and, in a fixtures-only sandbox, there is nothing for a
+  // live process to do anyway. Tier 3 turns it on explicitly, and stops again
+  // by itself once the token budget is gone.
+  if (!testMode.liveAgentsPermitted()) {
+    logStuckWatchdog(`ensureAllAgentsBackgrounded: skipped - ${testMode.describe()}`);
+    return;
+  }
   let agents;
   try {
     agents = listAgents();
@@ -1611,6 +1644,76 @@ function repinAllAgentNames() {
     } catch (e) {
       logStuckWatchdog(`repinAgentNames: ${agent.folderName} failed: ${e.message}`);
     }
+  }
+}
+
+// --- Tier 3 token budget ----------------------------------------------------
+// Iddo's condition for letting the sandbox run a real agent: "use this testing
+// agent very conservatively - maybe limit its token use and ask me when it
+// exceeds a certain low amount." Enforced mechanically rather than left to the
+// agent's own judgement, because the whole risk is an unattended loop nobody
+// is watching.
+//
+// Stopping is done by pausing each sandbox agent (the same `paused` flag the
+// keep-alive sweep already respects) AND stopping its background process, so
+// nothing restarts it a sweep later. Iddo raises the budget or clears the
+// pause himself - the instance never un-pauses itself.
+const TEST_BUDGET_CHECK_INTERVAL_MS = 60 * 1000;
+let testBudgetWarned = false;
+let testBudgetStopped = false;
+
+function notifyTestBudget(title, body) {
+  try {
+    if (Notification.isSupported()) new Notification({ title, body }).show();
+  } catch (e) {}
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("test-budget-status", { title, body });
+  }
+}
+
+async function enforceTestTokenBudget() {
+  if (!testMode.TEST_MODE || !testMode.ALLOW_LIVE_AGENTS) return;
+  let status;
+  try {
+    status = testMode.budgetStatus();
+  } catch (e) {
+    return;
+  }
+
+  if (status.state === "warn" && !testBudgetWarned) {
+    testBudgetWarned = true;
+    const pct = Math.round(status.fraction * 100);
+    logStuckWatchdog(`test budget at ${pct}% (${status.billable}/${status.budget} tokens)`);
+    notifyTestBudget(
+      "Sandbox at " + pct + "% of its token budget",
+      `${status.billable.toLocaleString()} of ${status.budget.toLocaleString()} tokens used.`
+    );
+  }
+
+  if (status.state === "exceeded" && !testBudgetStopped) {
+    testBudgetStopped = true;
+    logStuckWatchdog(
+      `test budget EXCEEDED (${status.billable}/${status.budget} tokens) - pausing every sandbox agent`
+    );
+    let paused = 0;
+    try {
+      for (const agent of listAgents()) {
+        try {
+          setAgentPaused(agent.path, true);
+          await stopBackgroundAgentForCwd(sessionCwdFor(agent.path));
+          paused += 1;
+        } catch (e) {
+          logStuckWatchdog(`test budget: could not stop ${agent.folderName}: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      logStuckWatchdog(`test budget: listAgents failed while stopping: ${e.message}`);
+    }
+    notifyTestBudget(
+      "Sandbox stopped - token budget reached",
+      `${status.billable.toLocaleString()} tokens used (budget ${status.budget.toLocaleString()}). ` +
+        `${paused} agent(s) paused. Ask Iddo before raising AGENT_DESKTOP_TEST_TOKEN_BUDGET.`
+    );
   }
 }
 
@@ -1747,6 +1850,11 @@ function logReaperAction(line) {
 
 async function reapOrphanedBackgroundAgentProcesses() {
   if (process.platform !== "win32") return;
+  // Never in a test instance. This enumerates every claude process on the
+  // machine and kills any pty-host missing from ITS OWN agent roster - which
+  // in a sandbox is a different roster, so "unrecognised" would mean Iddo's
+  // real agents. There is deliberately no env var to turn this back on.
+  if (!testMode.processReapingPermitted()) return;
   try {
     const procs = listClaudeProcessesWindows();
     const pidsPresent = new Set(procs.map((p) => p.ProcessId));
