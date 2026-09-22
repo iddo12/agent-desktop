@@ -48,6 +48,19 @@
     const header = $("chat-header");
     if (!header || header.dataset.xpDone) return;
 
+    // The five status readings go in their own box that is allowed to clip.
+    // Without this the header overflowed at 1266px wide and pushed the Session
+    // menu clean off the right edge - present in the DOM, unreachable on
+    // screen, which is how Iddo noticed buttons were "missing". Status is the
+    // right thing to sacrifice when space runs out; controls are not.
+    const status = document.createElement("div");
+    status.className = "xp-status";
+    ["five-hour-usage", "weekly-usage", "monthly-usage", "context-usage", "cache-status"].forEach((id) => {
+      const el = $(id);
+      if (el) status.appendChild(el);
+    });
+    header.appendChild(status);
+
     const controls = document.createElement("div");
     controls.className = "xp-controls";
 
@@ -131,6 +144,27 @@
     "Add Malcolm's new email to the rolodex",
     "Re-cut the intro on the Nanlite video",
   ];
+  // The all-agents view is deliberately NOT "every task concatenated" - the
+  // per-agent view already answers "what is this agent doing". Across agents
+  // the question is triage, so it leads with what is waiting on Iddo, then
+  // what needs attention (the overnight case: two agents sat halted on a 500
+  // and nothing surfaced it), then a collapsed count per agent.
+  const GLOBAL_WAITING = [
+    "Trade Show Agent - approve: add Malcolm's new email",
+    "Product Development - approve: chase Cartoni about the arm",
+    "Unassigned - re-cut the intro on the Nanlite video",
+  ];
+  const GLOBAL_ATTENTION = [
+    "Trade Show Agent - halted on an API error 67 min ago",
+    "Product Development - 174K context, needs a handoff",
+  ];
+  const GLOBAL_INFLIGHT = [
+    "Security - 6 open",
+    "Trade Show Agent (IBC) - 4 open",
+    "Product Development Agent - 4 open",
+    "Agent Desktop backlog - 3 open",
+  ];
+
   const AGENT_TASKS = [
     "Finish the ExoCam concept brief and rebuild the PDF",
     "Check whether a phone rig can give mm-level measurements",
@@ -204,13 +238,45 @@
       return sec;
     };
 
-    panel.appendChild(section("From Telegram", "Dictated while away - not acted on until you approve.", TELEGRAM_TASKS, true));
-    panel.appendChild(section("Agreed with this agent", "Already agreed, or sent by another agent.", AGENT_TASKS, false));
+    // Scope switch. Same panel, same components - the global view is the
+    // per-agent one with the filter removed and grouping added, which is why
+    // it was worth designing in now rather than retrofitting.
+    const scope = document.createElement("div");
+    scope.className = "xp-scope";
+    const body = document.createElement("div");
+    body.className = "xp-body";
 
-    const foot = document.createElement("p");
-    foot.className = "xp-foot";
-    foot.textContent = "Sample data - this is a layout demo running only in the sandbox.";
-    panel.appendChild(foot);
+    const renderScope = (which) => {
+      body.textContent = "";
+      if (which === "agent") {
+        body.appendChild(section("From Telegram", "Dictated while away - not acted on until you approve.", TELEGRAM_TASKS, true));
+        body.appendChild(section("Agreed with this agent", "Already agreed, or sent by another agent.", AGENT_TASKS, false));
+      } else {
+        body.appendChild(section("Waiting on you", "Approvals and unplaced tasks, across every agent.", GLOBAL_WAITING, true));
+        body.appendChild(section("Needs attention", "Halted, stuck, or out of room - nothing else surfaces these.", GLOBAL_ATTENTION, false));
+        body.appendChild(section("In flight", "Open work per agent.", GLOBAL_INFLIGHT, false));
+      }
+      const foot = document.createElement("p");
+      foot.className = "xp-foot";
+      foot.textContent = "Sample data - this is a layout demo running only in the sandbox.";
+      body.appendChild(foot);
+    };
+
+    [["This agent", "agent"], ["All agents", "global"]].forEach(([label, key], i) => {
+      const b = document.createElement("button");
+      b.className = "xp-scope-btn" + (i === 0 ? " active" : "");
+      b.textContent = label;
+      b.addEventListener("click", () => {
+        scope.querySelectorAll(".xp-scope-btn").forEach((x) => x.classList.remove("active"));
+        b.classList.add("active");
+        renderScope(key);
+      });
+      scope.appendChild(b);
+    });
+
+    panel.appendChild(scope);
+    panel.appendChild(body);
+    renderScope("agent");
 
     document.body.appendChild(panel);
   }

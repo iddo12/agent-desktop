@@ -296,3 +296,32 @@ body.xp-panel-open #xp-panel { transform: none; }
 .xp-approve { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 
 .xp-foot { margin: 0; padding: 12px 16px; font-size: 0.7rem; color: var(--text-muted); font-style: italic; }
+
+/* Status readings clip when the window is narrow; the controls never do.
+   Before this the header overflowed and pushed Session off the right edge. */
+.xp-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+}
+body.xp-header #chat-header-text { min-width: 90px; flex: 0 1 auto; }
+body.xp-header .xp-controls { margin-left: 0; }
+
+/* Scope switch between this agent and everything. */
+.xp-scope { display: flex; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.xp-scope-btn {
+  flex: 1;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 500;
+  padding: 5px 0;
+  cursor: pointer;
+}
+.xp-scope-btn.active { background: var(--bg-active); color: var(--text); font-weight: 600; }
+.xp-body { flex: 1; overflow-y: auto; }

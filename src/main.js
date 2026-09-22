@@ -49,6 +49,26 @@ if (testMode.TEST_MODE) {
 // Desktop...". Leading with SANDBOX survives truncation.
 const SANDBOX_WINDOW_TITLE = "SANDBOX - Agent Desktop test copy (not your real agents)";
 
+// Written on every startup so anyone (Claude, in practice) can answer "is it
+// running, which version, and has it been restarted since?" without asking
+// Iddo. He asked for this directly after restarting for a fix and there being
+// no way to confirm which build was actually live - the source version in
+// package.json says what is on disk, not what is running.
+function writeRuntimeStamp() {
+  try {
+    const stamp = {
+      version: app.getVersion(),
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      testMode: testMode.TEST_MODE,
+      electron: process.versions.electron,
+    };
+    fs.writeFileSync(path.join(app.getPath("userData"), "runtime.json"), JSON.stringify(stamp, null, 2), "utf-8");
+  } catch (e) {
+    /* never a reason to fail startup */
+  }
+}
+
 let mainWindow;
 const ptySessions = new Map(); // agentPath -> { proc, sessionCwd, archiveTimer }
 
@@ -878,8 +898,9 @@ if (!gotSingleInstanceLock) {
       ensureAllAgentsBackgrounded().catch((e) => logStuckWatchdog(`ensureAllAgentsBackgrounded interval error: ${e.message}`));
     }, ENSURE_AGENTS_ALIVE_INTERVAL_MS);
     setInterval(repinAllAgentNames, REPIN_AGENT_NAMES_INTERVAL_MS);
+    writeRuntimeStamp();
+    logStuckWatchdog(`started v${app.getVersion()} pid=${process.pid} (${testMode.describe()})`);
     if (testMode.TEST_MODE) {
-      logStuckWatchdog(`starting as ${testMode.describe()}`);
       enforceTestTokenBudget();
       setInterval(enforceTestTokenBudget, TEST_BUDGET_CHECK_INTERVAL_MS);
     }
