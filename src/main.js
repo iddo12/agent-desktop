@@ -751,6 +751,34 @@ function createWindow() {
     mainWindow.setTitle(SANDBOX_WINDOW_TITLE);
   }
 
+  // Sandbox-only UI experiments, injected rather than linked from index.html
+  // so the live app cannot pick them up even accidentally. This is what lets a
+  // proposed redesign be looked at in the sandbox first and then kept or
+  // thrown away - see styles-experimental.css for the current one.
+  if (testMode.TEST_MODE) {
+    mainWindow.webContents.on("did-finish-load", () => {
+      try {
+        const css = fs.readFileSync(path.join(__dirname, "renderer", "styles-experimental.css"), "utf-8");
+        // A real <style> element appended to <head>, NOT webContents.insertCSS.
+        // insertCSS injects at the user-stylesheet level, which loses to the
+        // app's own author styles on equal specificity - confirmed live: the
+        // button overrides applied (no competing rule) while every badge
+        // override silently lost to styles.css. Appending an author
+        // stylesheet last makes normal cascade order do the work, with no
+        // !important anywhere.
+        mainWindow.webContents.executeJavaScript(
+          `(() => { const s = document.createElement("style");
+                    s.id = "experimental-css";
+                    s.textContent = ${JSON.stringify(css)};
+                    document.head.appendChild(s);
+                    return true; })()`
+        );
+      } catch (e) {
+        logStuckWatchdog(`experimental CSS not applied: ${e.message}`);
+      }
+    });
+  }
+
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   // Electron gives a BrowserWindow no OS-native right-click menu and blocks

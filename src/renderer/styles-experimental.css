@@ -1,0 +1,113 @@
+/* Sandbox-only UI experiments. NEVER loaded by the live app.
+ *
+ * main.js injects this with webContents.insertCSS only when TEST_MODE is set,
+ * so a proposed redesign can be looked at in the sandbox and then either
+ * folded into styles.css or thrown away, without ever reaching the instance
+ * Iddo works in. This is the answer to "I want to see it before we put it on
+ * the actual Agent Desktop" - and it is also the cheap version of the code
+ * isolation Windows Sandbox would give, for the one kind of change (styling)
+ * where seeing it matters more than running it in a separate OS.
+ *
+ * Keep this file additive and override-only. It must never be something the
+ * app depends on to look correct, because the live app never loads it.
+ *
+ * ---------------------------------------------------------------------------
+ * CURRENT EXPERIMENT (2026-09-22): header control system.
+ *
+ * Iddo: "square and round buttons next to each other with different strange
+ * spacing - it just doesn't look like a proper UI."
+ *
+ * The diagnosis was not spacing. Three separate problems:
+ *   1. The five usage badges had the SAME background, border and radius as the
+ *      real buttons, so read-only numbers looked exactly as clickable as
+ *      "Reset Session". Nothing in the row said what could be pressed.
+ *   2. #handoff-reset-btn and #handoff-all-btn are created in guards.js with
+ *      no CSS class at all, so they fell through to the raw Chromium default
+ *      button - the squarer, heavier third shape in the row.
+ *   3. styles.css carries 13 different border-radius values and no shared
+ *      control height, so nothing lines up even when it is meant to match.
+ *
+ * Still unsolved here, deliberately: the row holds ten buttons and still wraps
+ * onto two lines at this width. That needs the structural change (a Session
+ * menu plus a segmented view switcher), not more styling.
+ * ------------------------------------------------------------------------ */
+
+:root {
+  --radius-control: 6px;
+  --control-h: 28px;
+  --control-pad-x: 12px;
+}
+
+#chat-header {
+  gap: 8px 10px;
+  padding: 10px 16px;
+}
+
+/* Badges become status text, not controls. */
+#five-hour-usage,
+#weekly-usage,
+#monthly-usage,
+#context-usage,
+#cache-status {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  padding: 0;
+  background: none;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-h);
+  letter-spacing: 0.01em;
+}
+
+/* A hairline between readings rather than a box around each one: it reads as
+   one block of status text instead of five chips competing with the buttons. */
+#weekly-usage::before,
+#monthly-usage::before,
+#context-usage::before,
+#cache-status::before {
+  content: "";
+  width: 1px;
+  height: 11px;
+  background: var(--border);
+  margin-right: 10px;
+  opacity: 0.9;
+}
+
+/* One rule for every control in the row, including the two guards.js injects. */
+#reset-session-btn,
+#restart-session-btn,
+#raw-terminal-toggle-btn,
+#model-picker-btn,
+#chats-toggle-btn,
+#history-toggle-btn,
+#save-to-master-btn,
+#pause-agent-btn,
+#handoff-reset-btn,
+#handoff-all-btn {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-control);
+  height: var(--control-h);
+  padding: 0 var(--control-pad-x);
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+/* Exactly one accented control. Handoff & reset is the recommended action once
+   a conversation has grown expensive; everything else stays quiet so the
+   accent still means something. */
+#handoff-reset-btn {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#handoff-reset-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-2);
+}
