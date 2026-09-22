@@ -97,7 +97,33 @@ function parseOpenNow(text) {
   return items;
 }
 
+// The structured task store (shared_tools/tasks/tasks.py, 2026-09-22) when the
+// agent has adopted it, the freehand OPEN NOW parse when it has not. This is
+// the panel that showed the Trade Show agent's instructions-to-itself as
+// tasks; a store has a status field and a needsIddo field, so neither has to
+// be guessed. Adoption is per agent - nothing breaks for the ones still on
+// prose.
+const TASK_STORE_DIR = path.join("D:\\Dropbox\\Claude stuff", "shared_reports", "tasks");
+
+function readTaskStore(folderName) {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(TASK_STORE_DIR, folderName + ".json"), "utf-8").replace(/^﻿/, ""));
+    if (!Array.isArray(d.items)) return null;
+    const live = d.items.filter((i) => i.status !== "done")
+      .sort((a, b) => (a.needsIddo === b.needsIddo ? (a.priority || 2) - (b.priority || 2) : a.needsIddo ? -1 : 1));
+    return {
+      file: "task store",
+      items: live.map((i) => (i.needsIddo ? "[needs you] " : "") + (i.status === "blocked" ? "[blocked] " : "") + i.title),
+      structured: live,
+    };
+  } catch (e) {
+    return null; // no store for this agent, or it is unreadable
+  }
+}
+
 function readOpenItems(agentPath) {
+  const stored = readTaskStore(path.basename(agentPath));
+  if (stored) return stored;
   for (const name of OPEN_ITEM_FILES) {
     const p = path.join(agentPath, name);
     try {
