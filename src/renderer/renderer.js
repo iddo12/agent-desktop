@@ -3300,6 +3300,16 @@ function voiceNote(msg, ms) {
 // word on both sides of the join.
 const VOICE_CHUNK_SECONDS = 50;
 const VOICE_CHUNK_SEEK_SECONDS = 3; // how far back to hunt for a quiet point
+const VOICE_CHUNK_OVERLAP_SECONDS = 1.5;
+// Each chunk after the first replays the last VOICE_CHUNK_OVERLAP_SECONDS of
+// the previous one. A cut that lands mid-word otherwise gives Whisper half a
+// word at the end of one chunk and half at the start of the next, and it
+// either drops the word or emits it twice. With an overlap the word is intact
+// in at least one chunk, and the repeat is removed afterwards by
+// stitchTranscripts(). Tested 2026-09-22 by Iddo counting 1-130 aloud: the
+// transcript came back missing 66 and 77 and with 110 twice - exactly that
+// shape of damage, though whether those fell on cuts was unprovable because
+// nothing logged where the cuts were. It does now.
 
 function encodeWav16k(pcm, rate) {
   const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
@@ -3332,6 +3342,32 @@ function quietestCut(pcm, hardEnd, rate) {
 
 // Returns an array of base64 WAV chunks, in order. One element for a short
 // recording, several for a long one.
+// Joins transcribed chunks, removing the words the overlap caused to appear
+// twice. Compares the last words of one part against the first words of the
+// next and drops the longest run that matches, normalising case and
+// punctuation first so "110," and "110" count as the same word.
+//
+// Deliberately conservative: it only removes a repeat it can actually see. If
+// no overlap matches, the parts are joined untouched - a duplicated word is a
+// far smaller problem than silently deleting something Iddo said.
+const VOICE_STITCH_MAX_WORDS = 12;
+
+function stitchTranscripts(parts) {
+  const norm = (w) => w.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return parts.reduce((acc, part) => {
+    if (!acc) return part;
+    const a = acc.trim().split(/\s+/);
+    const b = part.trim().split(/\s+/);
+    const max = Math.min(VOICE_STITCH_MAX_WORDS, a.length, b.length);
+    for (let n = max; n >= 2; n--) {
+      const tail = a.slice(a.length - n).map(norm).join(" ");
+      const head = b.slice(0, n).map(norm).join(" ");
+      if (tail && tail === head) return a.concat(b.slice(n)).join(" ");
+    }
+    return acc + " " + part;
+  }, "");
+}
+
 async function blobToWavChunks(blob) {
   const buf = await blob.arrayBuffer();
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -3350,13 +3386,22 @@ async function blobToWavChunks(blob) {
   const pcm = (await off.startRendering()).getChannelData(0);
 
   const chunkLen = VOICE_CHUNK_SECONDS * rate;
+  const overlap = Math.floor(VOICE_CHUNK_OVERLAP_SECONDS * rate);
   const chunks = [];
+  const bounds = [];
   let pos = 0;
   while (pos < pcm.length) {
     let end = Math.min(pos + chunkLen, pcm.length);
     if (end < pcm.length) end = Math.max(pos + Math.floor(chunkLen / 2), quietestCut(pcm, end, rate));
-    chunks.push(encodeWav16k(pcm.subarray(pos, end), rate));
+    const from = chunks.length === 0 ? pos : Math.max(0, pos - overlap);
+    chunks.push(encodeWav16k(pcm.subarray(from, end), rate));
+    bounds.push((end / rate).toFixed(1));
     pos = end;
+  }
+  // Logged so a future oddity can be checked against where the cuts actually
+  // fell, instead of guessed at.
+  if (chunks.length > 1) {
+    console.log(`[voice] ${(pcm.length / rate).toFixed(1)}s split into ${chunks.length} chunks, cuts at ${bounds.slice(0, -1).join("s, ")}s`);
   }
   return chunks;
 }
@@ -3412,7 +3457,7 @@ async function finishVoiceRecording(rec) {
       }
       if (res.text) parts.push(res.text.trim());
     }
-    const joined = parts.join(" ").trim();
+    const joined = stitchTranscripts(parts).trim();
     if (!joined) {
       voiceNote("Nothing was heard - try again a bit closer to the mic.", 6000);
       return;
