@@ -443,6 +443,21 @@
         // transcript entry until the agent is next prompted). Not stopped any
         // more - just idle; say so instead of alarming.
         show(limitBanner, "guard-amber", "This agent hit a usage limit earlier, but that window has since reset - it is idle, not blocked. Send any message (or \"continue\") to resume.", []);
+      } else if (lastLimit.halt && lastLimit.halt.kind === "server_error") {
+        // Anthropic's own API failed; this is not a quota. Calling it a usage
+        // limit sent Iddo looking for a reset time that did not exist
+        // (2026-09-22, a 500 on the Product Development Agent while its usage
+        // sat at 2%). The actual fix is to send the message again, so say so.
+        show(limitBanner, "guard-amber",
+          "STOPPED - Claude's API returned an error (" + (lastLimit.halt.apiErrorStatus || "5xx") +
+          "), not a usage limit. This is usually temporary: send your message again.", [restartButton()]);
+      } else if (lastLimit.halt && lastLimit.halt.kind !== "rate_limit") {
+        // Any other API failure: show what it actually said rather than
+        // inventing a cause. A wrong diagnosis costs more than a vague one.
+        const detail = (lastLimit.halt.text || lastLimit.halt.error || "").trim();
+        show(limitBanner, "guard-amber",
+          "STOPPED - the last turn failed with an API error, not a usage limit." +
+          (detail ? " " + detail.slice(0, 160) : "") + " Send your message again.", [restartButton()]);
       } else if (lastLimit.halt) {
         const t =lastLimit.halt.resetsAt ? " - resets around " + new Date(lastLimit.halt.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + ", then this agent auto-continues" : "";
         show(limitBanner, "guard-red", "STOPPED - Claude " + (lastLimit.halt.rateLimitType || "usage") + " limit reached" + t, []);

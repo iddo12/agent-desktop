@@ -527,7 +527,28 @@ function getHaltInfo(sessionCwd) {
     if (!obj.isApiErrorMessage) return null;
 
     const quota = obj.quotaLimits || {};
+    // Classify, rather than letting every API error be reported as a usage
+    // limit. 2026-09-22: the Product Development Agent showed "STOPPED -
+    // Claude usage limit reached" while its own badges read 2% of the 5-hour
+    // window and 8% of the weekly one. The real entry was
+    // {error:"server_error", apiErrorStatus:500} with no quotaLimits at all -
+    // a transient 500 that only needed the message sending again. Iddo would
+    // have sat waiting for a reset that was never coming.
+    //
+    // This is the same mistake that was already fixed once for expired logins
+    // (see guards-main.js isAuthBroken) - fixed there for that one signature
+    // rather than generalised, so every other API error still fell through to
+    // the rate-limit wording. Callers must branch on `kind`, never assume.
+    let kind = "other";
+    if (quota.rateLimitType || quota.resetsAt || obj.apiErrorStatus === 429) {
+      kind = "rate_limit";
+    } else if (obj.error === "authentication_failed") {
+      kind = "auth";
+    } else if (typeof obj.apiErrorStatus === "number" && obj.apiErrorStatus >= 500) {
+      kind = "server_error";
+    }
     return {
+      kind,
       timestamp: obj.timestamp || null,
       error: obj.error || null,
       apiErrorStatus: obj.apiErrorStatus || null,
