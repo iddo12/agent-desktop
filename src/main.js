@@ -2066,6 +2066,51 @@ const RATE_LIMIT_AUTO_CONTINUE_BUFFER_MS = 90 * 1000;
 const AUTO_CONTINUE_PROMPT =
   "The Claude usage limit that stopped this turn has now reset - please continue from exactly where you left off.";
 
+// Transient server errors (2026-09-22). A 500 from Anthropic's API ends the
+// turn exactly like a rate limit does, but nothing resumed it: the
+// auto-continue above waits for a `resetsAt`, and a 5xx has none, so the turn
+// simply sat dead. Iddo's message that morning was never answered and he only
+// found out because he asked why the agent had "reached its limit".
+//
+// Retried rather than just reported because a 5xx usually succeeds on the next
+// attempt - but deliberately narrow: ONLY kind==="server_error". An auth
+// failure retries forever without a re-login, a rate limit needs its window,
+// and an unrecognised error may be permanently malformed, so none of those are
+// retried here.
+const SERVER_ERROR_RETRY_DELAY_MS = 45 * 1000;   // let the blip pass first
+const SERVER_ERROR_RETRY_PROMPT =
+  "The previous turn stopped on a transient API error before you could reply - " +
+  "please carry on from exactly where you left off.";
+
+// Loop protection, and the reason this is not just a counter on haltTracking.
+// haltTracking is keyed by the halt entry's TIMESTAMP, so if a retry itself
+// fails with a fresh 500 that is a new timestamp, a new tracking object, and a
+// counter reset - which would retry forever during a real outage. This budget
+// is keyed by agent and survives new halts; it is cleared only when the agent
+// actually completes a turn (see checkForHaltedTurns).
+const SERVER_ERROR_RETRY_WINDOW_MS = 30 * 60 * 1000;
+const SERVER_ERROR_MAX_RETRIES = 3;
+const serverRetryBudget = new Map(); // agentPath -> { count, since }
+
+// haltTracking is in-memory, so after an app restart every existing halt looks
+// new and would be retried ~45s later. Resuming this morning's dead turn is
+// exactly what we want; silently resurrecting a three-day-old one across every
+// agent at once is not. Past this age the banner still explains the error and
+// invites a resend - it just is not done automatically.
+const SERVER_ERROR_MAX_HALT_AGE_MS = 2 * 60 * 60 * 1000;
+
+function takeServerRetryBudget(agentPath) {
+  const now = Date.now();
+  let b = serverRetryBudget.get(agentPath);
+  if (!b || now - b.since > SERVER_ERROR_RETRY_WINDOW_MS) {
+    b = { count: 0, since: now };
+    serverRetryBudget.set(agentPath, b);
+  }
+  if (b.count >= SERVER_ERROR_MAX_RETRIES) return 0;
+  b.count += 1;
+  return b.count;
+}
+
 // agentPath -> { timestamp (of the halt entry being tracked), notified, autoContinued }
 // Keyed off the halt entry's own timestamp so a NEW halt (a fresh rate-limit
 // hit after a successful resume) is treated as a fresh event needing its own
@@ -2080,6 +2125,30 @@ function notifyHalt(agentPath, halt) {
     } catch (e) {}
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("terminal-data", { agentPath, data: "\r\n\x1b[31m[Agent Desktop: this session's Claude login expired (authentication_failed) - NOT a usage limit. Run `claude /login` in a terminal, then Restart Session.]\x1b[0m\r\n\r\n" });
+    }
+    return;
+  }
+  if (halt.kind === "server_error") {
+    // Not a quota - do not say "usage limit" here either (the banner used to,
+    // and it sent Iddo looking for a reset time that did not exist).
+    try {
+      if (Notification.isSupported()) {
+        new Notification({
+          title: `${agentName}: API error ${halt.apiErrorStatus || "5xx"}`,
+          body: "Not a usage limit. Usually transient.",
+        }).show();
+      }
+    } catch (e) {}
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      // Deliberately does not promise a retry: this fires the moment the halt
+      // is seen, before the age check and the retry budget have had their say.
+      // The retry announces itself separately when it actually happens.
+      mainWindow.webContents.send("terminal-data", {
+        agentPath,
+        data:
+          `\r\n\x1b[33m[Agent Desktop: this turn stopped on an API error ` +
+          `(${halt.apiErrorStatus || "5xx"}) - NOT a usage limit. Usually transient.]\x1b[0m\r\n\r\n`,
+      });
     }
     return;
   }
@@ -2146,6 +2215,37 @@ function autoContinueSession(agentPath, session, halt) {
   }
 }
 
+// Same pty-write shape as autoContinueSession() above, including the 80ms gap
+// before Enter that makes the CLI treat this as typed input rather than a
+// paste. `attempt` is only for the log and the on-screen notice - the budget
+// itself lives in serverRetryBudget.
+function retryAfterServerError(agentPath, session, halt, attempt) {
+  logStuckWatchdog(
+    `retrying agentPath=${agentPath} after API ${halt.apiErrorStatus || "5xx"} ` +
+      `(attempt ${attempt}/${SERVER_ERROR_MAX_RETRIES}, halt at ${halt.timestamp})`
+  );
+  try {
+    session.proc.write(SERVER_ERROR_RETRY_PROMPT);
+    setTimeout(() => {
+      try {
+        session.proc.write("\r");
+      } catch (e) {
+        logStuckWatchdog(`server-error retry Enter write FAILED for agentPath=${agentPath}: ${e.message}`);
+      }
+    }, 80);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("terminal-data", {
+        agentPath,
+        data:
+          `\r\n\x1b[36m[Agent Desktop: retrying after the API error ` +
+          `(attempt ${attempt} of ${SERVER_ERROR_MAX_RETRIES}).]\x1b[0m\r\n\r\n`,
+      });
+    }
+  } catch (e) {
+    logStuckWatchdog(`server-error retry write FAILED for agentPath=${agentPath}: ${e.message}`);
+  }
+}
+
 async function checkForHaltedTurns() {
   for (const [agentPath, session] of ptySessions) {
     if (!session || session.starting || !session.proc) continue;
@@ -2169,13 +2269,17 @@ async function checkForHaltedTurns() {
       continue;
     }
     if (!halt) {
+      // No halt is the end of the story: the agent replied normally (or the
+      // user sent something new), so a past run of server errors is over and
+      // its retry budget should not count against a future, unrelated one.
       haltTracking.delete(agentPath);
+      serverRetryBudget.delete(agentPath);
       continue;
     }
 
     let tracking = haltTracking.get(agentPath);
     if (!tracking || tracking.timestamp !== halt.timestamp) {
-      tracking = { timestamp: halt.timestamp, notified: false, autoContinued: false };
+      tracking = { timestamp: halt.timestamp, notified: false, autoContinued: false, firstSeenAt: Date.now() };
       haltTracking.set(agentPath, tracking);
     }
 
@@ -2186,6 +2290,38 @@ async function checkForHaltedTurns() {
           `resetsAt=${halt.resetsAt ? new Date(halt.resetsAt).toISOString() : "unknown"}`
       );
       notifyHalt(agentPath, halt);
+    }
+
+    // Transient API error: wait out the blip, then resend once. Guarded by
+    // BOTH tracking.autoContinued (one retry per halt entry) and
+    // serverRetryBudget (a cap per agent that survives new halt entries, so a
+    // real outage stops instead of retrying forever - see its comment above).
+    if (halt.kind === "server_error") {
+      const haltAge = halt.timestamp ? Date.now() - Date.parse(halt.timestamp) : 0;
+      if (haltAge > SERVER_ERROR_MAX_HALT_AGE_MS) {
+        tracking.autoContinued = true; // too old to resume on its own; banner still explains it
+      }
+      if (!tracking.autoContinued && Date.now() - tracking.firstSeenAt >= SERVER_ERROR_RETRY_DELAY_MS) {
+        tracking.autoContinued = true;
+        const attempt = takeServerRetryBudget(agentPath);
+        if (attempt) {
+          retryAfterServerError(agentPath, session, halt, attempt);
+        } else {
+          logStuckWatchdog(
+            `NOT retrying agentPath=${agentPath} - ${SERVER_ERROR_MAX_RETRIES} API-error retries already used ` +
+              `in the last ${SERVER_ERROR_RETRY_WINDOW_MS / 60000} minutes; leaving it for Iddo`
+          );
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("terminal-data", {
+              agentPath,
+              data:
+                `\r\n\x1b[31m[Agent Desktop: the API keeps erroring - stopping automatic retries after ` +
+                `${SERVER_ERROR_MAX_RETRIES}. Check https://status.claude.com, then send your message again.]\x1b[0m\r\n\r\n`,
+            });
+          }
+        }
+      }
+      continue;
     }
 
     if (!tracking.autoContinued && halt.resetsAt && Date.now() >= halt.resetsAt + RATE_LIMIT_AUTO_CONTINUE_BUFFER_MS) {
