@@ -83,7 +83,17 @@
   const FLOW_POLL_MS = 3000;
   const RESUME_MARKER = "[[HANDOFF-RESUME]]";
   const RESUME_SETTLE_MS = 5000; // let a freshly attached session settle before typing into it
-  const RESUME_VERIFY_MS = 30000; // how long to wait for the message to show up in the transcript
+  // 2026-09-22: 30s was too short and produced a false failure on a real
+  // handoff - the Optimization agent's fresh session was told "the fresh
+  // session did not receive the resume message" while it was, in fact,
+  // starting up and reading a 5.7 KB handoff file. A brand-new session has to
+  // dispatch, attach, load its CLAUDE.md and only then write the message into
+  // a transcript file that may not even exist when the first check runs.
+  const RESUME_VERIFY_MS = 75000;
+  // And never declare failure while the agent is visibly working - the same
+  // blind spot that had Agent Desktop telling Iddo to Resend messages that
+  // had arrived. A working agent has the message; it is simply busy with it.
+  const RESUME_MAX_WAIT_MS = 5 * 60 * 1000;
 
   const flows = new Map(); // agentPath -> { phase, startedAt, error, quietPolls }
   const pendingResume = new Map(); // agentPath -> { text, path, readySince, sentAt, tries }
@@ -256,14 +266,25 @@
             }, 8000);
           }
         } else if (Date.now() - r.sentAt > RESUME_VERIFY_MS) {
-          if (r.tries < 2) {
+          // Busy means it got the message and is acting on it - the marker
+          // just has not been flushed to the transcript yet. Keep waiting, up
+          // to a hard ceiling so a genuinely stuck session still reports.
+          let working = false;
+          try {
+            const act = await window.api.getSessionActivity(ap);
+            working = !!(act && act.working);
+          } catch (e) {}
+          if (working && Date.now() - r.sentAt < RESUME_MAX_WAIT_MS) continue;
+          if (r.tries < 3) {
             r.sentAt = null; // not received - send it again
             r.readySince = Date.now();
           } else {
             pendingResume.delete(ap);
             if (flow) {
               flow.phase = "failed";
-              flow.error = "The fresh session did not receive the resume message. Send it this line yourself: Read " + r.path + " and continue from there.";
+              flow.error = "The fresh session did not confirm the resume message after " + r.tries +
+              " attempts. It may still have arrived - check the conversation before resending. If not: Read " +
+              r.path + " and continue from there.";
               render();
             }
           }
