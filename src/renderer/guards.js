@@ -15,6 +15,68 @@
 (function () {
   "use strict";
   const CONTEXT_WARN_TOKENS = 150000;
+
+  // --- automatic handoff (2026-09-22) ---------------------------------------
+  // The warning banner at 150K is advisory, and advisory was not enough: the
+  // System Optimization agent ran to 246K / 100% context while working, and
+  // the first Iddo knew of it was two of his messages failing to arrive. A
+  // full agent cannot accept input at all, so by the time it is visible it is
+  // already costing him messages.
+  //
+  // So above AUTO_HANDOFF_TOKENS an idle agent hands itself off. Deliberately
+  // set above the warning, not at it: he gets the banner and a chance to act
+  // himself first, and automation only steps in when that was ignored and the
+  // wall is close.
+  //
+  // Handoff wipes a conversation, so the guards matter more than the trigger:
+  //   - IDLE ONLY. Never interrupt a turn in progress.
+  //   - One at a time, fleet-wide, and never while "Handoff all" is running.
+  //   - Once per agent per app run, so a misjudgement cannot loop.
+  //   - Nothing is lost: the flow saves lessons to memory and writes a
+  //     handoff file before resetting, and the old conversation stays in
+  //     History.
+  // It is switchable from the console for a session where it would be
+  // unwelcome: localStorage.setItem("autoHandoffOff","1").
+  const AUTO_HANDOFF_TOKENS = 200000;
+  const AUTO_HANDOFF_CHECK_MS = 120000;
+  const autoHandedOff = new Set();
+
+  function autoHandoffEnabled() {
+    try {
+      return localStorage.getItem("autoHandoffOff") !== "1";
+    } catch (e) {
+      return true;
+    }
+  }
+
+  async function checkAutoHandoff() {
+    if (!autoHandoffEnabled()) return;
+    if (allRun && !allRun.finished) return;      // a manual sweep owns the fleet
+    if (flows.size) return;                       // one at a time, fleet-wide
+    for (const a of agents) {
+      if (autoHandedOff.has(a.path)) continue;
+      try {
+        const u = await window.api.getContextUsage(a.path);
+        let t = u && typeof u.contextTokens === "number" ? u.contextTokens : 0;
+        if (t && window.guardUsageIsStale(a.path, u)) t = 0;
+        if (t < AUTO_HANDOFF_TOKENS) continue;
+        const act = await window.api.getSessionActivity(a.path).catch(() => null);
+        if (!act || act.working) continue;        // mid-turn: leave it alone
+        autoHandedOff.add(a.path);
+        show(
+          ctxBanner,
+          "guard-amber",
+          a.displayName + " reached " + Math.round(t / 1000) + "K tokens and was handed off automatically " +
+            "(lessons saved to memory first, old conversation kept in History).",
+          [{ label: "Dismiss", onClick: () => render() }]
+        );
+        startFlow(a.path, false);
+        return;                                   // only ever one per pass
+      } catch (e) {
+        /* one agent's hiccup must not stop the sweep */
+      }
+    }
+  }
   const REDISMISS_GROWTH_TOKENS = 25000;
   const HANDOFF_TIMEOUT_MS = 12 * 60 * 1000;
   const TICK_MS = 10000;
@@ -543,6 +605,7 @@
     }
   }
   setInterval(tick, TICK_MS);
+  setInterval(() => { checkAutoHandoff().catch(() => {}); }, AUTO_HANDOFF_CHECK_MS);
   setTimeout(tick, 1500);
   // Re-check right away when the user switches agents (activeAgentPath changes).
   let lastAgent = null;
