@@ -130,3 +130,9 @@ body.argus-open .argus-nav-lamps { flex-direction: column; }
   border-bottom: 1px dashed var(--border); font-variant-numeric: tabular-nums; }
 .argus-row:last-child { border-bottom: 0; }
 .argus-row-val { white-space: nowrap; }
+
+/* Deltas are grey with an arrow: red and amber are reserved for warning and
+   caution (aviation practice - non-alert use of alert colours blunts them). */
+.argus-delta { color: var(--text-muted); }
+.argus-tag.new { border-color: var(--argus-dec); color: var(--argus-dec); font-weight: 600; }
+.argus-tag.stale { border-color: var(--argus-caut); color: var(--argus-caut); }

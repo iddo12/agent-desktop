@@ -121,8 +121,13 @@
     s.textContent = "(" + p + ")";
     const d = typeof v === "number" && typeof p === "number" ? Math.round((v - p) * 10) / 10 : 0;
     if (d && better !== "none") {
+      // Direction by arrow, not colour: red and amber mean warning and caution
+      // here and nothing else (FAA 25.1322(f) - non-alert use of the alert
+      // colours blunts them). A better/worse hint rides on the arrow's title.
       const good = better === "up" ? d > 0 : d < 0;
-      s.appendChild(el("span", good ? "argus-up" : "argus-down", " " + (d > 0 ? "▲" : "▼") + Math.abs(d)));
+      const arrow = el("span", "argus-delta", " " + (d > 0 ? "▲" : "▼") + Math.abs(d));
+      arrow.title = good ? "better than last time" : "worse than last time";
+      s.appendChild(arrow);
     }
     return s;
   }
@@ -183,7 +188,8 @@
         } else merged.set(k, Object.assign({}, al, { agents: [shortAgent(a.agent)], folder: a.agent }));
       }
     }
-    const all = [...merged.values()].sort((x, y) => ORDER[x.level] - ORDER[y.level]);
+    const all = [...merged.values()].sort((x, y) =>
+      ORDER[x.level] - ORDER[y.level] || (y.isNew ? 1 : 0) - (x.isNew ? 1 : 0) || (y.ageDays || 0) - (x.ageDays || 0));
     const live = all.filter((a) => a.scored), tracked = all.filter((a) => !a.scored);
     const W = live.filter((a) => a.level === "warning"), C = live.filter((a) => a.level === "caution"), V = live.filter((a) => a.level === "advisory");
     const D = data.decisions || [];
@@ -245,6 +251,8 @@
       r.appendChild(t);
       const meta = el("div", "argus-item-meta", a.agents.join(" + ") + (a.domain ? " · " + a.domain : ""));
       if (a.agents.length > 1) meta.appendChild(el("span", "argus-tag", "reported by " + a.agents.length));
+      if (a.isNew) meta.appendChild(el("span", "argus-tag new", "new today"));
+      else if (a.ageDays >= 7) meta.appendChild(el("span", "argus-tag", "standing " + a.ageDays + " days"));
       r.appendChild(meta);
       const more = el("div", "argus-item-more");
       if (a.why) more.appendChild(el("div", "argus-item-detail", "Why: " + a.why));
@@ -302,7 +310,10 @@
 
     for (const a of data.agents) {
       const c = card(colC, a.department || shortAgent(a.agent));
-      c.appendChild(el("div", "argus-item-meta", shortAgent(a.agent) + " · report " + (a.reportDate || "")));
+      const today = new Date().toISOString().slice(0, 10);
+      const metaRow = el("div", "argus-item-meta", shortAgent(a.agent) + " · report " + (a.reportDate || "unknown"));
+      if (a.reportDate !== today) metaRow.appendChild(el("span", "argus-tag stale", "not from today"));
+      c.appendChild(metaRow);
       (a.metrics || []).forEach((m) => {
         const r = el("div", "argus-row");
         r.appendChild(el("span", "", m.label));
