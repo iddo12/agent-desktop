@@ -1471,7 +1471,12 @@ async function maybeRestoreLongMessage(el, text, role) {
       // message) - resending is manual-only now, one click at a time.
       const warn = document.createElement("div");
       warn.className = "chat-bubble-failed-notice";
-      warn.textContent = "⚠ Not delivered - click Resend to try again";
+      // Says what is actually known - that it was not CONFIRMED - rather than
+      // asserting a loss the app cannot verify. The distinction matters
+      // because resending is how duplicates happen; the standing workspace
+      // rule now has agents ask before acting on a repeat, but the warning
+      // should not be pushing Iddo into creating one in the first place.
+      warn.textContent = "⚠ Not confirmed - check the conversation before resending";
       const resendBtn = document.createElement("button");
       resendBtn.textContent = "Resend now";
       resendBtn.addEventListener("click", () => {
@@ -1518,6 +1523,18 @@ function normalizeForMatch(s) {
 // exists - a safety net against a pending bubble that never finds a
 // matching transcript entry and would otherwise pulse "sending" forever.
 const PENDING_SENT_TIMEOUT_MS = 45000;
+// A BUSY agent has not lost the message - it simply has not written it to the
+// transcript yet, because Claude Code only does that when it starts
+// processing. Marking those "Not delivered - click Resend" was wrong four
+// separate times on 2026-09-22, and wrong in the costly direction: Iddo is
+// told to resend something that arrived, and resending is exactly how
+// duplicate work gets created. The last instance was unmistakable - the
+// header said "Working... 56s" while the agent was visibly carrying out the
+// very request the bubble claimed had not been delivered.
+//
+// So while the session is busy, keep waiting. The ceiling still applies, so a
+// genuinely wedged session is reported rather than pulsing forever.
+const PENDING_SENT_BUSY_TIMEOUT_MS = 6 * 60 * 1000;
 
 // Reads live from Claude Code's own JSONL transcript (see
 // getLiveTranscriptBlocks() in archive.js) rather than the terminal buffer
@@ -1644,7 +1661,9 @@ async function rebuildChatView(agentPath, opts = {}) {
     // this app does not have. Manual-only from here: Resend is a real
     // click, one at a time, by a person who can see whether the last one
     // already went through before trying again.
-    if (now - pending.addedAt >= PENDING_SENT_TIMEOUT_MS) {
+    const waited = now - pending.addedAt;
+    const limit = session.busy ? PENDING_SENT_BUSY_TIMEOUT_MS : PENDING_SENT_TIMEOUT_MS;
+    if (waited >= limit) {
       if (!pending.failed) {
         pending.failed = true;
         window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
