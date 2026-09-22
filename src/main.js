@@ -1149,6 +1149,25 @@ ipcMain.handle("save-pasted-image", (event, { base64, ext }) => {
 // keystrokes) and sidesteps the terminal-input pipeline entirely rather
 // than trying to make a large paste survive it.
 const LONG_MESSAGE_DIR = path.join(app.getPath("temp"), "agent-desktop-long-messages");
+// Reads back a long message the renderer wrote, so the chat bubble can show
+// what Iddo actually typed instead of the file path the CLI was handed.
+// 2026-09-22, his words: "it needs to actually show the message even if it
+// sends it in a file." The file reference is a transport detail; the message
+// is the thing he wrote and the thing he needs to see when scrolling back.
+//
+// Confined to LONG_MESSAGE_DIR on purpose - the renderer supplies this path
+// from transcript text, so it must not be able to ask for an arbitrary file.
+ipcMain.handle("read-long-message", (event, { filePath }) => {
+  try {
+    const dir = path.resolve(LONG_MESSAGE_DIR);
+    const resolved = path.resolve(String(filePath || ""));
+    if (!resolved.startsWith(dir + path.sep)) return null;
+    return fs.readFileSync(resolved, "utf-8");
+  } catch (e) {
+    return null; // a missing file just means the bubble keeps its current text
+  }
+});
+
 ipcMain.handle("save-long-message", (event, { text }) => {
   fs.mkdirSync(LONG_MESSAGE_DIR, { recursive: true });
   const filePath = path.join(LONG_MESSAGE_DIR, `message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`);

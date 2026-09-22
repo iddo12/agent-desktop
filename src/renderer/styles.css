@@ -1792,3 +1792,14 @@ button.danger:not(:disabled):hover { filter: brightness(1.1); }
 .chat-reset-marker { margin: 18px 0; border-top: 3px solid #d32f2f; padding-top: 6px; }
 .chat-reset-head { color: #d32f2f; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.05em; margin-bottom: 6px; }
 .chat-reset-body { font-size: 0.85rem; color: var(--text); background: #fdf1f0; border-radius: 8px; padding: 8px 12px; }
+
+/* A message that travelled to the CLI as a file still shows its real text in
+   the bubble (see maybeRestoreLongMessage) - this is the small footnote that
+   says how it was sent, so the file path is not simply hidden. */
+.chat-long-message-note {
+  margin-top: 6px;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-style: italic;
+  opacity: 0.85;
+}

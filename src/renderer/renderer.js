@@ -1402,6 +1402,12 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role;
     // Agent and user messages render as Markdown; status lines stay plain.
     renderRichText(el, text, { markdown: block.role !== "status" });
+    // A message too long to paste is handed to the CLI as a file reference,
+    // which is a transport detail - but the transcript then shows that
+    // reference instead of what Iddo wrote, so scrolling back showed a path
+    // where his own words should be. Swap the real text back in, keeping a
+    // small note that it travelled as a file.
+    maybeRestoreLongMessage(el, text, block.role);
     // Status lines don't get a per-line timestamp - they're incidental and it
     // just adds a second line of vertical noise.
     if (block.timestamp && block.role !== "status") {
@@ -1410,10 +1416,45 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       timeEl.textContent = formatBlockTime(block.timestamp);
       el.appendChild(timeEl);
     }
-    if (block.role !== "status") addCopyButton(el, () => text, "bubble-copy-btn");
+    // Reads the override rather than closing over `text`, so a long message
+    // restored from its file copies what Iddo wrote instead of the file path.
+    if (block.role !== "status") addCopyButton(el, () => el.dataset.copyText || text, "bubble-copy-btn");
     chatMessagesViewEl.appendChild(el);
   }
-  // Messages shown immediately at send time, before a real matching entry
+  // Matches only the exact sentence sendChatInput() writes, so ordinary text
+// that happens to mention a path is never rewritten.
+const LONG_MESSAGE_REF_RE = /^This message was too long to paste directly, so it was saved to a file - please read it: "([^"]+)"\s*$/;
+
+async function maybeRestoreLongMessage(el, text, role) {
+  if (role !== "user") return;
+  const m = LONG_MESSAGE_REF_RE.exec(String(text || "").trim());
+  if (!m) return;
+  let original = null;
+  try {
+    original = await window.api.readLongMessage(m[1]);
+  } catch (e) {
+    return; // main refused it or the file is gone - leave the bubble alone
+  }
+  if (!original || !el.isConnected) return;
+
+  // Rebuild in place rather than replacing the node: the timestamp and copy
+  // button are already children, and swapping the element would drop them.
+  const keep = Array.from(el.children).filter(
+    (c) => c.classList.contains("chat-block-time") || c.classList.contains("bubble-copy-btn")
+  );
+  el.textContent = "";
+  renderRichText(el, original, { markdown: true });
+  const note = document.createElement("div");
+  note.className = "chat-long-message-note";
+  note.textContent = "sent as a file - too long to paste";
+  el.appendChild(note);
+  keep.forEach((c) => el.appendChild(c));
+  // Copy should give the real message, not the file reference.
+  const copy = keep.find((c) => c.classList.contains("bubble-copy-btn"));
+  if (copy) copy.dataset.copyText = original;
+}
+
+// Messages shown immediately at send time, before a real matching entry
   // has shown up in the transcript yet (see submitToAgent) - a lighter
   // visual treatment (pulsing) marks them as "sending", not a normal
   // confirmed message, so it's never ambiguous which is which. Each entry

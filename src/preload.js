@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld("api", {
   getPathForFile: (file) => webUtils.getPathForFile(file),
   savePastedImage: (base64, ext) => ipcRenderer.invoke("save-pasted-image", { base64, ext }),
   saveLongMessage: (text) => ipcRenderer.invoke("save-long-message", { text }),
+  readLongMessage: (filePath) => ipcRenderer.invoke("read-long-message", { filePath }),
   createAgent: (payload) => ipcRenderer.invoke("create-agent", payload),
   updateAgent: (payload) => ipcRenderer.invoke("update-agent", payload),
   readInstructions: (agentPath) => ipcRenderer.invoke("read-instructions", { agentPath }),
