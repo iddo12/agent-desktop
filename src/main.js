@@ -30,6 +30,10 @@ const testMode = require("./testMode");
 // instance writing into the live instance's state.
 if (testMode.TEST_MODE) {
   try {
+    // A distinct AppUserModelID keeps Windows from grouping the sandbox under
+    // the same taskbar button as the real app - without it the two share one
+    // button and the amber icon never gets shown separately.
+    app.setAppUserModelId("com.iddo.agentdesktop.sandbox");
     app.setPath("userData", path.join(app.getPath("appData"), "agent-desktop-test"));
   } catch (e) {
     // Better to refuse to start than to run a test instance that shares the
@@ -37,6 +41,13 @@ if (testMode.TEST_MODE) {
     throw new Error("Test mode could not redirect userData: " + e.message);
   }
 }
+
+// Deliberately leads with the distinguishing word rather than appending it.
+// Iddo's note on seeing the first sandbox launch: "call it something else - it
+// can be confusing". A title of "Agent Desktop - sandbox" is no help in a
+// taskbar or an alt-tab list, where both instances truncate to "Agent
+// Desktop...". Leading with SANDBOX survives truncation.
+const SANDBOX_WINDOW_TITLE = "SANDBOX - Agent Desktop test copy (not your real agents)";
 
 let mainWindow;
 const ptySessions = new Map(); // agentPath -> { proc, sessionCwd, archiveTimer }
@@ -708,14 +719,12 @@ function createWindow() {
     height: 820,
     minWidth: 900,
     minHeight: 600,
-    // A sandbox must be unmistakable at a glance. Two instances of the same
-    // app side by side, one of which can pause agents and spend tokens, is
-    // exactly the situation where an identical title bar causes a mistake.
-    title: testMode.TEST_MODE
-      ? "Agent Desktop - SANDBOX" + (testMode.ALLOW_LIVE_AGENTS ? " (live agents allowed)" : " (fixtures only)")
-      : "Agent Desktop",
+    title: testMode.TEST_MODE ? SANDBOX_WINDOW_TITLE : "Agent Desktop",
     backgroundColor: "#0f1115",
-    icon: path.join(__dirname, "..", "build", "icon.ico"),
+    // Amber rather than the usual blue. Iddo's ask after seeing two identical
+    // icons sitting next to each other in the taskbar: the title alone does
+    // not help there, because both truncate to a few characters.
+    icon: path.join(__dirname, "..", "build", testMode.TEST_MODE ? "icon-sandbox.ico" : "icon.ico"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -733,6 +742,15 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  // index.html carries its own <title>, and Electron lets a page's title win
+  // over the BrowserWindow `title` option - which is why the first sandbox
+  // launch still read "Agent Desktop" despite setting it above. Refusing the
+  // page's update and setting the title explicitly is what actually holds it.
+  if (testMode.TEST_MODE) {
+    mainWindow.on("page-title-updated", (e) => e.preventDefault());
+    mainWindow.setTitle(SANDBOX_WINDOW_TITLE);
+  }
+
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   // Electron gives a BrowserWindow no OS-native right-click menu and blocks
@@ -2752,6 +2770,24 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
 ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows, knownAgentId }) => {
   if (ptySessions.has(agentPath)) {
     return { alreadyRunning: true };
+  }
+  // Found by using the sandbox for the first time (2026-09-22): gating the
+  // keep-alive sweep was not enough. Opening an agent's tab reaches dispatch
+  // by a completely different path, so a single click on a fixture agent
+  // would have started a real `claude --bg` against a fake folder and spent
+  // real tokens - in the tier that is supposed to spend nothing.
+  if (!testMode.liveAgentsPermitted()) {
+    const why = testMode.budgetExhausted()
+      ? "the sandbox token budget is spent - ask Iddo before raising it"
+      : "this sandbox runs on fixtures only; relaunch with `Start-TestDesktop.bat live` to allow a real agent";
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("terminal-data", {
+        agentPath,
+        data: `\r\n\x1b[33m[Agent Desktop SANDBOX: not starting a Claude process - ${why}.\r\n` +
+              `The transcript below is a fixture, so the UI still renders exactly as it would for a real agent.]\x1b[0m\r\n\r\n`,
+      });
+    }
+    return { alreadyRunning: false, testModeBlocked: true, reason: why };
   }
   // Dispatching is now async (see startTerminalSession below), so a second
   // start-terminal call for the same agent could otherwise race past this
