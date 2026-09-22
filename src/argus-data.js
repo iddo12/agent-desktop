@@ -1,0 +1,73 @@
+// Data for ARGUS - the Bridge (v1.39.0): one screen with every agent's report,
+// the Decision Queue and the ideas board. Iddo named it 2026-09-22 ("Argus",
+// the hundred-eyed watchman, and "the Bridge" for what it does).
+//
+// Everything comes from files the agents already write, normalised into one
+// format by shared_tools\bridge\build_status.py:
+//   shared_reports\status\<agent>.json   one per agent ("agent-status/1")
+//   shared_reports\status\_fleet.json    usage, scheduled jobs, run costs
+//   shared_reports\status\_decisions.json the Decision Queue (heuristic until
+//                                         the COO maintains it)
+//   shared_reports\recommendations\<week>\<agent>.json  weekly ideas
+// This module refreshes those files (runs the builder) and reads them. It never
+// writes anything an agent owns.
+
+const fs = require("fs");
+const path = require("path");
+const { execFile } = require("child_process");
+
+function readJson(p) {
+  try { return JSON.parse(fs.readFileSync(p, "utf-8").replace(/^﻿/, "")); } catch (e) { return null; }
+}
+
+function runBuilder(workspace) {
+  const script = path.join(workspace, "shared_tools", "bridge", "build_status.py");
+  return new Promise((resolve) => {
+    if (!fs.existsSync(script)) return resolve({ ok: false, error: "build_status.py not found" });
+    execFile("python", [script], { cwd: path.dirname(script), windowsHide: true, timeout: 60000,
+      env: Object.assign({}, process.env, { PYTHONIOENCODING: "utf-8" }) },
+      (err, stdout, stderr) => resolve({ ok: !err, output: String(stdout || "") + String(stderr || "") }));
+  });
+}
+
+function latestRecommendations(workspace) {
+  const dir = path.join(workspace, "shared_reports", "recommendations");
+  let weeks = [];
+  try { weeks = fs.readdirSync(dir).filter((w) => /^\d{4}-W\d{2}$/.test(w)).sort(); } catch (e) { return { week: null, items: [] }; }
+  const week = weeks[weeks.length - 1];
+  if (!week) return { week: null, items: [] };
+  const items = [];
+  for (const f of fs.readdirSync(path.join(dir, week)).filter((n) => n.endsWith(".json"))) {
+    const r = readJson(path.join(dir, week, f));
+    if (r && Array.isArray(r.items)) items.push(r);
+  }
+  return { week, items };
+}
+
+async function getArgusData(workspace, { refresh = true } = {}) {
+  const status = path.join(workspace, "shared_reports", "status");
+  const build = refresh ? await runBuilder(workspace) : { ok: true };
+  let agents = [];
+  try {
+    agents = fs.readdirSync(status)
+      .filter((n) => n.endsWith(".json") && !n.startsWith("_"))
+      .map((n) => readJson(path.join(status, n)))
+      .filter(Boolean);
+  } catch (e) { /* no status yet */ }
+  return {
+    builtOk: build.ok,
+    buildError: build.ok ? null : build.error || build.output,
+    agents,
+    fleet: readJson(path.join(status, "_fleet.json")) || {},
+    decisions: (readJson(path.join(status, "_decisions.json")) || {}).items || [],
+    recommendations: latestRecommendations(workspace),
+  };
+}
+
+// Cheap count for the header badge - no rebuild, just the last file.
+function getDecisionCount(workspace) {
+  const d = readJson(path.join(workspace, "shared_reports", "status", "_decisions.json"));
+  return d && Array.isArray(d.items) ? d.items.length : 0;
+}
+
+module.exports = { getArgusData, getDecisionCount };

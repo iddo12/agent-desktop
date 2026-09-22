@@ -106,6 +106,7 @@
   }
 
   function closeLibrary() {
+    if (viewing) closeViewer();
     document.body.classList.remove("library-open");
     view.classList.add("hidden");
     navBtns.forEach((b) => b.classList.remove("active"));
@@ -117,7 +118,7 @@
     if (e.target.closest(".agent-item")) closeLibrary();
   }, true);
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && document.body.classList.contains("library-open")) closeLibrary();
+    if (e.key === "Escape" && document.body.classList.contains("library-open")) { if (viewing) closeViewer(); else closeLibrary(); }
   });
 
   function fmtDate(iso) {
@@ -141,10 +142,46 @@
   }
 
   async function act(e, action) {
+    // Documents and images open INSIDE the app when they can (v1.39.0, Iddo:
+    // "viewable inside the Agent Desktop main screen ... just make a back
+    // button"). Web links, and anything not viewable, still go outside.
+    if (action === "open" && e.viewable && !e.isUrl) return openViewer(e);
     const r = await window.api.registryAction(e.id, action).catch((err) => ({ ok: false, error: String(err) }));
     if (!r.ok) flash(r.error || "Could not do that.");
     else if (action === "copy") flash("Link copied.");
   }
+
+  // --- in-app viewer --------------------------------------------------------
+  const viewer = el("div", "library-viewer hidden");
+  const vbar = el("div", "library-viewer-bar");
+  const vback = el("button", "library-btn library-back", "← Back");
+  const vtitle = el("div", "library-viewer-title");
+  const vext = el("button", "library-btn", "Open outside the app");
+  const vfolder = el("button", "library-btn", "Show in folder");
+  vbar.append(vback, vtitle, vext, vfolder);
+  const vframe = el("iframe", "library-viewer-frame");
+  viewer.append(vbar, vframe);
+  view.appendChild(viewer);
+  let viewing = null;
+
+  async function openViewer(e) {
+    const r = await window.api.registryAction(e.id, "view").catch((err) => ({ ok: false, error: String(err) }));
+    if (!r.ok) { flash(r.error || "Could not open it here."); return; }
+    viewing = e;
+    vtitle.textContent = e.title;
+    vframe.src = r.url;
+    view.classList.add("viewing");
+    viewer.classList.remove("hidden");
+  }
+  function closeViewer() {
+    viewing = null;
+    vframe.src = "about:blank";
+    view.classList.remove("viewing");
+    viewer.classList.add("hidden");
+  }
+  vback.addEventListener("click", closeViewer);
+  vext.addEventListener("click", () => viewing && window.api.registryAction(viewing.id, viewing.isUrl ? "openPdf" : "open"));
+  vfolder.addEventListener("click", () => viewing && window.api.registryAction(viewing.id, "reveal"));
 
   function card(e) {
     const c = el("div", "library-card" + (e.type === "image" ? " library-card-image" : ""));
@@ -183,6 +220,13 @@
     const open = el("button", "library-btn library-btn-primary", e.isUrl ? "Open link" : "Open");
     open.addEventListener("click", () => act(e, "open"));
     actions.appendChild(open);
+    // A web page that also has a PDF copy: the link opens in the browser, the
+    // PDF inside the app.
+    if (e.isUrl && e.viewable) {
+      const pdfBtn = el("button", "library-btn", "View PDF");
+      pdfBtn.addEventListener("click", () => openViewer(e));
+      actions.appendChild(pdfBtn);
+    }
     if (!e.isUrl && e.link) {
       const rev = el("button", "library-btn", "Show in folder");
       rev.addEventListener("click", () => act(e, "reveal"));

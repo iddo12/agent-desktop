@@ -1,4 +1,4 @@
-﻿const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, Notification } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, Notification } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
@@ -25,6 +25,7 @@ const { withFsRetryAsync } = require("./fsRetry");
 const testMode = require("./testMode");
 const overview = require("./overview");
 const registry = require("./registry");
+const argus = require("./argus-data");
 
 // Must run before ANY app.getPath("userData") call, including the module-scope
 // consts further down (UI_FLAGS_PATH, SENT_LOG_PATH, the watchdog logs) - they
@@ -749,6 +750,10 @@ function createWindow() {
     icon: path.join(__dirname, "..", "build", testMode.TEST_MODE ? "icon-sandbox.ico" : "icon.ico"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
+      // Chromium's built-in PDF viewer, so the Library can show documents in
+      // the app itself (v1.39.0 - Iddo: documents as PDF, viewable in the
+      // main screen with a back button).
+      plugins: true,
       contextIsolation: true,
       nodeIntegration: false,
       // Electron throttles renderer JS timers (setTimeout/setInterval,
@@ -2929,10 +2934,16 @@ ipcMain.handle("get-live-transcript", (event, { agentPath }) => getLiveTranscrip
 ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActivity(sessionCwdFor(agentPath)));
 // Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
 ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor));
+// ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
+// AGENTS_ROOT: in the sandbox the agents are fixtures but the report files are
+// real, and they are only ever read here.
+const ARGUS_WORKSPACE = "D:\\Dropbox\\Claude stuff";
+ipcMain.handle("argus-data", (event, opts) => argus.getArgusData(ARGUS_WORKSPACE, opts || {}));
+ipcMain.handle("argus-decision-count", () => argus.getDecisionCount(ARGUS_WORKSPACE));
 // Library tabs (v1.38.0) - see registry.js. Opening is by entry id only.
 ipcMain.handle("registry-list", () => registry.listRegistry(AGENTS_ROOT));
 ipcMain.handle("registry-action", (event, { id, action }) =>
-  ["open", "reveal", "copy"].includes(action)
+  ["open", "reveal", "copy", "view", "openPdf"].includes(action)
     ? registry.registryAction(AGENTS_ROOT, String(id || ""), action)
     : { ok: false, error: "Unknown action." });
 ipcMain.handle("approve-telegram-tasks", (event, { ids }) =>

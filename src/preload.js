@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld("api", {
   getSessionActivity: (agentPath) => ipcRenderer.invoke("get-session-activity", { agentPath }),
   getAgentOverview: () => ipcRenderer.invoke("get-agent-overview"),
   registryList: () => ipcRenderer.invoke("registry-list"),
+  argusData: (opts) => ipcRenderer.invoke("argus-data", opts),
+  argusDecisionCount: () => ipcRenderer.invoke("argus-decision-count"),
   registryAction: (id, action) => ipcRenderer.invoke("registry-action", { id, action }),
   approveTelegramTasks: (ids) => ipcRenderer.invoke("approve-telegram-tasks", { ids }),
   getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),

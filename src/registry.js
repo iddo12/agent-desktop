@@ -48,6 +48,14 @@ function isUrl(link) {
   return /^https?:\/\//i.test(String(link || ""));
 }
 
+function viewablePath(e) {
+  const candidates = [e.pdf, e.link].filter((p) => p && !isUrl(p));
+  for (const p of candidates) {
+    if (/\.(pdf|png|jpe?g|gif|webp|html?)$/i.test(p) && fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 function listRegistry(workspaceRoot) {
   const now = Date.now();
   return loadEntries(workspaceRoot)
@@ -68,6 +76,9 @@ function listRegistry(workspaceRoot) {
         // registry is only useful if it does not quietly point at nothing.
         missing: !!(local && !fs.existsSync(e.link)),
         thumbnail: thumb && !isUrl(thumb) && fs.existsSync(thumb) ? thumb : null,
+        // What the in-app viewer can show: the entry's PDF copy if it has one,
+        // else a local PDF/image/HTML link. Web links open in the browser.
+        viewable: !!viewablePath(e),
         status: e.status || "active",
         updatedAt: e.updatedAt || e.createdAt || null,
         staleDays: Number.isFinite(confirmed) ? Math.floor((now - confirmed) / 86400000) : null,
@@ -87,6 +98,17 @@ async function registryAction(workspaceRoot, id, action) {
   if (action === "copy") {
     clipboard.writeText(e.link);
     return { ok: true };
+  }
+  if (action === "view") {
+    // In-app viewer: returns a file:// URL for the renderer's viewer frame.
+    // Still looked up by entry id only - the renderer never supplies a path.
+    const p = viewablePath(e);
+    if (!p) return { ok: false, error: "Nothing viewable inside the app for this entry." };
+    return { ok: true, url: "file:///" + p.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/").replace(/^([A-Za-z])%3A/, "$1:"), title: e.title };
+  }
+  if (action === "openPdf" && e.pdf && fs.existsSync(e.pdf)) {
+    const err = await shell.openPath(e.pdf);
+    return err ? { ok: false, error: err } : { ok: true };
   }
   if (isUrl(e.link)) {
     if (action !== "open") return { ok: false, error: "That entry is a web link, not a file." };

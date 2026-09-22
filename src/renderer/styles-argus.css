@@ -1,0 +1,132 @@
+/* ARGUS - the Bridge (v1.39.0). See argus.js for the display rules.
+   Alert colours are reserved for deviations and never used decoratively:
+   warning = red, caution = amber, advisory = cyan, "needs you" = blue-violet. */
+:root {
+  --argus-warn: #c62828; --argus-warn-bg: #fdecec;
+  --argus-caut: #a66300; --argus-caut-bg: #fff3dd;
+  --argus-adv: #0277a8;  --argus-adv-bg: #e7f4fa;
+  --argus-dec: #4b4fc4;  --argus-dec-bg: #eeeefd;
+  --argus-up: #2e7d32;   --argus-down: #c62828;
+}
+
+/* ---- sidebar entry ---- */
+.argus-nav {
+  margin: 0 12px 8px; padding: 9px 12px; display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel);
+  color: var(--text); font: inherit; cursor: pointer; text-align: left;
+}
+.argus-nav:hover { background: var(--bg-hover); }
+.argus-nav.active { border-color: var(--accent); background: var(--bg-active); }
+.argus-nav-name { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.argus-nav-title { font-weight: 700; letter-spacing: .12em; font-size: 13px; }
+.argus-nav-sub { font-size: 11px; color: var(--text-muted); }
+.argus-nav-lamps { display: flex; gap: 4px; }
+.argus-dot { min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; color: #fff; font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center; font-variant-numeric: tabular-nums; }
+.argus-dot.warn { background: var(--argus-warn); } .argus-dot.caut { background: var(--argus-caut); } .argus-dot.dec { background: var(--argus-dec); }
+
+/* ---- header badge in the chat header ---- */
+.argus-badge { border: 1px solid var(--argus-dec); color: var(--argus-dec); background: var(--argus-dec-bg);
+  border-radius: 8px; padding: 4px 10px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.argus-badge.none { border-color: var(--border); color: var(--text-muted); background: transparent; font-weight: 400; }
+
+/* ---- Argus open: the sidebar shrinks to a strip of avatars ---- */
+body.argus-open #chat-view,
+body.argus-open #empty-state,
+body.argus-open #library-view,
+body.argus-open #xp-panel { display: none !important; }
+body.argus-open #sidebar { width: 78px !important; }
+body.argus-open #sidebar-resize-handle { display: none; }
+body.argus-open #sidebar .agent-item-text,
+body.argus-open #sidebar .agent-item-menu-btn,
+body.argus-open #sidebar .health-dot,
+body.argus-open #sidebar #library-nav,
+body.argus-open #sidebar #sidebar-header-actions,
+body.argus-open #sidebar #plan-selector-row,
+body.argus-open #sidebar #app-version,
+body.argus-open #sidebar #claude-cli-version,
+body.argus-open #sidebar #update-available-btn,
+body.argus-open #sidebar .xp-legend,
+body.argus-open #sidebar .argus-nav-name { display: none !important; }
+body.argus-open #sidebar #app-title { font-size: 0; }
+body.argus-open #sidebar .agent-item { justify-content: center; padding-left: 0; padding-right: 0; }
+body.argus-open .argus-nav { margin: 0 8px 8px; padding: 8px 4px; justify-content: center; }
+body.argus-open .argus-nav-lamps { flex-direction: column; }
+
+/* ---- the view ---- */
+#argus-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg-app); }
+#argus-view.hidden { display: none; }
+.argus-head { display: flex; align-items: center; gap: 14px; padding: 12px 22px; background: var(--bg-panel);
+  border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.argus-title { display: flex; align-items: baseline; gap: 10px; }
+.argus-title-main { font-weight: 800; letter-spacing: .18em; font-size: 18px; }
+.argus-title-sub { color: var(--text-muted); font-size: 13px; }
+.argus-stamp { color: var(--text-muted); font-size: 12px; }
+.argus-lamps { display: flex; gap: 8px; margin-left: auto; }
+.argus-lamp { border: 1px solid var(--border); border-radius: 7px; padding: 5px 12px; font-size: 12px; font-weight: 700;
+  letter-spacing: .08em; color: var(--text-muted); background: var(--bg-app); font-variant-numeric: tabular-nums; }
+.argus-lamp.on.warn { background: var(--argus-warn); border-color: var(--argus-warn); color: #fff; }
+.argus-lamp.on.caut { background: var(--argus-caut); border-color: var(--argus-caut); color: #fff; }
+.argus-lamp.on.dec  { background: var(--argus-dec);  border-color: var(--argus-dec);  color: #fff; }
+.argus-btn { border: 1px solid var(--border); background: var(--bg-panel); color: var(--text); border-radius: 7px;
+  padding: 5px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+.argus-btn:hover { background: var(--bg-hover); }
+.argus-btn.primary { border-color: var(--argus-dec); color: var(--argus-dec); }
+.argus-close { width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel);
+  color: var(--text-muted); font-size: 19px; line-height: 1; cursor: pointer; }
+.argus-close:hover { background: var(--bg-hover); color: var(--text); }
+
+.argus-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 22px 30px; }
+.argus-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.argus-kpi { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+.argus-kpi.clickable { cursor: pointer; }
+.argus-kpi.bad { border-color: var(--argus-caut); }
+.argus-kpi.bad .argus-kpi-val { color: var(--argus-caut); }
+.argus-kpi-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; }
+.argus-kpi-val { font-size: 28px; font-weight: 650; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.argus-cmp { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.argus-up { color: var(--argus-up); } .argus-down { color: var(--argus-down); }
+
+/* Three columns on a big monitor, two on a laptop, one on a small window. */
+.argus-grid { display: grid; grid-template-columns: 1.05fr 1.05fr .9fr; gap: 16px; align-items: start; }
+.argus-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+@media (max-width: 1500px) {
+  .argus-grid { grid-template-columns: 1fr 1fr; }
+  .argus-grid .argus-col:nth-child(3) { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+}
+@media (max-width: 1050px) {
+  .argus-grid { grid-template-columns: 1fr; }
+  .argus-grid .argus-col:nth-child(3) { display: flex; }
+  .argus-kpi-val { font-size: 22px; }
+  .argus-head, .argus-scroll { padding-left: 12px; padding-right: 12px; }
+}
+
+.argus-card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.argus-card-head { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin: 0 0 10px; font-weight: 600; }
+.argus-brief { font-size: 16px; line-height: 1.5; margin: 0; }
+.argus-note { font-size: 11px; color: var(--text-muted); margin: 10px 0 0; }
+.argus-quiet { color: var(--text-muted); font-size: 13px; margin: 2px 0; }
+.argus-group { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted); margin: 12px 0 4px; }
+.argus-group:first-of-type { margin-top: 2px; }
+
+.argus-item { border-left: 4px solid var(--border); border-radius: 6px; padding: 7px 10px; margin: 5px 0; cursor: pointer; }
+.argus-item:hover { background: var(--bg-hover); }
+.argus-item.decision { border-left-color: var(--argus-dec); background: var(--argus-dec-bg); }
+.argus-item.warning { border-left-color: var(--argus-warn); background: var(--argus-warn-bg); }
+.argus-item.caution { border-left-color: var(--argus-caut); background: var(--argus-caut-bg); }
+.argus-item.advisory { border-left-color: var(--argus-adv); }
+.argus-item.idea { border-left-color: var(--accent); }
+.argus-item-title { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.argus-item-meta { font-size: 12px; color: var(--text-muted); }
+.argus-item-more { display: none; margin-top: 6px; }
+.argus-item.open .argus-item-more { display: block; }
+.argus-item-detail { font-size: 13px; line-height: 1.45; margin-bottom: 6px; overflow-wrap: anywhere; }
+.argus-lvl { font-size: 10px; font-weight: 800; letter-spacing: .08em; margin-right: 7px; }
+.warning .argus-lvl { color: var(--argus-warn); } .caution .argus-lvl { color: var(--argus-caut); } .advisory .argus-lvl { color: var(--argus-adv); }
+.argus-tag { font-size: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; margin-left: 6px; }
+.argus-more summary { cursor: pointer; font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+.argus-idea-headline { font-size: 13px; font-weight: 600; margin: 2px 0 4px; }
+.argus-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 4px 0;
+  border-bottom: 1px dashed var(--border); font-variant-numeric: tabular-nums; }
+.argus-row:last-child { border-bottom: 0; }
+.argus-row-val { white-space: nowrap; }
