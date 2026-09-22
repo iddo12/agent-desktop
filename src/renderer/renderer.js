@@ -2986,7 +2986,22 @@ function submitToAgent(agentPath, text) {
 // measurement from both nights - so anything at real risk goes through the
 // proven-reliable file-handoff path instead of ever attempting the risky
 // raw-typing path near its failure boundary.
-const LONG_MESSAGE_FILE_THRESHOLD = 1800;
+//
+// 2026-09-22: 1800 was still wrong, and it cost Iddo a real message. He
+// dictated ~1,359 characters to the Product Development Agent;
+// sent-messages.jsonl proves the FULL text reached this app's write path, and
+// the CLI still dropped its head - the message arrived starting mid-sentence
+// at "and you will be able to calculate...". 1,359 is comfortably under 1800,
+// so it took exactly the inline path that 1800 was meant to protect.
+//
+// The measurements above were made with synthetic single-line test strings.
+// Real dictated text is multi-paragraph, and the CLI's input handling clearly
+// fails much earlier on it, so the boundary is not one number worth chasing.
+// Set below the shortest real message known to have survived (558 chars, same
+// agent, same night) so the proven file-handoff path carries anything longer
+// than a few sentences. Being wrong in this direction costs a file reference
+// in the transcript; being wrong the other way loses what Iddo actually said.
+const LONG_MESSAGE_FILE_THRESHOLD = 500;
 
 async function sendChatInput() {
   const text = chatInputEl.value;
@@ -3232,7 +3247,13 @@ function stopVoiceHold() {
 // cut messages). Click = start, click again = stop -> the transcript lands in the compose box for
 // review/editing; nothing is sent until Enter/Send. The legacy pty-based path above is kept and
 // can be re-enabled with localStorage.setItem("voiceLegacy","1") (DevTools console) if needed.
-const VOICE_REC_MAX_MS = 120000;
+// Raised from 2 minutes to 10 on 2026-09-22 - Iddo dictates longer messages
+// than the old cap allowed ("it stopped recording after maybe 30s or 1m - too
+// short - I sometimes record a longer message"). Only safe to raise because
+// the audio is now split into ~50s chunks before transcription; sending ten
+// minutes as one base64 JSON body would be several megabytes in a single
+// request. Still a backstop against a mic left recording by accident.
+const VOICE_REC_MAX_MS = 600000;
 let voiceRec = null; // { stream, recorder, chunks, timer }
 
 // Visible toast above the compose box (the placeholder alone was too easy to miss - a failed
@@ -3264,7 +3285,54 @@ function voiceNote(msg, ms) {
   }, ms || 6000);
 }
 
-async function blobToWav16k(blob) {
+// Cloudflare Workers AI takes the audio as base64 inside a single JSON POST,
+// so one long recording becomes one very large request: 16 kHz mono 16-bit is
+// ~32 KB per second, and base64 adds a third on top. A few minutes of speech
+// is therefore several megabytes in one body, which is why the recording cap
+// could not simply be raised when Iddo asked for longer dictation
+// (2026-09-22: "it stopped recording after maybe 30s or 1m - too short").
+//
+// Splitting the PCM into chunks and transcribing them in sequence removes the
+// ceiling entirely: each request stays small no matter how long he speaks.
+// Chunks are cut on the quietest sample in a short search window near the
+// boundary, so the split lands in a pause rather than mid-word - a hard cut
+// every N seconds reliably clips a syllable and Whisper then mis-hears the
+// word on both sides of the join.
+const VOICE_CHUNK_SECONDS = 50;
+const VOICE_CHUNK_SEEK_SECONDS = 3; // how far back to hunt for a quiet point
+
+function encodeWav16k(pcm, rate) {
+  const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const w = (o, str) => { for (let i = 0; i < str.length; i++) out.setUint8(o + i, str.charCodeAt(i)); };
+  w(0, "RIFF"); out.setUint32(4, 36 + pcm.length * 2, true); w(8, "WAVEfmt "); out.setUint32(16, 16, true);
+  out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, rate, true); out.setUint32(28, rate * 2, true);
+  out.setUint16(32, 2, true); out.setUint16(34, 16, true); w(36, "data"); out.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) out.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 0x7fff, true);
+  const bytes = new Uint8Array(out.buffer);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// Index of the quietest sample within the last VOICE_CHUNK_SEEK_SECONDS before
+// `hardEnd`, measured as the smallest local energy over a 20 ms window.
+function quietestCut(pcm, hardEnd, rate) {
+  const seek = Math.min(Math.floor(VOICE_CHUNK_SEEK_SECONDS * rate), hardEnd);
+  if (seek <= 0) return hardEnd;
+  const win = Math.max(1, Math.floor(rate * 0.02));
+  let best = hardEnd;
+  let bestEnergy = Infinity;
+  for (let i = hardEnd - seek; i + win <= hardEnd; i += win) {
+    let energy = 0;
+    for (let j = i; j < i + win; j++) energy += Math.abs(pcm[j]);
+    if (energy < bestEnergy) { bestEnergy = energy; best = i + win; }
+  }
+  return best;
+}
+
+// Returns an array of base64 WAV chunks, in order. One element for a short
+// recording, several for a long one.
+async function blobToWavChunks(blob) {
   const buf = await blob.arrayBuffer();
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   let decoded;
@@ -3280,16 +3348,17 @@ async function blobToWav16k(blob) {
   src.connect(off.destination);
   src.start();
   const pcm = (await off.startRendering()).getChannelData(0);
-  const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
-  const w = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
-  w(0, "RIFF"); out.setUint32(4, 36 + pcm.length * 2, true); w(8, "WAVEfmt "); out.setUint32(16, 16, true);
-  out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, rate, true); out.setUint32(28, rate * 2, true);
-  out.setUint16(32, 2, true); out.setUint16(34, 16, true); w(36, "data"); out.setUint32(40, pcm.length * 2, true);
-  for (let i = 0; i < pcm.length; i++) out.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 0x7fff, true);
-  const bytes = new Uint8Array(out.buffer);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
+
+  const chunkLen = VOICE_CHUNK_SECONDS * rate;
+  const chunks = [];
+  let pos = 0;
+  while (pos < pcm.length) {
+    let end = Math.min(pos + chunkLen, pcm.length);
+    if (end < pcm.length) end = Math.max(pos + Math.floor(chunkLen / 2), quietestCut(pcm, end, rate));
+    chunks.push(encodeWav16k(pcm.subarray(pos, end), rate));
+    pos = end;
+  }
+  return chunks;
 }
 
 async function startVoiceRecording() {
@@ -3325,16 +3394,30 @@ async function finishVoiceRecording(rec) {
     voiceNote("Transcribing...", 60000);
     voiceInputBtn.disabled = true;
     const blob = new Blob(rec.chunks, { type: rec.recorder.mimeType || "audio/webm" });
-    const wav = await blobToWav16k(blob);
-    const res = await window.api.transcribeAudio(wav);
-    if (!res || !res.ok) {
-      voiceNote((res && res.error) || "Transcription failed.", 12000);
-      return;
+    const wavChunks = await blobToWavChunks(blob);
+    const parts = [];
+    for (let i = 0; i < wavChunks.length; i++) {
+      if (wavChunks.length > 1) voiceNote(`Transcribing part ${i + 1} of ${wavChunks.length}...`, 60000);
+      const res = await window.api.transcribeAudio(wavChunks[i]);
+      if (!res || !res.ok) {
+        // Keep what already transcribed rather than discarding everything -
+        // losing four minutes of dictation because the last chunk failed is
+        // exactly the sort of silent loss this app has already cost Iddo.
+        if (parts.length) {
+          voiceNote(`Part ${i + 1} failed (${(res && res.error) || "unknown"}) - keeping the rest.`, 12000);
+          break;
+        }
+        voiceNote((res && res.error) || "Transcription failed.", 12000);
+        return;
+      }
+      if (res.text) parts.push(res.text.trim());
     }
-    if (!res.text) {
+    const joined = parts.join(" ").trim();
+    if (!joined) {
       voiceNote("Nothing was heard - try again a bit closer to the mic.", 6000);
       return;
     }
+    const res = { text: joined };
     const cur = chatInputEl.value;
     chatInputEl.value = cur && !/\s$/.test(cur) ? cur + " " + res.text : cur + res.text;
     autoGrowChatInput();
