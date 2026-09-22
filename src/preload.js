@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld("api", {
   getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),
   getSessionActivity: (agentPath) => ipcRenderer.invoke("get-session-activity", { agentPath }),
   getAgentOverview: () => ipcRenderer.invoke("get-agent-overview"),
+  registryList: () => ipcRenderer.invoke("registry-list"),
+  registryAction: (id, action) => ipcRenderer.invoke("registry-action", { id, action }),
   approveTelegramTasks: (ids) => ipcRenderer.invoke("approve-telegram-tasks", { ids }),
   getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),
   archiveHandoff: (agentPath) => ipcRenderer.invoke("guard-archive-handoff", { agentPath }),

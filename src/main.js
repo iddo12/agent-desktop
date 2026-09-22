@@ -24,6 +24,7 @@ const {
 const { withFsRetryAsync } = require("./fsRetry");
 const testMode = require("./testMode");
 const overview = require("./overview");
+const registry = require("./registry");
 
 // Must run before ANY app.getPath("userData") call, including the module-scope
 // consts further down (UI_FLAGS_PATH, SENT_LOG_PATH, the watchdog logs) - they
@@ -2928,6 +2929,12 @@ ipcMain.handle("get-live-transcript", (event, { agentPath }) => getLiveTranscrip
 ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActivity(sessionCwdFor(agentPath)));
 // Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
 ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor));
+// Library tabs (v1.38.0) - see registry.js. Opening is by entry id only.
+ipcMain.handle("registry-list", () => registry.listRegistry(AGENTS_ROOT));
+ipcMain.handle("registry-action", (event, { id, action }) =>
+  ["open", "reveal", "copy"].includes(action)
+    ? registry.registryAction(AGENTS_ROOT, String(id || ""), action)
+    : { ok: false, error: "Unknown action." });
 ipcMain.handle("approve-telegram-tasks", (event, { ids }) =>
   overview.approveTelegramTasks(ids, path.join(AGENTS_ROOT, "Security", "Tools", "TelegramBridge")));
 
