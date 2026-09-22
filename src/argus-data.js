@@ -1,4 +1,4 @@
-// Data for ARGUS - the Bridge (v1.39.0): one screen with every agent's report,
+// Data for ARGUS - the Bridge (v1.39.0; COO brief v1.40.0): one screen with every agent's report,
 // the Decision Queue and the ideas board. Iddo named it 2026-09-22 ("Argus",
 // the hundred-eyed watchman, and "the Bridge" for what it does).
 //
@@ -6,8 +6,9 @@
 // format by shared_tools\bridge\build_status.py:
 //   shared_reports\status\<agent>.json   one per agent ("agent-status/1")
 //   shared_reports\status\_fleet.json    usage, scheduled jobs, run costs
-//   shared_reports\status\_decisions.json the Decision Queue (heuristic until
-//                                         the COO maintains it)
+//   shared_reports\status\_decisions.json the Decision Queue (heuristic, or the
+//                                         COO's ranked queue when it is current)
+//   shared_reports\coo\brief_latest.json  the COO's bottom line for today
 //   shared_reports\recommendations\<week>\<agent>.json  weekly ideas
 // This module refreshes those files (runs the builder) and reads them. It never
 // writes anything an agent owns.
@@ -44,6 +45,22 @@ function latestRecommendations(workspace) {
   return { week, items };
 }
 
+// The COO agent's daily brief (v1.40.0). Only today's brief speaks for today:
+// an older one is returned with stale:true so the view can say so and fall back
+// to its own mechanical line, rather than presenting yesterday as now.
+function cooBrief(workspace) {
+  const file = path.join(workspace, "shared_reports", "coo", "brief_latest.json");
+  const b = readJson(file);
+  if (!b || !b.bottomLine) return null;
+  const today = new Date().toLocaleDateString("en-CA");
+  // "Written at" comes from the file, not from the brief's own generatedAt:
+  // the first run (2026-09-22) claimed 20:30 for a job that ran at 20:15, and
+  // a model-supplied clock reading is not evidence of anything.
+  let writtenAt = null;
+  try { writtenAt = fs.statSync(file).mtime.toISOString(); } catch (e) { /* keep null */ }
+  return Object.assign({}, b, { stale: b.date !== today, writtenAt });
+}
+
 async function getArgusData(workspace, { refresh = true } = {}) {
   const status = path.join(workspace, "shared_reports", "status");
   const build = refresh ? await runBuilder(workspace) : { ok: true };
@@ -60,6 +77,8 @@ async function getArgusData(workspace, { refresh = true } = {}) {
     agents,
     fleet: readJson(path.join(status, "_fleet.json")) || {},
     decisions: (readJson(path.join(status, "_decisions.json")) || {}).items || [],
+    decisionsBuiltBy: (readJson(path.join(status, "_decisions.json")) || {}).builtBy || null,
+    brief: cooBrief(workspace),
     recommendations: latestRecommendations(workspace),
   };
 }

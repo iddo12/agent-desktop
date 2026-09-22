@@ -211,35 +211,72 @@
     if (j.tasksChecked != null) kpi("Scheduled jobs OK", (j.tasksChecked - j.tasksFailing) + "/" + j.tasksChecked, null, "none", j.tasksFailing > 0);
 
     // Column A: bottom line + Decision Queue.
+    // The COO agent writes the bottom line (shared_reports\coo\brief_latest.json).
+    // Only today's brief is used: a stale one is named as stale and the
+    // mechanical line takes over, because the display research is explicit that
+    // a tile must declare old data rather than present it as current.
     const bl = card(colA, "Bottom line");
+    const brief = data.brief;
     const topW = W.slice(0, 3).map((a) => a.title.replace(/\.$/, ""));
-    bl.appendChild(el("p", "argus-brief", W.length
+    const mechanical = W.length
       ? `${W.length} warning${W.length > 1 ? "s" : ""} need action: ${topW.join("; ")}. ${C.length} caution${C.length === 1 ? "" : "s"}, ${D.length} decision${D.length === 1 ? "" : "s"} waiting on you.`
-      : `No warnings. ${C.length} caution${C.length === 1 ? "" : "s"} and ${D.length} decision${D.length === 1 ? "" : "s"} waiting on you.`));
-    bl.appendChild(el("p", "argus-note", "Written mechanically for now - the COO agent will write this line."));
+      : `No warnings. ${C.length} caution${C.length === 1 ? "" : "s"} and ${D.length} decision${D.length === 1 ? "" : "s"} waiting on you.`;
+    if (brief && !brief.stale) {
+      bl.appendChild(el("p", "argus-brief", brief.bottomLine));
+      const lists = [["Changed since yesterday", brief.changed], ["Needs you", brief.needsIddo]];
+      for (const [label, items] of lists) {
+        if (!Array.isArray(items) || !items.length) continue;
+        bl.appendChild(el("div", "argus-group", label));
+        for (const line of items.slice(0, 5)) bl.appendChild(el("div", "argus-item-meta", line));
+      }
+      const writtenAt = brief.writtenAt ? new Date(brief.writtenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null;
+      bl.appendChild(el("p", "argus-note", "Written by the COO" + (writtenAt ? " at " + writtenAt : "") + "."));
+    } else {
+      bl.appendChild(el("p", "argus-brief", mechanical));
+      bl.appendChild(el("p", "argus-note", brief
+        ? `Written mechanically - the COO's brief is from ${brief.date || "an earlier day"}, not today.`
+        : "Written mechanically - the COO agent has not written a brief yet."));
+    }
 
     const dq = card(colA, `Decision queue · ${D.length}`, "argus-decisions");
     if (!D.length) dq.appendChild(el("p", "argus-quiet", "Nothing is waiting on you."));
-    const byAgent = new Map();
-    D.forEach((d) => { if (!byAgent.has(d.agent)) byAgent.set(d.agent, []); byAgent.get(d.agent).push(d); });
-    for (const [agentFolder, items] of byAgent) {
-      dq.appendChild(el("div", "argus-group", shortAgent(agentFolder)));
-      for (const d of items) {
-        const r = el("div", "argus-item decision");
-        const t = el("div", "argus-item-title", d.title);
-        r.appendChild(t);
-        if (d.group) r.appendChild(el("div", "argus-item-meta", d.group));
-        const more = el("div", "argus-item-more");
-        more.appendChild(el("div", "argus-item-detail", d.detail));
-        const go = el("button", "argus-btn primary", "Discuss with " + shortAgent(agentFolder));
-        go.addEventListener("click", (ev) => { ev.stopPropagation(); discuss(agentFolder, `About "${d.title}": `); });
+    // Two layouts, because the two builders produce different things. The
+    // heuristic queue has no ranking at all, so grouping by agent is the only
+    // order it can honestly show. The COO's queue IS ranked, most important
+    // first - grouping it by agent would throw that ranking away (v1.40.0:
+    // rank 3 rendered below rank 4 the first time it ran), so it renders flat
+    // in rank order with the owning agent shown on each row instead.
+    const ranked = /coo/i.test(data.decisionsBuiltBy || "");
+    const decisionRow = (d, showAgent) => {
+      const r = el("div", "argus-item decision");
+      r.appendChild(el("div", "argus-item-title", d.title));
+      const metaBits = [showAgent && d.agent ? shortAgent(d.agent) : null, d.group].filter(Boolean);
+      if (metaBits.length) r.appendChild(el("div", "argus-item-meta", metaBits.join(" · ")));
+      const more = el("div", "argus-item-more");
+      more.appendChild(el("div", "argus-item-detail", d.detail));
+      if (d.action) more.appendChild(el("div", "argus-item-detail", "→ " + d.action));
+      if (d.agent) {
+        const go = el("button", "argus-btn primary", "Discuss with " + shortAgent(d.agent));
+        go.addEventListener("click", (ev) => { ev.stopPropagation(); discuss(d.agent, `About "${d.title}": `); });
         more.appendChild(go);
-        r.appendChild(more);
-        r.addEventListener("click", () => r.classList.toggle("open"));
-        dq.appendChild(r);
+      }
+      r.appendChild(more);
+      r.addEventListener("click", () => r.classList.toggle("open"));
+      return r;
+    };
+    if (ranked) {
+      for (const d of D) dq.appendChild(decisionRow(d, true));
+    } else {
+      const byAgent = new Map();
+      D.forEach((d) => { if (!byAgent.has(d.agent)) byAgent.set(d.agent, []); byAgent.get(d.agent).push(d); });
+      for (const [agentFolder, items] of byAgent) {
+        dq.appendChild(el("div", "argus-group", shortAgent(agentFolder)));
+        for (const d of items) dq.appendChild(decisionRow(d, false));
       }
     }
-    dq.appendChild(el("p", "argus-note", "Collected from each agent's OPEN NOW list. The COO will de-duplicate and rank this queue."));
+    dq.appendChild(el("p", "argus-note", /coo/i.test(data.decisionsBuiltBy || "")
+      ? "Ranked and de-duplicated by the COO, from every agent's open items."
+      : "Collected from each agent's OPEN NOW list. The COO ranks this queue once it has run today."));
 
     // Column B: needs attention.
     const na = card(colB, `Needs attention · ${W.length + C.length}`);
