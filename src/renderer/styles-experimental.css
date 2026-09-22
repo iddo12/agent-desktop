@@ -325,3 +325,53 @@ body.xp-header .xp-controls { margin-left: 0; }
 }
 .xp-scope-btn.active { background: var(--bg-active); color: var(--text); font-weight: 600; }
 .xp-body { flex: 1; overflow-y: auto; }
+
+/* --- session state by colour ---------------------------------------------
+ * The ring around the avatar is SESSION state (running / waiting / idle).
+ * The small dot inside each row stays HEALTH, which it already meant - an
+ * agent can be healthy and idle, or working while its domain is on fire, so
+ * the two must not share one indicator.
+ * ---------------------------------------------------------------------- */
+:root {
+  --state-working: #2f9e6b;  /* green - producing output right now */
+  --state-ready:   #3f7fd0;  /* blue  - session up, waiting for you */
+  --state-idle:    #b4b2a9;  /* grey  - nothing running */
+}
+
+/* Every rule below carries #agent-list so they all sit at the same
+   specificity. The first version had the transparent base ring scoped with
+   #agent-list and the coloured overrides scoped with classes only - and one
+   id outranks any number of classes, so the base always won and no ring ever
+   appeared. Confirmed by reading the computed box-shadow rather than assuming
+   the CSS had applied. */
+#agent-list .agent-item .avatar-fallback,
+#agent-list .agent-item img {
+  box-shadow: 0 0 0 2px var(--bg-sidebar), 0 0 0 4px transparent;
+  transition: box-shadow 0.15s ease;
+}
+#agent-list .agent-item.xp-working .avatar-fallback,
+#agent-list .agent-item.xp-working img { box-shadow: 0 0 0 2px var(--bg-sidebar), 0 0 0 4px var(--state-working); }
+#agent-list .agent-item.xp-ready .avatar-fallback,
+#agent-list .agent-item.xp-ready img { box-shadow: 0 0 0 2px var(--bg-sidebar), 0 0 0 4px var(--state-ready); }
+#agent-list .agent-item.xp-idle .avatar-fallback,
+#agent-list .agent-item.xp-idle img { box-shadow: 0 0 0 2px var(--bg-sidebar), 0 0 0 4px var(--state-idle); }
+
+/* Only the working ring animates. A list of pulsing avatars is noise; one
+   moving thing means "this is the one actually doing something". */
+@keyframes xp-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+#agent-list .agent-item.xp-working .avatar-fallback,
+#agent-list .agent-item.xp-working img { animation: xp-pulse 2.2s ease-in-out infinite; }
+
+.xp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 8px 14px 2px;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+.xp-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.xp-sw { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.xp-sw-working { background: var(--state-working); }
+.xp-sw-ready { background: var(--state-ready); }
+.xp-sw-idle { background: var(--state-idle); }

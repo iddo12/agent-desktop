@@ -261,7 +261,7 @@
       } else {
         body.appendChild(section("Waiting on you", "Approvals and unplaced tasks, across every agent.", GLOBAL_WAITING, true));
         body.appendChild(section("Needs attention", "Halted, stuck, or out of room - nothing else surfaces these.", GLOBAL_ATTENTION, false));
-        body.appendChild(section("Agents", "What each one is doing now, and how much is on its list.", GLOBAL_INFLIGHT, false));
+        body.appendChild(section("In progress", "What each agent is doing now, and how much is on its list.", GLOBAL_INFLIGHT, false));
       }
       const foot = document.createElement("p");
       foot.className = "xp-foot";
@@ -288,9 +288,56 @@
     document.body.appendChild(panel);
   }
 
+
+  // --- 3. Session state, shown by colour ------------------------------------
+  // Iddo: colour agents that are live, actively working, and idle differently,
+  // "also maybe true for the left pane".
+  //
+  // Deliberately NOT by recolouring the existing sidebar dot. That dot already
+  // means HEALTH (Healthy / Warning / Critical, from each agent's own state
+  // file) which is a different question from "is it running right now" - an
+  // agent can be perfectly healthy and idle, or working hard while its domain
+  // is on fire. Overloading one dot would lose one of those. Session state
+  // gets the avatar ring instead, so both are readable at a glance.
+  const STATES = ["working", "ready", "idle"];
+
+  function applyAgentStates() {
+    const rows = document.querySelectorAll("#agent-list .agent-item");
+    rows.forEach((row, i) => {
+      // Demo assignment so all three colours are visible - the real version
+      // reads getSessionActivity().working plus whether a session process
+      // exists, which is what drives the "Working... 13s" indicator already.
+      const state = STATES[i % STATES.length];
+      if (row.dataset.xpState === state) return;
+      row.dataset.xpState = state;
+      row.classList.remove("xp-working", "xp-ready", "xp-idle");
+      row.classList.add("xp-" + state);
+      const dot = row.querySelector(".health-dot");
+      if (dot && !dot.title.includes("health")) dot.title = dot.title + " (health - separate from the ring, which is session state)";
+    });
+  }
+
+  function buildLegend() {
+    const list = document.getElementById("agent-list");
+    if (!list || document.querySelector(".xp-legend")) return;
+    const legend = document.createElement("div");
+    legend.className = "xp-legend";
+    [["working", "working now"], ["ready", "open, waiting"], ["idle", "idle"]].forEach(([k, label]) => {
+      const item = document.createElement("span");
+      const sw = document.createElement("i");
+      sw.className = "xp-sw xp-sw-" + k;
+      item.appendChild(sw);
+      item.append(label);
+      legend.appendChild(item);
+    });
+    list.parentNode.insertBefore(legend, list.nextSibling);
+  }
+
   function apply() {
     try { buildHeader(); } catch (e) { console.error("[experimental] header", e); }
     try { buildPanel(); } catch (e) { console.error("[experimental] panel", e); }
+    try { applyAgentStates(); } catch (e) { console.error("[experimental] states", e); }
+    try { buildLegend(); } catch (e) { console.error("[experimental] legend", e); }
   }
 
   // The chat header is rebuilt when an agent is selected, so re-apply rather
