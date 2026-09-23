@@ -1476,7 +1476,9 @@ async function maybeRestoreLongMessage(el, text, role) {
       // because resending is how duplicates happen; the standing workspace
       // rule now has agents ask before acting on a repeat, but the warning
       // should not be pushing Iddo into creating one in the first place.
-      warn.textContent = "⚠ Not confirmed - check the conversation before resending";
+      warn.textContent = pending.waitedOnBusyAgent
+        ? "⚠ Not confirmed - the agent was busy the whole time, so this may still be queued"
+        : "⚠ Not confirmed - check the conversation before resending";
       const resendBtn = document.createElement("button");
       resendBtn.textContent = "Resend now";
       resendBtn.addEventListener("click", () => {
@@ -1523,6 +1525,13 @@ function normalizeForMatch(s) {
 // exists - a safety net against a pending bubble that never finds a
 // matching transcript entry and would otherwise pulse "sending" forever.
 const PENDING_SENT_TIMEOUT_MS = 45000;
+// How long an agent's transcript must go WITHOUT being written to before an
+// unmatched message is treated as lost. Long agentic runs write a tool_result
+// every few seconds; a genuinely dropped message sits there while the
+// transcript stays silent. 90s is comfortably longer than any gap observed
+// between tool calls in a normal run, and short enough that a real loss is
+// still surfaced while Iddo is likely still at the keyboard.
+const TRANSCRIPT_QUIET_BEFORE_FAIL_MS = 90000;
 // A BUSY agent has not lost the message - it simply has not written it to the
 // transcript yet, because Claude Code only does that when it starts
 // processing. Marking those "Not delivered - click Resend" was wrong four
@@ -1558,8 +1567,14 @@ async function rebuildChatView(agentPath, opts = {}) {
   // that the pty-timing heuristic can't see. updateThinkingIndicator() reads
   // these; the 4s stale poll guarantees they refresh even when nothing streams.
   if (activity) {
+    const wasWorking = session.transcriptWorking;
     session.transcriptWorking = !!activity.working;
     session.transcriptWorkingSince = activity.working ? Date.now() - (activity.sinceMs || 0) : null;
+    // The turn just ended as far as the transcript is concerned - this is the
+    // moment a message queued during it can safely go (2026-09-23).
+    if (wasWorking && !session.transcriptWorking && !session.busy && session.sendQueue.length > 0) {
+      setBusy(agentPath, session, false);
+    }
     if (!activity.working) session.turnStartedAt = null; // real "turn done" - clear the optimistic timer too
     updateThinkingIndicator();
   }
@@ -1664,11 +1679,40 @@ async function rebuildChatView(agentPath, opts = {}) {
     const waited = now - pending.addedAt;
     const limit = session.busy ? PENDING_SENT_BUSY_TIMEOUT_MS : PENDING_SENT_TIMEOUT_MS;
     if (waited >= limit) {
-      if (!pending.failed) {
-        pending.failed = true;
-        window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+      // 2026-09-23: before calling a message lost, check whether the agent is
+      // still writing. Iddo kept getting "your message wasn't delivered" for
+      // messages that were fine, and the traced case shows why: the
+      // Optimization agent was mid-run, its transcript logging a tool_result
+      // every five to twenty seconds for ten minutes, and the message was
+      // simply queued behind that run. Neither existing guard catches it -
+      // `session.busy` comes from pty silence, and getSessionActivity()'s
+      // `working` is "an assistant tool_use with no result yet", which goes
+      // FALSE in the gap between every pair of tool calls. The resend at
+      // 00:58:27.007 landed in exactly such a gap, between tool_results at
+      // 00:58:22.853 and 00:58:27.797.
+      //
+      // A transcript that is still growing is direct evidence, not a
+      // heuristic: the agent is alive and mid-turn, so an unmatched message
+      // is queued, not dropped. Keep waiting while it keeps writing; declare
+      // a loss only once it has been quiet for TRANSCRIPT_QUIET_BEFORE_FAIL_MS
+      // and the message still has not appeared.
+      if (!pending.failed && !pending.checkingQuiet) {
+        pending.checkingQuiet = true;
+        window.api.getTranscriptQuietMs(agentPath).then((quietMs) => {
+          pending.checkingQuiet = false;
+          if (pending.failed) return;
+          if (quietMs != null && quietMs < TRANSCRIPT_QUIET_BEFORE_FAIL_MS) {
+            // Still working. Give it another window rather than crying loss.
+            pending.addedAt = Date.now() - limit + TRANSCRIPT_QUIET_BEFORE_FAIL_MS;
+            pending.waitedOnBusyAgent = true;
+            return;
+          }
+          pending.failed = true;
+          window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+          scheduleRebuildChatView(agentPath);
+        }).catch(() => { pending.checkingQuiet = false; });
       }
-      return true; // keep it visible as a failed bubble, not silently gone
+      return true; // keep it visible - pending, or failed once the check says so
     }
     return true; // still within the timeout, still legitimately pending
   });
@@ -2104,7 +2148,16 @@ function setBusy(agentPath, session, busy) {
     refreshContextUsage(agentPath);
     refreshUsageWindows();
   }
-  if (!busy && session.sendQueue.length > 0) {
+  // 2026-09-23: the drain respects the same signal the send path uses. The
+  // idle timer fires after 900ms of pty silence, which happens constantly
+  // WHILE an agent is working - draining there would push a queued message
+  // into the middle of a turn, the very thing the queue exists to prevent.
+  // Only drain when the transcript agrees the agent is free; rebuildChatView
+  // calls back here the moment its `working` flips false, so nothing waits
+  // for the next stray byte of pty output to get going.
+  // NOTE: this guards the drain only. The compose-availability and thinking
+  // indicator updates at the end of this function must still run.
+  if (!busy && !session.transcriptWorking && session.sendQueue.length > 0) {
     // Dequeue exactly one - sending it will make the session busy again
     // once its own response starts streaming, which naturally serializes
     // the rest of the queue through this same idle-transition path rather
@@ -3109,7 +3162,19 @@ async function sendChatInput() {
   // Routing it through the same sendQueue used for a busy session closes
   // this - see the matching .then() in showTerminalFor() that flushes it
   // once the real session actually exists.
-  if (session && (session.busy || !session.started)) {
+  // 2026-09-23: `session.busy` alone is not enough to decide this. It comes
+  // from pty silence with IDLE_TIMEOUT_MS at 900ms, and a working agent goes
+  // quiet for longer than that in the gap between two tool calls - traced
+  // live on the Optimization agent, whose transcript logged a tool_result
+  // every 5-20 seconds for ten minutes while this flag flickered. Sending
+  // straight into that gap is how a message gets dropped by the CLI, which
+  // does not queue input arriving mid-turn. `transcriptWorking` comes from
+  // the transcript itself and stays true across those gaps, so an OR of the
+  // two is strictly safer: the cost of queueing an idle agent's message is a
+  // few hundred milliseconds (setBusy flushes the queue immediately), and the
+  // cost of sending into a busy one is losing what Iddo wrote. When in doubt,
+  // queue.
+  if (session && (session.busy || session.transcriptWorking || !session.started)) {
     // Stay typeable at all times rather than blocking - queue it instead;
     // setBusy() sends it automatically once the agent's actually free, and
     // showTerminalFor()'s startTerminal().then() does the same once a

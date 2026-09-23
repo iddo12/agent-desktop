@@ -74,6 +74,32 @@ process.stdin.on("end", () => {
     // Never let a cache-write failure blank out the actual status line.
   }
 
+  // Per-session freshness record (added 2026-09-23 by the Optimization agent). The shared
+  // cache above is re-written every refreshInterval by EVERY open session, including idle
+  // ones still holding a % they heard hours or days ago, so its updatedAt says nothing about
+  // freshness and its value flips between sessions (seen: weekly 25% <-> 91%). A session's
+  // value only CHANGES when it makes an API call, so recording per session when its value
+  // last changed lets a reader pick the genuinely fresh one. Additive: the cache above is
+  // untouched. Read by UsageModel\sampler.js.
+  try {
+    const sid = data.session_id;
+    if (sid && (fiveH !== null || sevenD !== null)) {
+      const p = path.join(os.homedir(), ".claude", "agent-desktop-rate-limits-by-session.json");
+      let m = {};
+      try { m = JSON.parse(fs.readFileSync(p, "utf8")); } catch (e) {}
+      const now = new Date().toISOString();
+      const cur = { p5: fiveH, r5: fiveH !== null ? rate.five_hour.resets_at || null : null, p7: sevenD, r7: sevenD !== null ? rate.seven_day.resets_at || null : null };
+      const prev = m[sid];
+      const changed = !prev || prev.p5 !== cur.p5 || prev.p7 !== cur.p7 || prev.r5 !== cur.r5 || prev.r7 !== cur.r7;
+      m[sid] = Object.assign(cur, { seenAt: now, changedAt: changed ? now : prev.changedAt, firstSeenAt: prev ? prev.firstSeenAt : now });
+      const cutoff = Date.now() - 8 * 86400000;
+      for (const k of Object.keys(m)) if (!(Date.parse(m[k].seenAt) > cutoff)) delete m[k];
+      const tmp = p + "." + process.pid + ".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(m));
+      fs.renameSync(tmp, p);
+    }
+  } catch (e) {}
+
   const parts = [];
   if (model) parts.push(model);
   if (dir) parts.push(dir);

@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld("api", {
   notifySendFailed: (agentPath, text) => ipcRenderer.invoke("notify-send-failed", { agentPath, text }),
   getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),
   getSessionActivity: (agentPath) => ipcRenderer.invoke("get-session-activity", { agentPath }),
+  getTranscriptQuietMs: (agentPath) => ipcRenderer.invoke("get-transcript-quiet-ms", { agentPath }),
   getAgentOverview: () => ipcRenderer.invoke("get-agent-overview"),
   registryList: () => ipcRenderer.invoke("registry-list"),
   argusData: (opts) => ipcRenderer.invoke("argus-data", opts),

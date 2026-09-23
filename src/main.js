@@ -2932,6 +2932,19 @@ ipcMain.handle("get-context-usage", (event, { agentPath }) => getLatestUsage(ses
 ipcMain.handle("get-live-transcript", (event, { agentPath }) => getLiveTranscriptBlocks(sessionCwdFor(agentPath)));
 
 ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActivity(sessionCwdFor(agentPath)));
+// 2026-09-23: how long the agent's transcript has been quiet. The delivery
+// check needs this because "is it working" is a heuristic that goes false in
+// every gap between two tool calls, while a transcript that is still growing
+// is direct evidence the agent is alive and mid-run - and therefore that a
+// message sitting unmatched is queued behind that run, not lost.
+ipcMain.handle("get-transcript-quiet-ms", (event, { agentPath }) => {
+  try {
+    const mtime = getLatestTranscriptMtimeMs(sessionCwdFor(agentPath));
+    return mtime == null ? null : Math.max(0, Date.now() - mtime);
+  } catch (e) {
+    return null;
+  }
+});
 // Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
 ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor));
 // ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
@@ -3007,8 +3020,8 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
       const agentName = path.basename(agentPath);
       const preview = (text || "").replace(/\s+/g, " ").trim().slice(0, 120);
       const n = new Notification({
-        title: `${agentName}: your message wasn't delivered`,
-        body: `It never reached the agent's transcript - open Agent Desktop and click Resend to try again. "${preview}${text && text.length > 120 ? "…" : ""}"`,
+        title: `${agentName}: message not confirmed`,
+        body: `It has not appeared in the agent's transcript and the agent has gone quiet - open Agent Desktop and check the conversation before resending. "${preview}${text && text.length > 120 ? "…" : ""}"`,
       });
       n.on("click", () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
