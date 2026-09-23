@@ -92,6 +92,11 @@
 
   function openArgus(focus) {
     document.body.classList.add("argus-open");
+    // The sidebar carries its own remembered width in this mode (renderer.js,
+    // ARGUS_SIDEBAR_* - user-draggable since v1.47.0, previously a hard 78px).
+    // Apply it on the mode change rather than on the next drag, or the Bridge
+    // opens at whatever width the chat sidebar happened to be at.
+    window.applySidebarWidth?.();
     view.classList.remove("hidden");
     nav.classList.add("active");
     // The Library, if open, steps aside (it has its own close).
@@ -105,6 +110,8 @@
   }
   function closeArgus() {
     document.body.classList.remove("argus-open");
+    document.body.classList.remove("argus-sidebar-wide");
+    window.applySidebarWidth?.();
     view.classList.add("hidden");
     nav.classList.remove("active");
     clearInterval(refreshTimer);

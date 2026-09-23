@@ -832,26 +832,110 @@ window.addEventListener("resize", refitActiveTerminal);
 // Drag-to-resize the sidebar - same pattern as the chat-input resize handle
 // above, but horizontal. Reported live: longer agent names/descriptions get
 // cut off at the fixed 280px width with no way to see more.
+//
+// v1.47.0: the same handle now also sizes the sidebar while ARGUS is open,
+// where it used to be hidden behind a hard-coded 78px avatar strip (Iddo,
+// 2026-09-23: "This can (and should) be wider with an option to change its
+// width"). The two modes keep SEPARATE remembered widths, because they are
+// answering different questions - the chat sidebar wants room for names and
+// descriptions, the Bridge's wants to stay out of the way of the Bridge -
+// so dragging one must not silently redefine the other. Both survive a
+// restart via localStorage; a corrupt or absent value just falls back to the
+// default rather than throwing, since a sidebar that fails to lay out would
+// take the whole renderer down with it.
 const sidebarEl = document.getElementById("sidebar");
 const sidebarResizeHandleEl = document.getElementById("sidebar-resize-handle");
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 560;
+const SIDEBAR_DEFAULT_WIDTH = 280;
+// The Argus range starts below the old 78px strip (someone may want it
+// narrower still) and stops well short of the chat sidebar's maximum: past
+// ~420px the three Bridge columns start reflowing to two and the sidebar is
+// costing more than it shows.
+const ARGUS_SIDEBAR_MIN_WIDTH = 64;
+const ARGUS_SIDEBAR_MAX_WIDTH = 420;
+const ARGUS_SIDEBAR_DEFAULT_WIDTH = 190;
+// Where the avatar strip turns back into a readable list. 150px is the width
+// at which a 36px avatar plus a name in .agent-item-name stops ellipsing to
+// two or three characters - below it, showing the text is worse than hiding it.
+const ARGUS_SIDEBAR_WIDE_AT = 150;
+const SIDEBAR_WIDTH_KEY = "agentDesktop.sidebarWidth";
+const ARGUS_SIDEBAR_WIDTH_KEY = "agentDesktop.argusSidebarWidth";
+
+function isArgusOpen() {
+  return document.body.classList.contains("argus-open");
+}
+
+function readStoredWidth(key, fallback, min, max) {
+  try {
+    const raw = Number(window.localStorage.getItem(key));
+    if (!Number.isFinite(raw) || raw <= 0) return fallback;
+    return Math.max(min, Math.min(raw, max));
+  } catch {
+    return fallback;
+  }
+}
+
+let sidebarWidth = readStoredWidth(
+  SIDEBAR_WIDTH_KEY, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+let argusSidebarWidth = readStoredWidth(
+  ARGUS_SIDEBAR_WIDTH_KEY, ARGUS_SIDEBAR_DEFAULT_WIDTH, ARGUS_SIDEBAR_MIN_WIDTH, ARGUS_SIDEBAR_MAX_WIDTH);
+
 let sidebarDragStartX = null;
 let sidebarDragStartWidth = null;
 
-function setSidebarWidth(px) {
-  const clamped = Math.max(SIDEBAR_MIN_WIDTH, Math.min(px, SIDEBAR_MAX_WIDTH));
-  sidebarEl.style.width = clamped + "px";
+// Applies whichever of the two widths the current mode calls for. Argus's
+// goes through a CSS variable rather than an inline style: styles-argus.css
+// needs !important to beat #sidebar's own rule while the Bridge is open, and
+// an inline width can't be !important - so letting the two modes write to
+// different channels keeps each one's value intact when the other takes over.
+function applySidebarWidth() {
+  if (isArgusOpen()) {
+    document.documentElement.style.setProperty("--argus-sidebar-w", argusSidebarWidth + "px");
+    document.body.classList.toggle("argus-sidebar-wide", argusSidebarWidth >= ARGUS_SIDEBAR_WIDE_AT);
+  } else {
+    sidebarEl.style.width = sidebarWidth + "px";
+  }
   // Same reasoning as setChatInputHeight() above - the terminal doesn't
   // redraw on its own just because a neighboring element resized.
   refitActiveTerminal();
 }
+// argus.js calls this on open and on close, so the sidebar takes the right
+// one of the two widths the moment the mode changes rather than on next drag.
+window.applySidebarWidth = applySidebarWidth;
+
+function setSidebarWidth(px) {
+  if (isArgusOpen()) {
+    argusSidebarWidth = Math.max(ARGUS_SIDEBAR_MIN_WIDTH, Math.min(px, ARGUS_SIDEBAR_MAX_WIDTH));
+  } else {
+    sidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(px, SIDEBAR_MAX_WIDTH));
+  }
+  applySidebarWidth();
+}
+
+function persistSidebarWidth() {
+  try {
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    window.localStorage.setItem(ARGUS_SIDEBAR_WIDTH_KEY, String(argusSidebarWidth));
+  } catch {
+    /* Private/blocked storage - the width still works for this run. */
+  }
+}
+
+applySidebarWidth();
 
 sidebarResizeHandleEl.addEventListener("mousedown", (e) => {
   sidebarDragStartX = e.clientX;
   sidebarDragStartWidth = sidebarEl.getBoundingClientRect().width;
   sidebarResizeHandleEl.classList.add("dragging");
   e.preventDefault();
+});
+
+// Double-click the handle to put the current mode back to its default - the
+// cheap way out of having dragged the Bridge's sidebar somewhere unusable.
+sidebarResizeHandleEl.addEventListener("dblclick", () => {
+  setSidebarWidth(isArgusOpen() ? ARGUS_SIDEBAR_DEFAULT_WIDTH : SIDEBAR_DEFAULT_WIDTH);
+  persistSidebarWidth();
 });
 
 window.addEventListener("mousemove", (e) => {
@@ -865,6 +949,7 @@ window.addEventListener("mouseup", () => {
   sidebarDragStartX = null;
   sidebarDragStartWidth = null;
   sidebarResizeHandleEl.classList.remove("dragging");
+  persistSidebarWidth();
 });
 
 // ---------------------------------------------------- chat message view --

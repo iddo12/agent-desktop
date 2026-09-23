@@ -30,28 +30,53 @@
   border-radius: 8px; padding: 4px 10px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .argus-badge.none { border-color: var(--border); color: var(--text-muted); background: transparent; font-weight: 400; }
 
-/* ---- Argus open: the sidebar shrinks to a strip of avatars ---- */
+/* ---- Argus open: the sidebar narrows, but the user sets how far ----
+
+   Originally this was a hard 78px strip of avatars. Iddo, 2026-09-23, on a
+   screenshot of that strip: "This can (and should) be wider with an option
+   to change its width." So the width is now a variable the same drag handle
+   the normal sidebar uses writes into (renderer.js keeps a SEPARATE
+   remembered width per mode, so widening the Bridge's sidebar doesn't
+   disturb the chat sidebar's own width and vice versa), and the strip is
+   just what you get at the narrow end of that range.
+
+   Two tiers, not one. Below ARGUS_SIDEBAR_WIDE_AT the sidebar is the avatar
+   strip it always was; at or above it, renderer.js adds .argus-sidebar-wide
+   and the things worth reading come back - agent names and roles, health
+   dots, the ARGUS nav's own label, group names. What never comes back at any
+   width is sidebar CHROME (+ Group / + Agent, the plan selector, the version
+   strings, the update button, the Library entry): those are for working in an
+   agent, and the whole point of the Bridge is that you are not. */
 body.argus-open #chat-view,
 body.argus-open #empty-state,
 body.argus-open #library-view,
 body.argus-open #xp-panel { display: none !important; }
-body.argus-open #sidebar { width: 78px !important; }
-body.argus-open #sidebar-resize-handle { display: none; }
-body.argus-open #sidebar .agent-item-text,
+body.argus-open #sidebar { width: var(--argus-sidebar-w, 190px) !important; }
+
+/* Hidden at every Argus width - chrome, not content. */
 body.argus-open #sidebar .agent-item-menu-btn,
-body.argus-open #sidebar .health-dot,
 body.argus-open #sidebar #library-nav,
 body.argus-open #sidebar #sidebar-header-actions,
 body.argus-open #sidebar #plan-selector-row,
 body.argus-open #sidebar #app-version,
 body.argus-open #sidebar #claude-cli-version,
 body.argus-open #sidebar #update-available-btn,
-body.argus-open #sidebar .xp-legend,
-body.argus-open #sidebar .argus-nav-name { display: none !important; }
-body.argus-open #sidebar #app-title { font-size: 0; }
-body.argus-open #sidebar .agent-item { justify-content: center; padding-left: 0; padding-right: 0; }
-body.argus-open .argus-nav { margin: 0 8px 8px; padding: 8px 4px; justify-content: center; }
-body.argus-open .argus-nav-lamps { flex-direction: column; }
+body.argus-open #sidebar .xp-legend { display: none !important; }
+
+/* Narrow tier only: collapse to centred avatars. */
+body.argus-open:not(.argus-sidebar-wide) #sidebar .agent-item-text,
+body.argus-open:not(.argus-sidebar-wide) #sidebar .health-dot,
+body.argus-open:not(.argus-sidebar-wide) #sidebar .group-empty,
+body.argus-open:not(.argus-sidebar-wide) #sidebar .group-name,
+body.argus-open:not(.argus-sidebar-wide) #sidebar .argus-nav-name { display: none !important; }
+body.argus-open:not(.argus-sidebar-wide) #sidebar #app-title { font-size: 0; }
+body.argus-open:not(.argus-sidebar-wide) #sidebar .agent-item { justify-content: center; padding-left: 0; padding-right: 0; }
+body.argus-open:not(.argus-sidebar-wide) .argus-nav { margin: 0 8px 8px; padding: 8px 4px; justify-content: center; }
+body.argus-open:not(.argus-sidebar-wide) .argus-nav-lamps { flex-direction: column; }
+
+/* Wide tier: keep the nav compact so it doesn't outweigh the agent list. */
+body.argus-open.argus-sidebar-wide .argus-nav { margin: 0 8px 8px; padding: 8px 10px; }
+body.argus-open.argus-sidebar-wide #sidebar #sidebar-header { padding: 16px 12px 10px; }
 
 /* ---- the view ---- */
 #argus-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg-app); position: relative; }
