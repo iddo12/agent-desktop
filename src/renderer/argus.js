@@ -665,11 +665,18 @@
         dLine(host, "Last week", (acc.lastWeek && acc.lastWeek.maePts != null)
           ? acc.lastWeek.maePts + " points" + (acc.lastWeek.n ? " over " + acc.lastWeek.n + " readings" : "")
           : "no earlier figure");
-        if (acc.improvementPts != null) {
-          dLine(host, "Change", (acc.improvementPts > 0 ? "improved by " : "worse by ") +
-            Math.abs(acc.improvementPts) + " points");
-        }
+        // A missing comparison is not an improvement of zero - the System
+        // Optimization agent asked for this explicitly, and it is the same
+        // honesty the rest of the Bridge applies to a missing previous value.
+        dLine(host, "Change", acc.improvementPts == null
+          ? "first week measured, no comparison yet"
+          : (acc.improvementPts > 0 ? "improved by " : "worse by ") + Math.abs(acc.improvementPts) + " points");
         if (acc.thisWeek.worstMissPts != null) dLine(host, "Worst single miss", acc.thisWeek.worstMissPts + " points");
+        if (acc.thisWeek.wallMaePts != null) dLine(host, "Error when a limit was actually hit", acc.thisWeek.wallMaePts + " points" +
+          (acc.thisWeek.wallsN ? " over " + acc.thisWeek.wallsN + " limit hits" : ""));
+        if (!(acc.walls || []).length) {
+          dText(host, "Reading-to-reading error flatters the model, because each estimate starts from the last real reading. The honest test is how wrong it is when a limit is actually hit, and that fills in as real limits are reached.");
+        }
         if (acc.capacity) {
           dLine(host, "Weekly capacity estimate", (acc.capacity.weeklyUnits != null ? acc.capacity.weeklyUnits + " units" : "—") +
             (acc.capacity.confidence ? " (" + acc.capacity.confidence + " confidence)" : ""));
