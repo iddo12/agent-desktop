@@ -286,8 +286,32 @@
       } else {
         dText(host, "This agent raised no findings in its latest report.");
       }
+      const open = a.openItems || [];
+      if (open.length) {
+        dSection(host, `On its open list · ${open.length}`);
+        openItemRows(host, open);
+      }
       dActions(host, a.agent, a.links, "About your latest report: ");
     };
+  }
+
+  // The items behind an "open items" / "needs you" / "blocked" count. A count
+  // is a claim; this is the evidence for it.
+  function openItemRows(host, items, note) {
+    if (!items.length) { dText(host, note || "Nothing open."); return; }
+    items.forEach((it) => {
+      const r = el("div", "argus-item" + (it.needsIddo ? " decision" : ""));
+      r.appendChild(el("div", "argus-item-title", it.title || "(untitled)"));
+      const bits = [];
+      if (it.needsIddo) bits.push("needs you");
+      if (it.status && it.status !== "open") bits.push(it.status);
+      if (it.priority === 1) bits.push("priority 1");
+      if (it.group) bits.push(it.group);
+      if (it.since) bits.push("since " + it.since);
+      if (bits.length) r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
+      if (it.detail) r.appendChild(el("div", "argus-detail-text", it.detail));
+      host.appendChild(r);
+    });
   }
 
   // One measurement, and the findings from the same part of the world.
@@ -298,6 +322,38 @@
       dLine(host, "Better when", m.better === "up" ? "higher" : m.better === "down" ? "lower" : "—");
       dLine(host, "Reported by", shortAgent(a.agent));
       dLine(host, "From", a.source || "—");
+      // Counts of open items, needs-you items and blocked items are lists in
+      // disguise - show the list itself rather than a number and a shrug.
+      const open = a.openItems || [];
+      if (["open", "needsIddo", "blocked"].includes(m.id) && open.length) {
+        const wanted = m.id === "needsIddo" ? open.filter((i) => i.needsIddo)
+          : m.id === "blocked" ? open.filter((i) => i.status === "blocked") : open;
+        dSection(host, `What this number counts · ${wanted.length}`);
+        openItemRows(host, wanted, "Nothing in this category right now.");
+        dActions(host, a.agent, a.links, `About your open items: `);
+        return;
+      }
+      // The Security card's counts ARE the findings, sliced by level.
+      const byLevel = { warnings: "warning", cautions: "caution", advisories: "advisory" };
+      if (byLevel[m.id] || m.id === "issues") {
+        const wanted = m.id === "issues" ? (a.alerts || [])
+          : (a.alerts || []).filter((al) => al.level === byLevel[m.id]);
+        dSection(host, `What this number counts · ${wanted.length}`);
+        if (!wanted.length) dText(host, "Nothing at this level right now.");
+        wanted.forEach((al) => {
+          const r = el("div", "argus-item alert " + al.level);
+          r.appendChild(el("div", "argus-item-title", al.title));
+          if (al.why) r.appendChild(el("div", "argus-detail-text", al.why));
+          if (al.action) r.appendChild(el("div", "argus-detail-text", "Do: " + al.action));
+          const bits = [];
+          if (al.firstSeen) bits.push("first seen " + al.firstSeen);
+          if (!al.scored) bits.push("not scored");
+          if (bits.length) r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
+          host.appendChild(r);
+        });
+        dActions(host, a.agent, a.links, `About the ${m.label.toLowerCase()} in your report: `);
+        return;
+      }
       const related = (a.alerts || []).filter((al) => al.domain && m.id &&
         String(al.domain).toLowerCase() === String(m.id).toLowerCase());
       if (related.length) {
@@ -338,26 +394,50 @@
     };
   }
 
-  // Scheduled jobs - what ran, what did not.
+  // Scheduled jobs - every job by name, not a count you cannot open.
   function jobsDetail(j) {
     return (host) => {
-      dLine(host, "Scheduled tasks checked", j.tasksChecked);
-      dLine(host, "Tasks failing", j.tasksFailing);
-      dLine(host, "Key outputs checked", j.outputsChecked);
-      dLine(host, "Outputs stale", j.outputsFailing);
-      const failing = j.failing || [];
-      if (failing.length) {
-        dSection(host, `Not healthy · ${failing.length}`);
-        failing.forEach((f) => {
-          const r = el("div", "argus-item alert caution");
-          r.appendChild(el("div", "argus-item-title", f.Task || f.Output || "unnamed job"));
-          if (f.Problem) r.appendChild(el("div", "argus-detail-text", f.Problem));
+      const ago = (h) => h == null ? "—" : h < 1 ? Math.round(h * 60) + " min ago"
+        : h < 48 ? Math.round(h) + "h ago" : Math.round(h / 24) + " days ago";
+      dLine(host, "Checked at", j.checkedAt ? new Date(j.checkedAt).toLocaleString() : "—");
+      dLine(host, "Scheduled tasks", (j.tasksChecked ?? "?") + " checked, " + (j.tasksFailing ?? 0) + " failing");
+      dLine(host, "Key outputs", (j.outputsChecked ?? "?") + " checked, " + (j.outputsFailing ?? 0) + " stale");
+
+      const tasks = j.tasks || [];
+      if (tasks.length) {
+        dSection(host, `Every scheduled task · ${tasks.length}`);
+        tasks.forEach((t) => {
+          const r = el("div", "argus-item" + (t.ok ? "" : " alert caution"));
+          r.appendChild(el("div", "argus-item-title", t.name || "unnamed task"));
+          const bits = [t.state || "", "last ran " + ago(t.ageHours)];
+          if (t.nextRun) bits.push("next " + new Date(t.nextRun).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }));
+          if (t.maxAgeHours != null) bits.push("expected within " + t.maxAgeHours + "h");
+          if (t.lastResult != null) bits.push("exit " + t.lastResult);
+          r.appendChild(el("div", "argus-item-meta", bits.filter(Boolean).join(" · ")));
+          if (t.problem) r.appendChild(el("div", "argus-detail-text", t.problem));
           host.appendChild(r);
         });
-      } else {
-        dText(host, "Every scheduled job ran on time and every output it should have written is fresh.");
       }
-      dText(host, "A Windows task reporting success is not proof the work happened - the check that matters is whether each job's output file is fresh, and that is what these figures count.");
+
+      const outputs = j.outputs || [];
+      if (outputs.length) {
+        dSection(host, `Every output checked · ${outputs.length}`);
+        outputs.forEach((o) => {
+          const r = el("div", "argus-item" + (o.ok ? "" : " alert caution"));
+          r.appendChild(el("div", "argus-item-title", o.name || "unnamed output"));
+          r.appendChild(el("div", "argus-item-meta", "written " + ago(o.ageHours) +
+            (o.maxAgeHours != null ? " · expected within " + o.maxAgeHours + "h" : "")));
+          if (o.file) r.appendChild(el("div", "argus-item-meta", o.file));
+          if (o.problem) r.appendChild(el("div", "argus-detail-text", o.problem));
+          host.appendChild(r);
+        });
+      }
+
+      if ((j.disabled || []).length) {
+        dSection(host, `Disabled, so not checked · ${j.disabled.length}`);
+        j.disabled.forEach((name) => dLine(host, name, "disabled"));
+      }
+      dText(host, "A Windows task reporting success is not proof the work happened - a task launches a hidden script and returns 0 either way. The check that matters is whether each job's output file is fresh, which is what the outputs above count.");
     };
   }
 
