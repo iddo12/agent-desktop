@@ -316,6 +316,26 @@
   // useful." So every row that can be attributed to an agent carries its own
   // way into that agent's chat, with a starter line naming the thing clicked,
   // rather than only the panel-level button at the bottom.
+  // An idea that came out of research carries where it came from, and those
+  // links open in the real browser rather than inside the app.
+  function sourceLinks(host, sources) {
+    if (!Array.isArray(sources) || !sources.length) return;
+    const wrap = el("div", "argus-sources");
+    wrap.appendChild(el("span", "argus-sources-label", "Sources:"));
+    sources.slice(0, 6).forEach((sc) => {
+      const url = typeof sc === "string" ? sc : sc.url;
+      if (!url || !/^https?:\/\//i.test(url)) return;
+      const a = el("a", "argus-source-link", (typeof sc === "object" && sc.title) || url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 46));
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noreferrer";
+      a.title = url;
+      a.addEventListener("click", (ev) => ev.stopPropagation());
+      wrap.appendChild(a);
+    });
+    if (wrap.children.length > 1) host.appendChild(wrap);
+  }
+
   function discussBtn(agentFolder, starter) {
     if (!agentFolder) return null;
     const b = el("button", "argus-btn discuss-inline", "Discuss with " + shortAgent(agentFolder));
@@ -325,6 +345,43 @@
   function addDiscuss(row, agentFolder, starter) {
     const b = discussBtn(agentFolder, starter);
     if (b) row.appendChild(b);
+  }
+
+  // Iddo's verdict on an idea. Three words, written straight back into the
+  // agent's own recommendations file, because an agent told to keep only the
+  // sources that keep being useful needs to know which of its ideas landed
+  // (2026-09-23). Without this the research programme has no feedback at all.
+  function verdictBar(item, week, agentFolder, onChange) {
+    const bar = el("div", "argus-verdict");
+    const current = (item.decision || {}).verdict || "none";
+    const choices = [["approved", "Approve"], ["parked", "Park"], ["rejected", "Reject"]];
+    const status = el("span", "argus-verdict-state");
+    const paint = () => {
+      const v = (item.decision || {}).verdict;
+      status.textContent = v ? v.charAt(0).toUpperCase() + v.slice(1) +
+        ((item.decision || {}).at ? " · " + new Date(item.decision.at).toLocaleDateString() : "") : "";
+      [...bar.querySelectorAll("button")].forEach((b) => b.classList.toggle("on", b.dataset.verdict === v));
+    };
+    choices.forEach(([verdict, label]) => {
+      const b = el("button", "argus-btn verdict", label);
+      b.dataset.verdict = verdict;
+      b.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const next = (item.decision || {}).verdict === verdict ? "none" : verdict;
+        b.disabled = true;
+        window.api.argusSetIdeaDecision({ week, agent: agentFolder, id: item.id, verdict: next }).then((r) => {
+          b.disabled = false;
+          if (!r || !r.ok) { status.textContent = (r && r.error) || "Could not save"; return; }
+          item.decision = next === "none" ? undefined : { verdict: next, at: new Date().toISOString() };
+          paint();
+          if (onChange) onChange();
+        });
+      });
+      bar.appendChild(b);
+    });
+    bar.appendChild(status);
+    paint();
+    return bar;
   }
 
   // Which agent owns a scheduled job. The task name prefix is the convention
@@ -433,6 +490,50 @@
     };
   }
 
+  // Everything the research found this week, including what did not make the
+  // COO's cut, plus what it cost against what it was allowed.
+  function researchDetail(R) {
+    return (host) => {
+      dLine(host, "Week", R.week);
+      dLine(host, "Agents that researched", R.digests.length);
+      if (R.budget) dLine(host, "Spent against budget", `$${R.spent.toFixed(2)} of $${R.budget.toFixed(2)}`);
+      if (R.cooHeadline) dText(host, R.cooHeadline);
+      const shown = R.worthKnowing || R.flagged || [];
+      if (shown.length) {
+        dSection(host, `Worth knowing · ${shown.length}`);
+        shown.forEach((f) => host.appendChild(findingRow(f)));
+      }
+      R.digests.forEach((d) => {
+        const rest = (d.findings || []).filter((f) => !shown.some((w) => w.id === f.id && w.agent === d.agent));
+        dSection(host, `${shortAgent(d.agent)} · ${(d.findings || []).length} found`);
+        if (d.summary) dText(host, d.summary);
+        const bits = [];
+        if (d.sourcesChecked != null) bits.push(d.sourcesChecked + " sources checked");
+        if (d.sourcesNew) bits.push(d.sourcesNew + " new");
+        if ((d.sourcesRetired || []).length) bits.push(d.sourcesRetired.length + " retired");
+        if (d.spentUsd != null) bits.push("$" + Number(d.spentUsd).toFixed(2) + " spent");
+        if (bits.length) dText(host, bits.join(" · "));
+        rest.forEach((f) => host.appendChild(findingRow(Object.assign({ agent: d.agent }, f))));
+      });
+      if (!R.digests.length) dText(host, "No agent has written a research digest for this week yet. Research runs on Saturdays, before the Sunday ideas run.");
+    };
+  }
+
+  function findingRow(f) {
+    const r = el("div", "argus-item" + (f.tier === "high" ? " alert advisory" : ""));
+    r.appendChild(el("div", "argus-item-title", f.title));
+    const meta = [shortAgent(f.agent)];
+    if (f.tier === "high") meta.push("high stakes - cross-checked");
+    if (f.confidence) meta.push(f.confidence);
+    if (f.couldBecomeIdea) meta.push("could become an idea");
+    r.appendChild(el("div", "argus-item-meta", meta.filter(Boolean).join(" · ")));
+    if (f.whatChanged) r.appendChild(el("div", "argus-detail-text", f.whatChanged));
+    if (f.soWhat) r.appendChild(el("div", "argus-detail-text", "Why it matters: " + f.soWhat));
+    sourceLinks(r, f.sources);
+    addDiscuss(r, f.agent, `About what you found - "${f.title}": `);
+    return r;
+  }
+
   const recsFor = () => data.recommendations || {};
 
   function ideasDetail(recs) {
@@ -452,6 +553,8 @@
             `impact ${it.impact}/5 · effort ${it.effort} · ${it.cost || "cost not stated"}${it.needsIddo ? " · needs you" : ""}`));
           if (it.why) r.appendChild(el("div", "argus-detail-text", it.why));
           if (it.firstStep) r.appendChild(el("div", "argus-detail-text", "First step: " + it.firstStep));
+          sourceLinks(r, it.sources);
+          r.appendChild(verdictBar(it, recs.week, set.agent));
           addDiscuss(r, set.agent, `About your idea "${it.title}": `);
           host.appendChild(r);
         });
@@ -801,6 +904,41 @@
     na.appendChild(det);
 
     // Column C: ideas, automation, departments.
+    // The week's research, above the ideas it fed (v1.44.0). Two sections, as
+    // Iddo asked: what the fleet learned that he should know, and the ideas
+    // that came out of it - each expandable to its sources.
+    const R = data.research;
+    if (R) {
+      const list = R.worthKnowing || R.flagged || [];
+      const wk = card(colC, `Worth knowing · ${R.week}`, null, () => openDetail(`Worth knowing · ${R.week}`, researchDetail(R)));
+      if (R.cooHeadline) wk.appendChild(el("p", "argus-brief", R.cooHeadline));
+      if (!list.length) {
+        wk.appendChild(el("p", "argus-quiet", R.digests.length
+          ? "The agents researched this week and flagged nothing you need to act on."
+          : "No research yet this week."));
+      }
+      list.slice(0, 6).forEach((f) => {
+        const r = el("div", "argus-item expandable");
+        r.appendChild(el("div", "argus-item-title", f.title));
+        const meta = [shortAgent(f.agent)];
+        if (f.tier === "high") meta.push("checked closely");
+        if (f.confidence && f.confidence !== "confirmed") meta.push(f.confidence);
+        r.appendChild(el("div", "argus-item-meta", meta.filter(Boolean).join(" · ")));
+        const more = el("div", "argus-item-more");
+        if (f.whatChanged) more.appendChild(el("div", "argus-item-detail", f.whatChanged));
+        if (f.soWhat) more.appendChild(el("div", "argus-item-detail", "Why it matters: " + f.soWhat));
+        sourceLinks(more, f.sources);
+        const go = discussBtn(f.agent, `About what you found - "${f.title}": `);
+        if (go) more.appendChild(go);
+        r.appendChild(more);
+        r.addEventListener("click", () => r.classList.toggle("open"));
+        wk.appendChild(r);
+      });
+      wk.appendChild(el("p", "argus-note", R.worthKnowing
+        ? "Chosen by the COO from everything the agents flagged this week."
+        : "Flagged by the agents; the COO has not cut this down yet, so it is unfiltered."));
+    }
+
     const ideas = card(colC, "Ideas this week", null, () => openDetail("Ideas this week", ideasDetail(recsFor())));
     const recs = data.recommendations || {};
     if (recs.items && recs.items.length) {
@@ -815,6 +953,10 @@
           const more = el("div", "argus-item-more");
           more.appendChild(el("div", "argus-item-detail", it.why || ""));
           if (it.firstStep) more.appendChild(el("div", "argus-item-detail", "First step: " + it.firstStep));
+          sourceLinks(more, it.sources);
+          more.appendChild(verdictBar(it, recs.week, set.agent));
+          const go = discussBtn(set.agent, `About your idea "${it.title}": `);
+          if (go) more.appendChild(go);
           r.appendChild(more);
           r.addEventListener("click", () => r.classList.toggle("open"));
           ideas.appendChild(r);

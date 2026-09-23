@@ -2944,6 +2944,10 @@ ipcMain.handle("argus-decision-count", () => argus.getDecisionCount(ARGUS_WORKSP
 // validates the path against the links the status files themselves publish,
 // so a renderer cannot ask for an arbitrary file.
 ipcMain.handle("argus-open-source", (event, { file }) => argus.openSource(ARGUS_WORKSPACE, file));
+// Iddo's verdict on a weekly idea (v1.44.0). The only write path the Argus
+// view has into an agent-owned file, and argus-data validates every field
+// before touching it - see setIdeaDecision.
+ipcMain.handle("argus-set-idea-decision", (event, payload) => argus.setIdeaDecision(ARGUS_WORKSPACE, payload || {}));
 // Library tabs (v1.38.0) - see registry.js. Opening is by entry id only.
 ipcMain.handle("registry-list", () => registry.listRegistry(AGENTS_ROOT));
 ipcMain.handle("registry-action", (event, { id, action }) =>

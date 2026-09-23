@@ -61,6 +61,37 @@ function cooBrief(workspace) {
   return Object.assign({}, b, { stale: b.date !== today, writtenAt });
 }
 
+// The week's research: what each agent learned, and the COO's cut of what is
+// actually worth Iddo's attention (v1.44.0). Two separate things deliberately
+// - the agents flag generously, the COO cuts hard to about five items, and
+// the unfiltered pile stays readable underneath rather than being thrown away.
+function weeklyResearch(workspace) {
+  const dir = path.join(workspace, "shared_reports", "research");
+  let weeks = [];
+  try { weeks = fs.readdirSync(dir).filter((w) => /^\d{4}-W\d{2}$/.test(w)).sort(); } catch (e) { return null; }
+  const week = weeks[weeks.length - 1];
+  if (!week) return null;
+  const digests = [];
+  for (const f of fs.readdirSync(path.join(dir, week)).filter((n) => n.endsWith(".json"))) {
+    const d = readJson(path.join(dir, week, f));
+    if (d && Array.isArray(d.findings)) digests.push(d);
+  }
+  const coo = readJson(path.join(workspace, "shared_reports", "coo", "weekly_" + week + ".json"));
+  return {
+    week,
+    digests,
+    // The COO's cut when it has run; otherwise everything the agents flagged,
+    // labelled as unfiltered so the difference is never silently blurred.
+    worthKnowing: coo && Array.isArray(coo.worthKnowing) ? coo.worthKnowing : null,
+    cooHeadline: coo ? coo.headline || null : null,
+    flagged: digests.flatMap((d) => (d.findings || [])
+      .filter((f) => f.worthIddoKnowing)
+      .map((f) => Object.assign({ agent: d.agent }, f))),
+    spent: digests.reduce((a, d) => a + (Number(d.spentUsd) || 0), 0),
+    budget: digests.reduce((a, d) => a + (Number(d.budgetUsd) || 0), 0),
+  };
+}
+
 async function getArgusData(workspace, { refresh = true } = {}) {
   const status = path.join(workspace, "shared_reports", "status");
   const build = refresh ? await runBuilder(workspace) : { ok: true };
@@ -80,6 +111,7 @@ async function getArgusData(workspace, { refresh = true } = {}) {
     decisionsBuiltBy: (readJson(path.join(status, "_decisions.json")) || {}).builtBy || null,
     brief: cooBrief(workspace),
     recommendations: latestRecommendations(workspace),
+    research: weeklyResearch(workspace),
   };
 }
 
@@ -108,10 +140,45 @@ async function openSource(workspace, requested) {
   return err ? { ok: false, error: err } : { ok: true };
 }
 
+// Recording Iddo's verdict on an idea (v1.44.0). This is the keystone of the
+// research programme: an agent is told to keep only the sources that keep
+// being useful, and "useful" can only mean "produced something he approved".
+// Without this write the loop is open and every source looks equally good
+// forever. Validated hard, because it is the renderer's only write path into
+// an agent-owned file: the week must look like a week, the agent must be one
+// that exists, the id must already be in that file, and the verdict must be
+// one of three words. Nothing else in the file is touched.
+const VERDICTS = ["approved", "parked", "rejected", "none"];
+
+function setIdeaDecision(workspace, { week, agent, id, verdict, note }) {
+  if (!/^\d{4}-W\d{2}$/.test(String(week || ""))) return { ok: false, error: "Bad week." };
+  if (!VERDICTS.includes(String(verdict))) return { ok: false, error: "Unknown verdict." };
+  const safeAgent = String(agent || "");
+  // Rejects separators in either direction and any dot-dot, so an agent name
+  // can never walk out of the recommendations folder.
+  if (!safeAgent || /[\\/:*?"<>|]/.test(safeAgent) || safeAgent.includes("..")) {
+    return { ok: false, error: "Bad agent." };
+  }
+  const file = path.join(workspace, "shared_reports", "recommendations", String(week), safeAgent + ".json");
+  if (!fs.existsSync(file)) return { ok: false, error: "No ideas file for that agent this week." };
+  const doc = readJson(file);
+  if (!doc || !Array.isArray(doc.items)) return { ok: false, error: "That ideas file is unreadable." };
+  const item = doc.items.find((i) => i.id === id);
+  if (!item) return { ok: false, error: "No idea with that id." };
+  if (verdict === "none") delete item.decision;
+  else item.decision = { verdict, at: new Date().toISOString(), note: note ? String(note).slice(0, 500) : undefined };
+  try {
+    fs.writeFileSync(file, JSON.stringify(doc, null, 2), "utf-8");
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+  return { ok: true, verdict };
+}
+
 // Cheap count for the header badge - no rebuild, just the last file.
 function getDecisionCount(workspace) {
   const d = readJson(path.join(workspace, "shared_reports", "status", "_decisions.json"));
   return d && Array.isArray(d.items) ? d.items.length : 0;
 }
 
-module.exports = { getArgusData, getDecisionCount, openSource };
+module.exports = { getArgusData, getDecisionCount, openSource, setIdeaDecision };

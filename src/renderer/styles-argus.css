@@ -273,3 +273,17 @@ body.argus-open .argus-nav-lamps { flex-direction: column; }
 .argus-row:hover .argus-btn.discuss-inline,
 .argus-btn.discuss-inline:focus-visible { opacity: 1; }
 .argus-row .argus-btn.discuss-inline { margin: 0 0 0 10px; }
+
+/* Iddo's verdict on an idea (v1.44.0). Deliberately plain: three small words,
+   the chosen one filled in. This is the only control in Argus that writes
+   anything, and it is the feedback the whole research programme runs on. */
+.argus-verdict { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.argus-btn.verdict { font-size: 11.5px; padding: 3px 10px; }
+.argus-btn.verdict.on { background: var(--argus-dec, #4b5bd4); border-color: var(--argus-dec, #4b5bd4); color: #fff; }
+.argus-verdict-state { font-size: 11.5px; color: var(--text-muted); }
+
+/* Where an idea came from. Links open outside the app. */
+.argus-sources { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-top: 6px; }
+.argus-sources-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.argus-source-link { font-size: 11.5px; color: var(--link, #1a5fb4); text-decoration: none; border-bottom: 1px dotted currentColor; }
+.argus-source-link:hover { border-bottom-style: solid; }

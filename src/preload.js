@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld("api", {
   argusData: (opts) => ipcRenderer.invoke("argus-data", opts),
   argusDecisionCount: () => ipcRenderer.invoke("argus-decision-count"),
   argusOpenSource: (file) => ipcRenderer.invoke("argus-open-source", { file }),
+  argusSetIdeaDecision: (payload) => ipcRenderer.invoke("argus-set-idea-decision", payload),
   registryAction: (id, action) => ipcRenderer.invoke("registry-action", { id, action }),
   approveTelegramTasks: (ids) => ipcRenderer.invoke("approve-telegram-tasks", { ids }),
   getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),
