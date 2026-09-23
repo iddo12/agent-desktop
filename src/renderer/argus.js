@@ -74,7 +74,15 @@
   const lampW = el("span", "argus-lamp warn clickable", "WARNING");
   const lampC = el("span", "argus-lamp caut clickable", "CAUTION");
   const lampD = el("span", "argus-lamp dec clickable", "NEEDS YOU");
-  lamps.append(lampW, lampC, lampD);
+  // Fourth lamp, and the only one that is not an alarm: how many agents exist
+  // and how many are working right now. Iddo, 2026-09-23, pointing at this row:
+  // "I asked that you add the number of agents and active agents with a link to
+  // a list here". v1.48.0 had put it in the number strip below instead; the
+  // strip scrolls and the lamps do not, and this is a fleet-wide fact he wants
+  // at a glance, so it belongs up here. Same click target as the strip tile -
+  // both open the roster panel.
+  const lampA = el("span", "argus-lamp agents clickable hidden", "AGENTS");
+  lamps.append(lampW, lampC, lampD, lampA);
   const refreshBtn = el("button", "argus-btn", "Refresh");
   refreshBtn.addEventListener("click", () => load(true));
   const closeBtn = el("button", "argus-close", "×");
@@ -162,6 +170,23 @@
     host.appendChild(c);
     return c;
   }
+  // A parked finding is no longer an alarm. It stays in the lists that account
+  // for everything - the agent's own findings, the tracked group - because it
+  // has not gone away, but it must not wear WARNING red there. Iddo, 2026-09-23,
+  // pointing at the NAS disk still in red inside the Security score panel after
+  // he had parked it: "still here as well". Parked comes from the fleet-wide
+  // shared_reports/accepted_risks.json, applied by build_status.py to every
+  // agent that reports the same thing.
+  const alertClass = (a) => a.accepted ? "argus-item alert parked" : "argus-item alert " + a.level;
+  const alertLvl = (a) => a.accepted ? "PARKED" : (a.level || "").toUpperCase();
+  const parkedLine = (a, host) => {
+    if (!a.accepted) return;
+    const who = a.acceptedBy ? " by " + a.acceptedBy : "";
+    host.appendChild(el("div", "argus-item-meta argus-parked-note",
+      "Parked" + who + (a.acceptedOn ? " on " + a.acceptedOn : "") +
+      " - not counted, and not shown as needing action." + (a.acceptedNote ? " " + a.acceptedNote : "")));
+  };
+
   function dedupeKey(t) {
     return (t || "").toLowerCase().replace(/\d+([.,]\d+)?/g, "").replace(/[^a-z]+/g, " ")
       .split(" ").filter((w) => w.length > 3).sort().filter((w, i, a) => a.indexOf(w) === i).join(" ");
@@ -383,9 +408,9 @@
       if (alerts.length) {
         dSection(host, `Findings it raised · ${alerts.length}`);
         alerts.forEach((al) => {
-          const r = el("div", "argus-item alert " + al.level);
+          const r = el("div", alertClass(al));
           const t = el("div", "argus-item-title");
-          t.appendChild(el("span", "argus-lvl", (al.level || "").toUpperCase()));
+          t.appendChild(el("span", "argus-lvl", alertLvl(al)));
           t.append(al.title);
           r.appendChild(t);
           if (al.why) r.appendChild(el("div", "argus-detail-text", al.why));
@@ -393,8 +418,10 @@
           const bits = [];
           if (al.firstSeen) bits.push("first seen " + al.firstSeen);
           if (al.ageDays >= 1) bits.push("standing " + al.ageDays + (al.ageDays === 1 ? " day" : " days"));
-          if (!al.scored) bits.push("not scored - tracked, not counted against the score");
+          if (al.accepted) bits.push("parked" + (al.acceptedOn ? " on " + al.acceptedOn : "") + " - not counted, and not shown as needing action");
+          else if (!al.scored) bits.push("not scored - tracked, not counted against the score");
           if (bits.length) r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
+          parkedLine(al, r);
           addDiscuss(r, a.agent, `About the "${al.title}" finding: `);
           host.appendChild(r);
         });
@@ -542,9 +569,9 @@
         dSection(host, `${heading} · ${list.length}`);
         if (note) dText(host, note);
         list.forEach((a) => {
-          const r = el("div", "argus-item alert " + a.level);
+          const r = el("div", alertClass(a));
           const t = el("div", "argus-item-title");
-          t.appendChild(el("span", "argus-lvl", a.level.toUpperCase()));
+          t.appendChild(el("span", "argus-lvl", alertLvl(a)));
           t.append(a.title);
           r.appendChild(t);
           r.appendChild(el("div", "argus-item-meta", (a.agents || []).join(" + ") +
@@ -552,6 +579,7 @@
             (a.firstSeen ? " · first seen " + a.firstSeen : "")));
           if (a.why) r.appendChild(el("div", "argus-detail-text", a.why));
           if (a.action) r.appendChild(el("div", "argus-detail-text", "Do: " + a.action));
+          parkedLine(a, r);
           addDiscuss(r, a.folder, `About the "${a.title}" finding: `);
           host.appendChild(r);
         });
@@ -691,14 +719,16 @@
         dSection(host, `What this number counts · ${wanted.length}`);
         if (!wanted.length) dText(host, "Nothing at this level right now.");
         wanted.forEach((al) => {
-          const r = el("div", "argus-item alert " + al.level);
+          const r = el("div", alertClass(al));
           r.appendChild(el("div", "argus-item-title", al.title));
           if (al.why) r.appendChild(el("div", "argus-detail-text", al.why));
           if (al.action) r.appendChild(el("div", "argus-detail-text", "Do: " + al.action));
           const bits = [];
           if (al.firstSeen) bits.push("first seen " + al.firstSeen);
-          if (!al.scored) bits.push("not scored");
+          if (al.accepted) bits.push("parked" + (al.acceptedOn ? " on " + al.acceptedOn : ""));
+          else if (!al.scored) bits.push("not scored");
           if (bits.length) r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
+          parkedLine(al, r);
           addDiscuss(r, a.agent, `About the "${al.title}" finding: `);
           host.appendChild(r);
         });
@@ -710,10 +740,11 @@
       if (related.length) {
         dSection(host, `What is behind this number · ${related.length}`);
         related.forEach((al) => {
-          const r = el("div", "argus-item alert " + al.level);
+          const r = el("div", alertClass(al));
           r.appendChild(el("div", "argus-item-title", al.title));
           if (al.why) r.appendChild(el("div", "argus-detail-text", al.why));
           if (al.action) r.appendChild(el("div", "argus-detail-text", "Do: " + al.action));
+          parkedLine(al, r);
           addDiscuss(r, a.agent, `About the "${al.title}" finding: `);
           host.appendChild(r);
         });
@@ -799,8 +830,17 @@
   // Scheduled jobs - every job by name, not a count you cannot open.
   function jobsDetail(j) {
     return (host) => {
-      const ago = (h) => h == null ? "—" : h < 1 ? Math.round(h * 60) + " min ago"
+      const fmtAgo = (h) => h == null ? "—" : h < 1 ? Math.round(h * 60) + " min ago"
         : h < 48 ? Math.round(h) + "h ago" : Math.round(h / 24) + " days ago";
+      // ageHours is how old the run was WHEN THE SNAPSHOT WAS TAKEN. Reading it
+      // as "ago" turned a 13-hour-old snapshot into "last ran 30 min ago" for a
+      // task that had actually last run 13.5 hours earlier. Measure from the
+      // real timestamp whenever there is one.
+      // Records that only carry ageHours (the outputs) get the snapshot's own
+      // age added, which is the same correction by another route.
+      const snapAgeH = j.checkedAt ? Math.max(0, (Date.now() - new Date(j.checkedAt).getTime()) / 36e5) : 0;
+      const ago = (h, at) => at ? fmtAgo((Date.now() - new Date(at).getTime()) / 36e5)
+        : h == null ? "—" : fmtAgo(h + snapAgeH);
       dLine(host, "Checked at", j.checkedAt ? new Date(j.checkedAt).toLocaleString() : "—");
       dLine(host, "Scheduled tasks", (j.tasksChecked ?? "?") + " checked, " + (j.tasksFailing ?? 0) + " failing", jumpTo("every scheduled task"));
       dLine(host, "Key outputs", (j.outputsChecked ?? "?") + " checked, " + (j.outputsFailing ?? 0) + " stale", jumpTo("every output checked"));
@@ -810,8 +850,12 @@
         dSection(host, `Every scheduled task · ${tasks.length}`);
         tasks.forEach((t) => {
           const r = el("div", "argus-item" + (t.ok ? "" : " alert caution"));
-          r.appendChild(el("div", "argus-item-title", t.name || "unnamed task"));
-          const bits = [t.state || "", "last ran " + ago(t.ageHours)];
+          const title = el("div", "argus-item-title", t.name || "unnamed task");
+          // The list is longer than the count: disabled tasks are shown but not
+          // checked, and "21 listed / 20 checked" needs saying, not guessing at.
+          if ((j.disabled || []).includes(t.name)) title.appendChild(el("span", "argus-tag", "disabled - not counted"));
+          r.appendChild(title);
+          const bits = [t.state || "", "last ran " + ago(t.ageHours, t.lastRun)];
           if (t.nextRun) bits.push("next " + new Date(t.nextRun).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }));
           if (t.maxAgeHours != null) bits.push("expected within " + t.maxAgeHours + "h");
           if (t.lastResult != null) bits.push("exit " + t.lastResult);
@@ -828,7 +872,7 @@
         outputs.forEach((o) => {
           const r = el("div", "argus-item" + (o.ok ? "" : " alert caution"));
           r.appendChild(el("div", "argus-item-title", o.name || "unnamed output"));
-          r.appendChild(el("div", "argus-item-meta", "written " + ago(o.ageHours) +
+          r.appendChild(el("div", "argus-item-meta", "written " + ago(o.ageHours, null) +
             (o.maxAgeHours != null ? " · expected within " + o.maxAgeHours + "h" : "")));
           if (o.file) r.appendChild(el("div", "argus-item-meta", o.file));
           if (o.problem) r.appendChild(el("div", "argus-detail-text", o.problem));
@@ -950,8 +994,15 @@
       const bits = [`${running} running`, `${idle} idle`];
       if (paused) bits.push(`${paused} paused`);
       if (unknown) bits.push(`${unknown} unknown`);
-      kpi("Agents", `${agentStates.length} (${running})`, null, "none", false, "",
-        () => openDetail(`Agents · ${agentStates.length}`, agentsDetail(agentStates)), bits.join(" · "));
+      const openRoster = () => openDetail(`Agents · ${agentStates.length}`, agentsDetail(agentStates));
+      kpi("Agents", `${agentStates.length} (${running})`, null, "none", false, "", openRoster, bits.join(" · "));
+      lampA.textContent = `AGENTS ${agentStates.length} (${running})`;
+      lampA.title = `${agentStates.length} agents - ${bits.join(", ")}. Click for the list.`;
+      lampA.onclick = openRoster;
+      lampA.classList.toggle("live", running > 0);
+      lampA.classList.remove("hidden");
+    } else {
+      lampA.classList.add("hidden");
     }
 
     // Column A: bottom line + Decision Queue.
@@ -963,7 +1014,7 @@
     const brief = data.brief;
     const topW = W.slice(0, 3).map((a) => a.title.replace(/\.$/, ""));
     const mechanical = W.length
-      ? `${W.length} warning${W.length > 1 ? "s" : ""} need action: ${topW.join("; ")}. ${C.length} caution${C.length === 1 ? "" : "s"}, ${D.length} decision${D.length === 1 ? "" : "s"} waiting on you.`
+      ? `${W.length} warning${W.length > 1 ? "s need" : " needs"} action: ${topW.join("; ")}. ${C.length} caution${C.length === 1 ? "" : "s"}, ${D.length} decision${D.length === 1 ? "" : "s"} waiting on you.`
       : `No warnings. ${C.length} caution${C.length === 1 ? "" : "s"} and ${D.length} decision${D.length === 1 ? "" : "s"} waiting on you.`;
     if (brief && !brief.stale) {
       bl.appendChild(el("p", "argus-brief", brief.bottomLine));
@@ -1027,9 +1078,9 @@
     const na = card(colB, `Needs attention · ${W.length + C.length}`, null,
       () => openDetail("Every finding", alertsDetail(W, C, V, tracked)));
     const alertRow = (a, host) => {
-      const r = el("div", "argus-item alert expandable " + a.level);
+      const r = el("div", (a.accepted ? "argus-item alert expandable parked" : "argus-item alert expandable " + a.level));
       const t = el("div", "argus-item-title");
-      t.appendChild(el("span", "argus-lvl", a.level.toUpperCase()));
+      t.appendChild(el("span", "argus-lvl", alertLvl(a)));
       t.append(a.title);
       r.appendChild(t);
       const meta = el("div", "argus-item-meta", a.agents.join(" + ") + (a.domain ? " · " + a.domain : ""));
@@ -1118,10 +1169,35 @@
     }
 
     const auto = card(colC, "Automation health", null, () => openDetail("Scheduled jobs", jobsDetail(j)));
+    // The summary sentence IS the number, so the sentence has to open the list.
+    // Iddo, 2026-09-23, arrow on "All 20 scheduled jobs ran on time": "pressing
+    // this doesn't show me what are the actual 20 jobs - I want a list". Only
+    // the card's own heading chevron was clickable, which is not where the eye
+    // (or the finger) goes. jobsDetail already names every task - it just had
+    // no way in from here.
+    const openJobs = () => openDetail("Scheduled jobs", jobsDetail(j));
     if (!j.tasksFailing && !j.outputsFailing) {
-      auto.appendChild(el("p", "argus-quiet", `All ${j.tasksChecked || 0} scheduled jobs ran on time; ${j.outputsChecked || 0} key outputs are fresh.`));
+      const line = el("div", "argus-row clickable");
+      line.appendChild(el("span", "", `All ${j.tasksChecked || 0} scheduled jobs ran on time; ${j.outputsChecked || 0} key outputs are fresh.`));
+      line.title = "Open the list of every job and output";
+      line.addEventListener("click", openJobs);
+      auto.appendChild(line);
     } else {
-      (j.failing || []).forEach((f) => auto.appendChild(el("div", "argus-item alert caution", (f.Task || f.Output) + ": " + f.Problem)));
+      (j.failing || []).forEach((f) => {
+        const r = el("div", "argus-item alert caution clickable", (f.Task || f.Output) + ": " + f.Problem);
+        r.addEventListener("click", openJobs);
+        auto.appendChild(r);
+      });
+    }
+    // When this snapshot was taken, always - it comes from the Optimization
+    // agent's own check, not from the moment the Bridge was refreshed, and
+    // "ran on time" read as current when the check itself was 13 hours old.
+    if (j.checkedAt) {
+      const hrs = (Date.now() - new Date(j.checkedAt).getTime()) / 36e5;
+      const meta = el("div", "argus-item-meta", "checked " +
+        (hrs < 1 ? Math.round(hrs * 60) + " min ago" : hrs < 48 ? Math.round(hrs) + "h ago" : Math.round(hrs / 24) + " days ago"));
+      if (hrs > 3) meta.appendChild(el("span", "argus-tag stale", "not a live check"));
+      auto.appendChild(meta);
     }
     const runs = ((data.fleet && data.fleet.agentRuns) || []).filter((r) => r.kind !== "ping").slice(-5).reverse();
     if (runs.length) {

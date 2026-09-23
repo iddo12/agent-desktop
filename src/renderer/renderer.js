@@ -4526,7 +4526,12 @@ restartSessionBtn.addEventListener("click", async () => {
 loadAgents();
 
 window.api.getAppVersion().then((v) => {
-  document.getElementById("app-version").textContent = `Agent Desktop v${v}`;
+  const node = document.getElementById("app-version");
+  node.textContent = `Agent Desktop v${v}`;
+  // The Bridge's narrow avatar strip has no room for the full string and
+  // renders "v<x>" from this attribute instead (styles-argus.css).
+  node.dataset.v = v;
+  node.title = `Agent Desktop v${v}`;
 });
 
 // Plan dropdown - populated from PLAN_FIVE_HOUR_ESTIMATES itself (not

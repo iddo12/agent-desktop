@@ -44,9 +44,15 @@
    strip it always was; at or above it, renderer.js adds .argus-sidebar-wide
    and the things worth reading come back - agent names and roles, health
    dots, the ARGUS nav's own label, group names. What never comes back at any
-   width is sidebar CHROME (+ Group / + Agent, the plan selector, the version
-   strings, the update button, the Library entry): those are for working in an
-   agent, and the whole point of the Bridge is that you are not. */
+   width is sidebar CHROME (+ Group / + Agent, the plan selector, the Claude
+   CLI version, the update button, the Library entry): those are for working in
+   an agent, and the whole point of the Bridge is that you are not.
+
+   The APP's own version is the exception, restored 2026-09-23 after Iddo
+   marked the empty foot of the Bridge sidebar: "missing the version of the
+   agent desktop". It went out with the chrome, but it is not chrome - it is
+   how either of us answers "is the build on screen the build I just shipped",
+   which this project asks constantly and cannot answer any other way. */
 body.argus-open #chat-view,
 body.argus-open #empty-state,
 body.argus-open #library-view,
@@ -58,7 +64,6 @@ body.argus-open #sidebar .agent-item-menu-btn,
 body.argus-open #sidebar #library-nav,
 body.argus-open #sidebar #sidebar-header-actions,
 body.argus-open #sidebar #plan-selector-row,
-body.argus-open #sidebar #app-version,
 body.argus-open #sidebar #claude-cli-version,
 body.argus-open #sidebar #update-available-btn,
 body.argus-open #sidebar .xp-legend { display: none !important; }
@@ -73,6 +78,16 @@ body.argus-open:not(.argus-sidebar-wide) #sidebar #app-title { font-size: 0; }
 body.argus-open:not(.argus-sidebar-wide) #sidebar .agent-item { justify-content: center; padding-left: 0; padding-right: 0; }
 body.argus-open:not(.argus-sidebar-wide) .argus-nav { margin: 0 8px 8px; padding: 8px 4px; justify-content: center; }
 body.argus-open:not(.argus-sidebar-wide) .argus-nav-lamps { flex-direction: column; }
+
+/* The version sits at the foot of the sidebar (the agent list above it is the
+   flex:1 child, so it lands there on its own). On the narrow avatar strip the
+   full "Agent Desktop v1.49.0" would wrap to three lines, so the real text is
+   sized to zero and ::after prints "v1.49.0" from data-v - the text stays in
+   the DOM to be read, selected and inspected. */
+body.argus-open #sidebar #app-version { padding: 8px 10px 10px; text-align: center; }
+body.argus-open:not(.argus-sidebar-wide) #sidebar #app-version { font-size: 0; }
+body.argus-open:not(.argus-sidebar-wide) #sidebar #app-version::after {
+  content: "v" attr(data-v); font-size: 0.7rem; }
 
 /* Wide tier: keep the nav compact so it doesn't outweigh the agent list. */
 body.argus-open.argus-sidebar-wide .argus-nav { margin: 0 8px 8px; padding: 8px 10px; }
@@ -141,6 +156,10 @@ body.argus-open.argus-sidebar-wide #sidebar #sidebar-header { padding: 16px 12px
 .argus-item.caution { border-left-color: var(--argus-caut); background: var(--argus-caut-bg); }
 .argus-item.advisory { border-left-color: var(--argus-adv); }
 .argus-item.idea { border-left-color: var(--accent); }
+/* Parked: still listed, deliberately not coloured like something to act on. */
+.argus-item.parked { border-left-color: var(--border); background: transparent; opacity: .78; }
+.parked .argus-lvl { color: var(--text-muted); }
+.argus-parked-note { font-style: italic; margin-top: 4px; }
 .argus-item-title { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
 .argus-item-meta { font-size: 12px; color: var(--text-muted); }
 .argus-item-more { display: none; margin-top: 6px; }
@@ -272,6 +291,12 @@ body.argus-open.argus-sidebar-wide #sidebar #sidebar-header { padding: 16px 12px
    the three biggest numbers on the screen and did nothing at all until Iddo
    pointed at a third inert figure - the rule is now "every non-zero number
    opens what it counts", so the affordance has to follow it everywhere. */
+/* The fourth lamp is a readout, not an alarm: it must never look like
+   something is wrong, so it keeps the neutral base and only gains a green
+   pip while at least one agent is actually working. */
+.argus-lamp.agents { color: var(--text); letter-spacing: .06em; }
+.argus-lamp.agents.live::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: #22a06b; margin-right: 7px; vertical-align: middle; }
 .argus-lamp.clickable { cursor: pointer; }
 .argus-lamp.clickable:hover { filter: brightness(1.08); }
 
