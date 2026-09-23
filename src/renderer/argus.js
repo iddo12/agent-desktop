@@ -219,15 +219,21 @@
           folder: a.folderName,
           name: a.displayName || a.folderName,
           role: a.role || "",
+          // The agent's own current-work line from its master_state - the
+          // closest thing to "what is it doing" that costs nothing to read.
+          status: a.status || "",
+          avatar: a.avatar || "",
           health: a.healthLabel || "Unknown",
           paused: !!a.paused,
           working: null,
+          workingMs: null,
           quietMs: null,
         };
         if (!row.paused) {
           try {
             const act = await window.api.getSessionActivity(a.path);
             row.working = act ? !!act.working : null;
+            row.workingMs = act && act.working ? act.sinceMs : null;
           } catch (e) { /* no transcript yet - stays unknown */ }
           try {
             row.quietMs = await window.api.getTranscriptQuietMs(a.path);
@@ -250,23 +256,78 @@
   }
 
   function agentsDetail(rows) {
+    // Rebuilt 2026-09-23 after Iddo saw the first version - built out of the
+    // generic label/value lines this panel uses everywhere else - and said:
+    // "this cuts off and this pane looks bad in general I wanted a nice
+    // graphical list with a row for each agent and thumbnail maybe info on
+    // what its status is in color or even what its doing something of that
+    // sort". A label/value row gives the name a narrow fixed column, so every
+    // multi-word agent name broke one word per line and the role ran off the
+    // right edge. This is a purpose-built row instead: the agent's own avatar,
+    // its name on one line with a coloured state pill, its own current-work
+    // line beneath, and the timing on the right. The state groups are gone -
+    // the colour carries that now, and running agents simply sort first.
+    const ORDER_STATE = { running: 0, idle: 1, paused: 2, unknown: 3 };
+    const stateWord = { running: "RUNNING", idle: "IDLE", paused: "PAUSED", unknown: "NO TRANSCRIPT" };
     return (host) => {
-      dText(host, "Live state, read from each agent's own transcript rather than from its last report - \"running\" means it has a tool call in flight right now, \"idle\" means its process is there and waiting. Click an agent to open its chat.");
-      for (const state of AGENT_STATES) {
-        const group = rows.filter((r) => r.state === state);
-        if (!group.length) continue;
-        dSection(host, `${state[0].toUpperCase()}${state.slice(1)} · ${group.length}`);
-        for (const r of group) {
-          const detailBits = [];
-          if (r.role) detailBits.push(r.role);
-          if (r.state === "paused") detailBits.push("paused - no background process");
-          else if (r.state === "unknown") detailBits.push("no transcript found yet");
-          else detailBits.push(agoText(r.quietMs));
-          if (r.health && r.health !== "Healthy" && r.health !== "Unknown") detailBits.push("health: " + r.health);
-          dLine(host, r.name, detailBits.join(" · "), () => openAgent(r.folder));
-        }
+      if (!rows.length) {
+        dText(host, "No agents could be listed - the agent folder could not be read.");
+        return;
       }
-      if (!rows.length) dText(host, "No agents could be listed - the agent folder could not be read.");
+      const running = rows.filter((r) => r.state === "running").length;
+      dText(host, `${rows.length} agents, ${running} working right now. Live state, read from each agent's own transcript rather than from its last report - "running" means it has a tool call in flight, "idle" means its process is there and waiting. Click a row to open that agent's chat.`);
+      const list = el("div", "argus-roster");
+      [...rows].sort((a, b) => (ORDER_STATE[a.state] - ORDER_STATE[b.state]) || a.name.localeCompare(b.name))
+        .forEach((r) => {
+          const row = el("div", "argus-roster-row " + r.state);
+          row.title = "Open " + r.name + "'s chat";
+          if (r.avatar) {
+            const img = el("img", "argus-roster-av");
+            img.src = r.avatar;
+            img.alt = "";
+            row.appendChild(img);
+          } else {
+            row.appendChild(el("div", "argus-roster-av argus-roster-av-none",
+              r.name.replace(/[^A-Za-z ]/g, "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("")));
+          }
+          const main = el("div", "argus-roster-main");
+          const nameRow = el("div", "argus-roster-name");
+          nameRow.append(el("span", "argus-roster-nametext", r.name),
+            el("span", "argus-roster-pill " + r.state, stateWord[r.state] || r.state.toUpperCase()));
+          if (r.health && r.health !== "Healthy" && r.health !== "Unknown") {
+            nameRow.appendChild(el("span", "argus-roster-pill health", r.health));
+          }
+          main.appendChild(nameRow);
+          // What it is doing, in its own words where it has them. The status
+          // comes straight out of master_state.md, so it arrives with markdown
+          // bold markers and often a leading date - both are noise here. And
+          // where an agent has no real status yet ("No work plan yet"), its
+          // role says more than a placeholder does.
+          const clean = String(r.status || "").replace(/\*\*/g, "").replace(/^[*\s]+/, "")
+            .replace(/^\d{4}-\d{2}-\d{2}\s*[:–-]\s*/, "").trim();
+          const isPlaceholder = /^(no work plan|no status|not set|none)\b/i.test(clean);
+          // One agent's status block is 26,000 characters of accumulated
+          // history; only the first sentence belongs in a one-line row.
+          const short = clean.length > 180 ? clean.slice(0, 180).replace(/\s+\S*$/, "") + "..." : clean;
+          const chosen = !clean || isPlaceholder ? (r.role || short) : short;
+          // Stripping a leading date often leaves the sentence starting
+          // lower-case ("created, and its first brief has run").
+          const line = r.state === "paused" ? "Paused - it has no background process running."
+            : chosen ? chosen.charAt(0).toUpperCase() + chosen.slice(1) : "";
+          if (line) main.appendChild(el("div", "argus-roster-doing", line));
+          row.appendChild(main);
+          const when = el("div", "argus-roster-when");
+          when.appendChild(el("div", "", r.state === "running" && r.workingMs != null
+            ? "working " + (r.workingMs < 60000 ? Math.max(1, Math.round(r.workingMs / 1000)) + " s"
+              : Math.round(r.workingMs / 60000) + " min")
+            : r.state === "paused" ? "paused"
+            : r.state === "unknown" ? "never written to"
+            : agoText(r.quietMs).replace(/^last active /, "")));
+          row.appendChild(when);
+          row.addEventListener("click", () => openAgent(r.folder));
+          list.appendChild(row);
+        });
+      host.appendChild(list);
     };
   }
 
