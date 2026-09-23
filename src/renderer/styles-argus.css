@@ -93,6 +93,15 @@ body.argus-open:not(.argus-sidebar-wide) #sidebar #app-version::after {
 body.argus-open.argus-sidebar-wide .argus-nav { margin: 0 8px 8px; padding: 8px 10px; }
 body.argus-open.argus-sidebar-wide #sidebar #sidebar-header { padding: 16px 12px 10px; }
 
+/* ---- memory & starting context ----
+   Five small figures per agent, each with yesterday's value beside it. A grid
+   rather than five stacked rows: what matters is comparing agents, and
+   auto-fit keeps it readable when the panel is narrow. */
+.argus-ctx-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 6px 14px; margin-top: 6px; }
+.argus-ctx-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; }
+.argus-ctx-val { font-size: 13px; font-variant-numeric: tabular-nums; }
+.argus-tag.bad { border-color: var(--argus-warn); color: var(--argus-warn); font-weight: 800; margin-left: 0; margin-right: 4px; }
+
 /* ---- the agent roster panel ----
    One row per agent: avatar, name + coloured state pill, the agent's own
    current-work line, and the timing on the right. Built as its own layout

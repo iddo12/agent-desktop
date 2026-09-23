@@ -465,6 +465,26 @@
           (m.prev == null ? "  (no earlier figure)" : "  (was " + m.prev + ")"),
           () => openDetail(m.label + " — " + shortAgent(a.agent), metricDetail(a, m))));
       }
+      // What this agent carries before it starts work (2026-09-23).
+      if (a.context) {
+        const c = a.context, p = c.prev || {};
+        dSection(host, "Memory and starting context" + (c.red ? " · over a limit" : ""));
+        const line = (label, v, pv, unit, fmt) => {
+          const r = el("div", "argus-row");
+          r.appendChild(el("span", "", label));
+          const val = el("span", "argus-row-val");
+          val.appendChild(withPrev(v, pv, unit, fmt));
+          r.appendChild(val);
+          host.appendChild(r);
+        };
+        line("Starting context", c.startContextTokens, p.startContextTokens, "tokens", tokens);
+        line("Memory total", c.memoryKB, p.memoryKB, "KB");
+        line("Memory index", c.indexChars, p.indexChars, "chars");
+        line("Pinned", c.pinnedKB, p.pinnedKB, "KB");
+        line("Memory files", c.memoryFiles, p.memoryFiles, "");
+        (c.redReasons || []).forEach((why) => dText(host, why));
+        if (c.startContextBasis) dText(host, "Starting context measured over " + c.startContextBasis + ".");
+      }
       const alerts = a.alerts || [];
       if (alerts.length) {
         dSection(host, `Findings it raised · ${alerts.length}`);
@@ -888,6 +908,81 @@
     };
   }
 
+  // ------------------------------------------- memory and starting context
+  // Iddo, 2026-09-23 (relayed by the COO): show each agent's memory and
+  // starting-context size here, with day-to-day growth, marked red on a
+  // threshold or on unusual growth. The Optimization agent measures it and
+  // owns the red rules; build_status.py attaches its row to each agent as
+  // `context`. Nothing renders until that file exists - an empty frame would
+  // imply a measurement is happening when it is not.
+  const num = (n) => n == null ? "–" : typeof n === "number" ? n.toLocaleString(undefined, { maximumFractionDigits: 1 }) : String(n);
+  const tokens = (n) => n == null ? "–" : n >= 1000 ? Math.round(n / 100) / 10 + "K" : String(n);
+  // "412.5 KB (400.1) ▲12.5" - a figure always appears next to the same
+  // measurement last time. Growth is the whole point here, so the arrow is
+  // plain direction rather than a better/worse judgement.
+  const withPrev = (v, p, unit, fmt) => {
+    const f = fmt || num;
+    const s = el("span", "");
+    s.append(f(v) + (unit ? " " + unit : ""));
+    const c = el("span", "argus-cmp", p == null ? " (no earlier figure)" : " (" + f(p) + ")");
+    if (p != null && typeof v === "number" && typeof p === "number" && v !== p) {
+      const d = v - p;
+      c.appendChild(el("span", "argus-delta", " " + (d > 0 ? "▲" : "▼") + f(Math.abs(Math.round(d * 10) / 10))));
+    }
+    s.appendChild(c);
+    return s;
+  };
+  const ctxAgents = () => ((data && data.agents) || []).filter((a) => a.context);
+
+  function contextDetail() {
+    return (host) => {
+      const rows = ctxAgents();
+      if (!rows.length) {
+        dText(host, "No agent memory or starting-context measurements yet. The Optimization agent writes them to shared_reports\\status\\_agent_context.json; until that file exists there is nothing to show.");
+        return;
+      }
+      const th = (rows.find((a) => a.context.thresholds && Object.keys(a.context.thresholds).length) || rows[0]).context.thresholds || {};
+      dText(host, "What each agent carries before it does any work: the memory files it loads, the memory index, the pinned memories, and the tokens its session starts with. Measured by the Optimization agent.");
+      if (th.indexChars || th.startContextTokens) {
+        dText(host, "Red when the memory index passes " + num(th.indexChars) + " characters or the starting context passes " + num(th.startContextTokens) +
+          " tokens - or when either grows unusually in one day: index +" + num(th.indexGrowthPct) + "% or +" + num(th.indexGrowthChars) +
+          " characters, starting context +" + num(th.startContextGrowthTokens) + " tokens.");
+      }
+      const order = [...rows].sort((a, b) => (b.context.red === true) - (a.context.red === true) ||
+        (b.context.startContextTokens || 0) - (a.context.startContextTokens || 0));
+      for (const a of order) {
+        const c = a.context, prev = c.prev || {};
+        const r = el("div", "argus-item" + (c.red ? " alert caution" : ""));
+        const t = el("div", "argus-item-title");
+        if (c.red) t.appendChild(el("span", "argus-lvl", "RED"));
+        t.append(shortAgent(a.agent));
+        r.appendChild(t);
+        const grid = el("div", "argus-ctx-grid");
+        const pair = (label, v, p, unit, fmt) => {
+          const cell = el("div", "argus-ctx-cell");
+          cell.appendChild(el("div", "argus-ctx-label", label));
+          const val = el("div", "argus-ctx-val");
+          val.appendChild(withPrev(v, p, unit, fmt));
+          cell.appendChild(val);
+          grid.appendChild(cell);
+        };
+        pair("Starting context", c.startContextTokens, prev.startContextTokens, "tokens", tokens);
+        pair("Memory total", c.memoryKB, prev.memoryKB, "KB");
+        pair("Memory index", c.indexChars, prev.indexChars, "chars");
+        pair("Pinned", c.pinnedKB, prev.pinnedKB, "KB");
+        pair("Files", c.memoryFiles, prev.memoryFiles, "");
+        r.appendChild(grid);
+        (c.redReasons || []).forEach((why) => r.appendChild(el("div", "argus-detail-text", why)));
+        if (c.startContextTokensMethod) {
+          r.appendChild(el("div", "argus-item-meta", "Starting context is an estimate: " + c.startContextTokensMethod));
+        }
+        if (c.measuredAt) r.appendChild(el("div", "argus-item-meta", "measured " + new Date(c.measuredAt).toLocaleString()));
+        addDiscuss(r, a.agent, "About my memory and starting-context size: ");
+        host.appendChild(r);
+      }
+    };
+  }
+
   // Scheduled jobs - every job by name, not a count you cannot open.
   function jobsDetail(j) {
     return (host) => {
@@ -1269,6 +1364,33 @@
         row.addEventListener("click", () => openDetail(shortAgent(r.agent) + " — " + r.kind + " run", runDetail(r)));
         auto.appendChild(row);
       });
+    }
+
+    // Memory and starting context, per agent (2026-09-23). Only appears once
+    // the Optimization agent has measured something - see contextDetail().
+    const ctxRows = ctxAgents();
+    if (ctxRows.length) {
+      const ctxCard = card(colC, "Memory & starting context", null, () => openDetail("Memory & starting context", contextDetail()));
+      const red = ctxRows.filter((a) => a.context.red);
+      ctxCard.appendChild(el("p", "argus-quiet", red.length
+        ? `${red.length} of ${ctxRows.length} agents are over a limit or growing unusually fast.`
+        : `All ${ctxRows.length} agents are within their memory and starting-context limits.`));
+      [...ctxRows]
+        .sort((a, b) => (b.context.red === true) - (a.context.red === true) ||
+          (b.context.startContextTokens || 0) - (a.context.startContextTokens || 0))
+        .forEach((a) => {
+          const row = el("div", "argus-row clickable");
+          const name = el("span", "");
+          if (a.context.red) name.appendChild(el("span", "argus-tag bad", "RED"));
+          name.append(" " + shortAgent(a.agent));
+          row.appendChild(name);
+          const v = el("span", "argus-row-val");
+          v.appendChild(withPrev(a.context.startContextTokens, (a.context.prev || {}).startContextTokens, "", tokens));
+          row.appendChild(v);
+          row.title = "Starting context in tokens. Click for every figure behind it.";
+          row.addEventListener("click", () => openDetail("Memory & starting context", contextDetail()));
+          ctxCard.appendChild(row);
+        });
     }
 
     for (const a of data.agents) {
