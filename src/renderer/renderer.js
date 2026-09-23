@@ -1366,6 +1366,86 @@ function addCopyButton(container, getText, extraClass) {
   return btn;
 }
 
+// Matches only the exact sentence sendChatInput() writes, so ordinary text
+// that happens to mention a path is never rewritten.
+const LONG_MESSAGE_REF_RE = /^This message was too long to paste directly, so it was saved to a file - please read it: "([^"]+)"\s*$/;
+
+// v1.47.1: the restore used to be async-only - every render drew the file path
+// first and swapped the real text in a moment later, once an IPC round-trip
+// came back, and only if the bubble it had been handed was still in the DOM.
+// Iddo saw the raw path standing in a bubble anyway ("I thought that we
+// resolved this issue"), which that design permits in more than one way: the
+// chat re-renders on a 400ms debounce off pty output, so a render's restore can
+// find its own element already replaced (`el.isConnected` false) and give up
+// silently, and if the main process is busy the read comes back later still.
+// Worse, the two places a long message shows up BEFORE it reaches the
+// transcript - the send queue and the optimistic "sending" bubble - never
+// called the restore at all, so while a busy agent held the message the path
+// was the only thing on screen.
+//
+// So the renderer now keeps what it wrote. sendChatInput() puts the real text
+// in this cache the moment it saves the file, which makes every subsequent
+// render synchronous and race-free; the async read stays as the fallback for
+// messages from an earlier run of the app (cache empty after a restart) and
+// fills the cache when it succeeds, so it can only ever be slow once.
+const longMessageCache = new Map();
+
+// The file path if `text` is exactly a long-message reference, else null.
+function longMessageRefPath(text) {
+  const m = LONG_MESSAGE_REF_RE.exec(String(text || "").trim());
+  return m ? m[1] : null;
+}
+
+// What should be SHOWN for a message, given what was SENT. Comparisons against
+// the transcript (normalizeForMatch) must keep using the sent text - only the
+// display changes.
+function longMessageDisplayText(text) {
+  const p = longMessageRefPath(text);
+  if (!p) return null;
+  return longMessageCache.get(p) || null;
+}
+
+// Draws the real message plus a small note that it travelled as a file.
+// Returns true if it drew something, false if the text was not a reference or
+// nothing is cached for it yet.
+function renderLongMessageInto(el, text) {
+  const original = longMessageDisplayText(text);
+  if (!original) return false;
+  renderRichText(el, original, { markdown: true });
+  const note = document.createElement("div");
+  note.className = "chat-long-message-note";
+  note.textContent = "sent as a file - too long to paste";
+  el.appendChild(note);
+  el.dataset.copyText = original; // copy gives the message, not the path
+  return true;
+}
+
+// Fallback for a reference this renderer did not write (an earlier run of the
+// app). Reads the file once, caches it, and re-renders through the synchronous
+// path above rather than patching the element it was handed - that element may
+// already be gone, which is exactly how the old version failed silently.
+const longMessageFetches = new Set();
+async function ensureLongMessageCached(text) {
+  const p = longMessageRefPath(text);
+  if (!p || longMessageCache.has(p) || longMessageFetches.has(p)) return;
+  longMessageFetches.add(p);
+  let original = null;
+  try {
+    original = await window.api.readLongMessage(p);
+  } catch (e) {
+    original = null; // main refused it or the file is gone - keep the path
+  } finally {
+    longMessageFetches.delete(p);
+  }
+  if (!original) return;
+  longMessageCache.set(p, original);
+  // Force the next render to actually run: the cache changed but the blocks
+  // did not, and renderChatBlocks() skips a render whose signature matches.
+  renderChatBlocks.lastSig = null;
+  if (activeAgentPath) rebuildChatView(activeAgentPath);
+}
+
+
 function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // Keep the reader where they are. This view is re-rendered from scratch on
   // every rebuild - the 4s stale poll, every burst of streaming output, etc.
@@ -1485,14 +1565,19 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     }
     const el = document.createElement("div");
     el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role;
-    // Agent and user messages render as Markdown; status lines stay plain.
-    renderRichText(el, text, { markdown: block.role !== "status" });
     // A message too long to paste is handed to the CLI as a file reference,
     // which is a transport detail - but the transcript then shows that
     // reference instead of what Iddo wrote, so scrolling back showed a path
-    // where his own words should be. Swap the real text back in, keeping a
-    // small note that it travelled as a file.
-    maybeRestoreLongMessage(el, text, block.role);
+    // where his own words should be. Draw the real text instead, from the
+    // cache, before anything is appended; if it is not cached yet (a message
+    // from an earlier run of the app) fetch it, which re-renders when it
+    // lands. Agent and user messages render as Markdown; status lines stay plain.
+    if (block.role === "user" && renderLongMessageInto(el, text)) {
+      // drawn from the cache
+    } else {
+      renderRichText(el, text, { markdown: block.role !== "status" });
+      if (block.role === "user") ensureLongMessageCached(text);
+    }
     // Status lines don't get a per-line timestamp - they're incidental and it
     // just adds a second line of vertical noise.
     if (block.timestamp && block.role !== "status") {
@@ -1506,39 +1591,6 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     if (block.role !== "status") addCopyButton(el, () => el.dataset.copyText || text, "bubble-copy-btn");
     chatMessagesViewEl.appendChild(el);
   }
-  // Matches only the exact sentence sendChatInput() writes, so ordinary text
-// that happens to mention a path is never rewritten.
-const LONG_MESSAGE_REF_RE = /^This message was too long to paste directly, so it was saved to a file - please read it: "([^"]+)"\s*$/;
-
-async function maybeRestoreLongMessage(el, text, role) {
-  if (role !== "user") return;
-  const m = LONG_MESSAGE_REF_RE.exec(String(text || "").trim());
-  if (!m) return;
-  let original = null;
-  try {
-    original = await window.api.readLongMessage(m[1]);
-  } catch (e) {
-    return; // main refused it or the file is gone - leave the bubble alone
-  }
-  if (!original || !el.isConnected) return;
-
-  // Rebuild in place rather than replacing the node: the timestamp and copy
-  // button are already children, and swapping the element would drop them.
-  const keep = Array.from(el.children).filter(
-    (c) => c.classList.contains("chat-block-time") || c.classList.contains("bubble-copy-btn")
-  );
-  el.textContent = "";
-  renderRichText(el, original, { markdown: true });
-  const note = document.createElement("div");
-  note.className = "chat-long-message-note";
-  note.textContent = "sent as a file - too long to paste";
-  el.appendChild(note);
-  keep.forEach((c) => el.appendChild(c));
-  // Copy should give the real message, not the file reference.
-  const copy = keep.find((c) => c.classList.contains("bubble-copy-btn"));
-  if (copy) copy.dataset.copyText = original;
-}
-
 // Messages shown immediately at send time, before a real matching entry
   // has shown up in the transcript yet (see submitToAgent) - a lighter
   // visual treatment (pulsing) marks them as "sending", not a normal
@@ -1548,7 +1600,11 @@ async function maybeRestoreLongMessage(el, text, role) {
   for (const pending of pendingSent || []) {
     const el = document.createElement("div");
     el.className = "chat-bubble chat-bubble-user " + (pending.failed ? "chat-bubble-failed" : "chat-bubble-pending");
-    renderRichText(el, pending.text, { markdown: true });
+    // Same as the confirmed bubbles above: show what he wrote, not the file
+    // path it travelled as. This bubble is on screen from the moment Send is
+    // pressed until the transcript catches up, which with a busy agent is the
+    // whole time he is looking at it.
+    if (!renderLongMessageInto(el, pending.text)) renderRichText(el, pending.text, { markdown: true });
     if (pending.failed) {
       // See rebuildChatView()'s pendingSent-filtering comment: this never
       // reached the agent's transcript at all. v1.27.1 auto-requeued it;
@@ -2358,8 +2414,11 @@ function renderQueue(agentPath) {
 
     const textEl = document.createElement("div");
     textEl.className = "queue-item-text";
-    textEl.textContent = text;
-    textEl.title = text;
+    // A queued long message is held as the file reference it will be sent as;
+    // showing that path told him nothing about which message is waiting.
+    const shown = longMessageDisplayText(text) || text;
+    textEl.textContent = shown;
+    textEl.title = shown;
     item.appendChild(textEl);
 
     const removeBtn = document.createElement("button");
@@ -3227,6 +3286,11 @@ async function sendChatInput() {
     try {
       const filePath = await window.api.saveLongMessage(combined);
       toSend = `This message was too long to paste directly, so it was saved to a file - please read it: "${filePath}"`;
+      // Keep what he wrote, so every place this message is drawn - the queue,
+      // the optimistic bubble, and the confirmed one once the transcript has
+      // it - shows the message rather than the path, with no file read and no
+      // race. See longMessageCache for why that matters.
+      longMessageCache.set(filePath, combined);
     } catch (e) {
       console.error("[agent-desktop] saveLongMessage failed - sending inline instead:", e);
     }
