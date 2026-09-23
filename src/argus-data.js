@@ -83,10 +83,35 @@ async function getArgusData(workspace, { refresh = true } = {}) {
   };
 }
 
+// Opening the file behind a number (v1.42.0). The renderer asks for a path,
+// but the renderer is never trusted with one: the request is honoured only if
+// that exact path appears as a links.* value inside one of the status files
+// this module already publishes. Same rule as the Library's `view` action - a
+// path from the renderer is a claim, not an authorisation.
+function sourcePaths(workspace) {
+  const dir = path.join(workspace, "shared_reports", "status");
+  const out = new Set();
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".json") && !n.startsWith("_")); } catch (e) { return out; }
+  for (const n of names) {
+    const links = (readJson(path.join(dir, n)) || {}).links || {};
+    for (const v of Object.values(links)) if (typeof v === "string" && v) out.add(path.resolve(v));
+  }
+  return out;
+}
+
+async function openSource(workspace, requested) {
+  const p = path.resolve(String(requested || ""));
+  if (!sourcePaths(workspace).has(p)) return { ok: false, error: "Not a known report file." };
+  if (!fs.existsSync(p)) return { ok: false, error: "That file does not exist yet - the agent has not written it." };
+  const err = await require("electron").shell.openPath(p);
+  return err ? { ok: false, error: err } : { ok: true };
+}
+
 // Cheap count for the header badge - no rebuild, just the last file.
 function getDecisionCount(workspace) {
   const d = readJson(path.join(workspace, "shared_reports", "status", "_decisions.json"));
   return d && Array.isArray(d.items) ? d.items.length : 0;
 }
 
-module.exports = { getArgusData, getDecisionCount };
+module.exports = { getArgusData, getDecisionCount, openSource };

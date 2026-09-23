@@ -2940,6 +2940,10 @@ ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(
 const ARGUS_WORKSPACE = "D:\\Dropbox\\Claude stuff";
 ipcMain.handle("argus-data", (event, opts) => argus.getArgusData(ARGUS_WORKSPACE, opts || {}));
 ipcMain.handle("argus-decision-count", () => argus.getDecisionCount(ARGUS_WORKSPACE));
+// Drill-down (v1.42.0): opening the report behind a number. argus-data
+// validates the path against the links the status files themselves publish,
+// so a renderer cannot ask for an arbitrary file.
+ipcMain.handle("argus-open-source", (event, { file }) => argus.openSource(ARGUS_WORKSPACE, file));
 // Library tabs (v1.38.0) - see registry.js. Opening is by entry id only.
 ipcMain.handle("registry-list", () => registry.listRegistry(AGENTS_ROOT));
 ipcMain.handle("registry-action", (event, { id, action }) =>

@@ -139,10 +139,11 @@
     if (onClick) k.addEventListener("click", onClick);
     strip.appendChild(k);
   }
-  function card(host, heading, id) {
+  function card(host, heading, id, onClick) {
     const c = el("section", "argus-card");
     if (id) c.id = id;
-    const h = el("h2", "argus-card-head", heading);
+    const h = el("h2", "argus-card-head" + (onClick ? " clickable" : ""), heading);
+    if (onClick) h.addEventListener("click", onClick);
     c.appendChild(h);
     host.appendChild(c);
     return c;
@@ -166,6 +167,244 @@
       box.focus();
       box.setSelectionRange(box.value.length, box.value.length);
     }, 400);
+  }
+
+  // ---------------------------------------------------------------- drill-down
+  // Iddo, 2026-09-23, after living with the Bridge: "most of the info is not
+  // clickable... wasn't the whole idea that almost all the info points click
+  // to present more information on that specific topic?" It was, and only the
+  // lists had it. A number you cannot interrogate is a number you end up
+  // taking on trust, which is the opposite of the point.
+  //
+  // So: one detail panel, opened from anywhere, built from data already in
+  // hand. It never invents content - if a figure has no detail behind it, the
+  // panel says where the figure came from and what would have to exist for
+  // there to be more.
+  const detail = el("div", "argus-detail hidden");
+  const detailHead = el("div", "argus-detail-head");
+  const detailTitle = el("h2", "argus-detail-title");
+  const detailClose = el("button", "argus-close", "×");
+  detailClose.title = "Close (Esc)";
+  detailClose.addEventListener("click", closeDetail);
+  detailHead.append(detailTitle, detailClose);
+  const detailBody = el("div", "argus-detail-body");
+  detail.append(detailHead, detailBody);
+  view.appendChild(detail);
+
+  function closeDetail() {
+    detail.classList.add("hidden");
+    document.body.classList.remove("argus-detail-open");
+  }
+  function openDetail(title, build) {
+    detailTitle.textContent = title;
+    detailBody.textContent = "";
+    build(detailBody);
+    detail.classList.remove("hidden");
+    document.body.classList.add("argus-detail-open");
+    detail.scrollTop = 0;
+  }
+  // Esc closes the panel first, and only then Argus itself.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !detail.classList.contains("hidden")) {
+      e.stopImmediatePropagation();
+      closeDetail();
+    }
+  }, true);
+
+  // Small builders for the panel's own content.
+  const dSection = (host, heading) => { host.appendChild(el("div", "argus-group", heading)); };
+  const dLine = (host, label, value) => {
+    const r = el("div", "argus-row");
+    r.appendChild(el("span", "", label));
+    r.appendChild(el("span", "argus-row-val", value == null || value === "" ? "–" : String(value)));
+    host.appendChild(r);
+  };
+  const dText = (host, text) => { if (text) host.appendChild(el("p", "argus-detail-text", text)); };
+  const dActions = (host, agentFolder, links, starter) => {
+    const bar = el("div", "argus-detail-actions");
+    if (links && links.report) {
+      const b = el("button", "argus-btn primary", "Open the full report");
+      b.addEventListener("click", () => openSourceFile(links.report, b));
+      bar.appendChild(b);
+    }
+    if (links && links.openItems) {
+      const b = el("button", "argus-btn", "Open its task list");
+      b.addEventListener("click", () => openSourceFile(links.openItems, b));
+      bar.appendChild(b);
+    }
+    if (agentFolder) {
+      const b = el("button", "argus-btn", "Discuss with " + shortAgent(agentFolder));
+      b.addEventListener("click", () => { closeDetail(); discuss(agentFolder, starter || ""); });
+      bar.appendChild(b);
+    }
+    if (bar.children.length) host.appendChild(bar);
+  };
+  function openSourceFile(file, btn) {
+    const was = btn.textContent;
+    window.api.argusOpenSource(file).then((r) => {
+      if (r && r.ok) return;
+      btn.textContent = (r && r.error) || "Could not open it";
+      setTimeout(() => { btn.textContent = was; }, 3000);
+    });
+  }
+
+  // An agent's whole picture: score, every metric, every finding it raised.
+  function agentDetail(a) {
+    return (host) => {
+      dLine(host, "Report date", a.reportDate || "unknown");
+      dLine(host, "Built from", a.source || "—");
+      if (a.score) {
+        dSection(host, "Score");
+        dLine(host, "Now", a.score.value + (a.score.label ? " · " + a.score.label : ""));
+        dLine(host, "Previously", a.score.prev == null ? "no earlier figure"
+          : a.score.prev + (a.score.prevDate ? " (" + a.score.prevDate + ")" : ""));
+      }
+      if ((a.metrics || []).length) {
+        dSection(host, "Every measurement");
+        a.metrics.forEach((m) => dLine(host, m.label,
+          (m.value == null ? "–" : m.value) + (m.unit || "") +
+          (m.prev == null ? "  (no earlier figure)" : "  (was " + m.prev + ")")));
+      }
+      const alerts = a.alerts || [];
+      if (alerts.length) {
+        dSection(host, `Findings it raised · ${alerts.length}`);
+        alerts.forEach((al) => {
+          const r = el("div", "argus-item alert " + al.level);
+          const t = el("div", "argus-item-title");
+          t.appendChild(el("span", "argus-lvl", (al.level || "").toUpperCase()));
+          t.append(al.title);
+          r.appendChild(t);
+          if (al.why) r.appendChild(el("div", "argus-detail-text", al.why));
+          if (al.action) r.appendChild(el("div", "argus-detail-text", "Do: " + al.action));
+          const bits = [];
+          if (al.firstSeen) bits.push("first seen " + al.firstSeen);
+          if (al.ageDays >= 1) bits.push("standing " + al.ageDays + (al.ageDays === 1 ? " day" : " days"));
+          if (!al.scored) bits.push("not scored - tracked, not counted against the score");
+          if (bits.length) r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
+          host.appendChild(r);
+        });
+      } else {
+        dText(host, "This agent raised no findings in its latest report.");
+      }
+      dActions(host, a.agent, a.links, "About your latest report: ");
+    };
+  }
+
+  // One measurement, and the findings from the same part of the world.
+  function metricDetail(a, m) {
+    return (host) => {
+      dLine(host, "Now", (m.value == null ? "–" : m.value) + (m.unit || ""));
+      dLine(host, "Previously", m.prev == null ? "no earlier figure" : m.prev + (m.unit || ""));
+      dLine(host, "Better when", m.better === "up" ? "higher" : m.better === "down" ? "lower" : "—");
+      dLine(host, "Reported by", shortAgent(a.agent));
+      dLine(host, "From", a.source || "—");
+      const related = (a.alerts || []).filter((al) => al.domain && m.id &&
+        String(al.domain).toLowerCase() === String(m.id).toLowerCase());
+      if (related.length) {
+        dSection(host, `What is behind this number · ${related.length}`);
+        related.forEach((al) => {
+          const r = el("div", "argus-item alert " + al.level);
+          r.appendChild(el("div", "argus-item-title", al.title));
+          if (al.why) r.appendChild(el("div", "argus-detail-text", al.why));
+          if (al.action) r.appendChild(el("div", "argus-detail-text", "Do: " + al.action));
+          host.appendChild(r);
+        });
+      } else {
+        dText(host, "No finding is filed against this measurement specifically. The full report has the workings behind it.");
+      }
+      dActions(host, a.agent, a.links, `About the "${m.label}" figure in your report: `);
+    };
+  }
+
+  // Claude usage - the fleet's shared budget.
+  function usageDetail(u) {
+    return (host) => {
+      dLine(host, "5-hour session window", u.fiveHourPct == null ? "unknown" : u.fiveHourPct + "% used");
+      dLine(host, "7-day window", u.weekPct == null ? "unknown" : u.weekPct + "% used");
+      dLine(host, "Weekly window resets", u.weekResetsAt ? new Date(u.weekResetsAt).toLocaleString() : "—");
+      if ((u.topAgentsWeek || []).length) {
+        dSection(host, "Who used it this week");
+        u.topAgentsWeek.forEach((t) => dLine(host, shortAgent(t.agent || t.name || "?"),
+          (t.pct != null ? t.pct + "%" : t.messages != null ? t.messages + " messages" : "—")));
+      }
+      const runs = ((data.fleet && data.fleet.agentRuns) || []).filter((r) => r.kind !== "ping").slice(-12).reverse();
+      if (runs.length) {
+        dSection(host, "Recent unattended runs, and what they cost");
+        runs.forEach((r) => dLine(host,
+          `${shortAgent(r.agent)} · ${r.kind} · ${new Date(r.at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`,
+          `${r.result} · ${r.turns ?? "?"} turns · ${r.apiEquivalentUsd != null ? "$" + Number(r.apiEquivalentUsd).toFixed(2) : "—"}`));
+      }
+      dText(host, "These percentages come from the usage model in the System Optimization agent, which reads Claude's own rate-limit figures. When Anthropic's own banner disagrees with this number, believe the banner.");
+    };
+  }
+
+  // Scheduled jobs - what ran, what did not.
+  function jobsDetail(j) {
+    return (host) => {
+      dLine(host, "Scheduled tasks checked", j.tasksChecked);
+      dLine(host, "Tasks failing", j.tasksFailing);
+      dLine(host, "Key outputs checked", j.outputsChecked);
+      dLine(host, "Outputs stale", j.outputsFailing);
+      const failing = j.failing || [];
+      if (failing.length) {
+        dSection(host, `Not healthy · ${failing.length}`);
+        failing.forEach((f) => {
+          const r = el("div", "argus-item alert caution");
+          r.appendChild(el("div", "argus-item-title", f.Task || f.Output || "unnamed job"));
+          if (f.Problem) r.appendChild(el("div", "argus-detail-text", f.Problem));
+          host.appendChild(r);
+        });
+      } else {
+        dText(host, "Every scheduled job ran on time and every output it should have written is fresh.");
+      }
+      dText(host, "A Windows task reporting success is not proof the work happened - the check that matters is whether each job's output file is fresh, and that is what these figures count.");
+    };
+  }
+
+  // The COO's brief in full - the bottom line is only its first sentence.
+  function briefDetail() {
+    return (host) => {
+      const b = data.brief;
+      if (!b) {
+        dText(host, "The COO has not written a brief yet. It runs unattended at 09:15 each day, after both morning reviews, and writes shared_reports\coo\brief_latest.json.");
+        dActions(host, "COO Agent", null, "About today's brief: ");
+        return;
+      }
+      dLine(host, "Written for", b.date);
+      dLine(host, "Written at", b.writtenAt ? new Date(b.writtenAt).toLocaleString() : "—");
+      dLine(host, "Agents read", b.agentsRead == null ? "—" : b.agentsRead);
+      if (b.stale) dText(host, "This brief is not from today, so the Bridge is showing its own mechanical line instead. What follows is what the COO last wrote.");
+      dSection(host, "Bottom line");
+      dText(host, b.bottomLine);
+      if ((b.changed || []).length) {
+        dSection(host, "Changed since yesterday");
+        b.changed.forEach((line) => dText(host, line));
+      }
+      if ((b.needsIddo || []).length) {
+        dSection(host, "Needs you");
+        b.needsIddo.forEach((line) => dText(host, line));
+      }
+      dActions(host, "COO Agent", null, "About today's brief: ");
+    };
+  }
+
+  // One unattended run, with what it cost.
+  function runDetail(r) {
+    return (host) => {
+      dLine(host, "Agent", shortAgent(r.agent));
+      dLine(host, "Job", r.kind);
+      dLine(host, "Started", new Date(r.at).toLocaleString());
+      dLine(host, "Result", r.result + (r.exitCode != null ? " (exit " + r.exitCode + ")" : ""));
+      dLine(host, "Turns used", (r.turns ?? "?") + (r.maxTurns ? " of " + r.maxTurns : ""));
+      dLine(host, "Model", r.model || "—");
+      dLine(host, "Duration", r.durationSec != null ? r.durationSec + "s" : "—");
+      dLine(host, "API-equivalent cost", r.apiEquivalentUsd != null ? "$" + Number(r.apiEquivalentUsd).toFixed(4) : "—");
+      dLine(host, "Output tokens", r.outputTokens == null ? "—" : r.outputTokens.toLocaleString());
+      dLine(host, "Cache read tokens", r.cacheReadTokens == null ? "—" : r.cacheReadTokens.toLocaleString());
+      if (r.refusedActions) dText(host, r.refusedActions + " action(s) were refused by the permission classifier during this run.");
+      dText(host, "Every unattended run appends a line to shared_reports\agent_runs_ledger.jsonl, which is where these figures come from.");
+      dActions(host, r.agent, null, `About your ${r.kind} run on ${new Date(r.at).toLocaleDateString()}: `);
+    };
   }
 
   // ---------------------------------------------------------------- render
@@ -201,21 +440,24 @@
     // Glance: the number strip.
     const sec = data.agents.find((a) => a.agent === "Security");
     const opt = data.agents.find((a) => (a.agent || "").startsWith("System Optimization"));
-    if (sec && sec.score) kpi("Security score", sec.score.value, sec.score.prev, "up", sec.score.value < 75);
-    if (opt && opt.score) kpi("Maintenance score", opt.score.value, opt.score.prev, "up", opt.score.value < 75);
+    if (sec && sec.score) kpi("Security score", sec.score.value, sec.score.prev, "up", sec.score.value < 75, "",
+      () => openDetail("Security score", agentDetail(sec)));
+    if (opt && opt.score) kpi("Maintenance score", opt.score.value, opt.score.prev, "up", opt.score.value < 75, "",
+      () => openDetail("Maintenance score", agentDetail(opt)));
     kpi("Needs you", D.length, null, "none", D.length > 0, "", () => document.getElementById("argus-decisions")?.scrollIntoView({ block: "start" }));
     const u = (data.fleet && data.fleet.usage) || {};
-    kpi("Claude - this week", u.weekPct, null, "none", u.weekPct > 70, "%");
-    kpi("Claude - 5 hours", u.fiveHourPct, null, "none", u.fiveHourPct > 70, "%");
+    kpi("Claude - this week", u.weekPct, null, "none", u.weekPct > 70, "%", () => openDetail("Claude usage", usageDetail(u)));
+    kpi("Claude - 5 hours", u.fiveHourPct, null, "none", u.fiveHourPct > 70, "%", () => openDetail("Claude usage", usageDetail(u)));
     const j = (data.fleet && data.fleet.jobs) || {};
-    if (j.tasksChecked != null) kpi("Scheduled jobs OK", (j.tasksChecked - j.tasksFailing) + "/" + j.tasksChecked, null, "none", j.tasksFailing > 0);
+    if (j.tasksChecked != null) kpi("Scheduled jobs OK", (j.tasksChecked - j.tasksFailing) + "/" + j.tasksChecked, null, "none", j.tasksFailing > 0, "",
+      () => openDetail("Scheduled jobs", jobsDetail(j)));
 
     // Column A: bottom line + Decision Queue.
     // The COO agent writes the bottom line (shared_reports\coo\brief_latest.json).
     // Only today's brief is used: a stale one is named as stale and the
     // mechanical line takes over, because the display research is explicit that
     // a tile must declare old data rather than present it as current.
-    const bl = card(colA, "Bottom line");
+    const bl = card(colA, "Bottom line", null, () => openDetail("Bottom line", briefDetail()));
     const brief = data.brief;
     const topW = W.slice(0, 3).map((a) => a.title.replace(/\.$/, ""));
     const mechanical = W.length
@@ -248,7 +490,7 @@
     // in rank order with the owning agent shown on each row instead.
     const ranked = /coo/i.test(data.decisionsBuiltBy || "");
     const decisionRow = (d, showAgent) => {
-      const r = el("div", "argus-item decision");
+      const r = el("div", "argus-item decision expandable");
       r.appendChild(el("div", "argus-item-title", d.title));
       const metaBits = [showAgent && d.agent ? shortAgent(d.agent) : null, d.group].filter(Boolean);
       if (metaBits.length) r.appendChild(el("div", "argus-item-meta", metaBits.join(" · ")));
@@ -281,7 +523,7 @@
     // Column B: needs attention.
     const na = card(colB, `Needs attention · ${W.length + C.length}`);
     const alertRow = (a, host) => {
-      const r = el("div", "argus-item alert " + a.level);
+      const r = el("div", "argus-item alert expandable " + a.level);
       const t = el("div", "argus-item-title");
       t.appendChild(el("span", "argus-lvl", a.level.toUpperCase()));
       t.append(a.title);
@@ -317,7 +559,7 @@
         ideas.appendChild(el("div", "argus-group", shortAgent(set.agent)));
         if (set.headline) ideas.appendChild(el("p", "argus-idea-headline", set.headline));
         (set.items || []).slice(0, 4).forEach((it) => {
-          const r = el("div", "argus-item idea");
+          const r = el("div", "argus-item idea expandable");
           r.appendChild(el("div", "argus-item-title", it.title));
           r.appendChild(el("div", "argus-item-meta", `impact ${it.impact}/5 · effort ${it.effort} · ${it.cost || ""}`));
           const more = el("div", "argus-item-more");
@@ -332,7 +574,7 @@
       ideas.appendChild(el("p", "argus-quiet", "The first weekly ideas arrive on Sunday 27 Sep: 3-6 proposals from each agent, to approve, park or reject here."));
     }
 
-    const auto = card(colC, "Automation health");
+    const auto = card(colC, "Automation health", null, () => openDetail("Scheduled jobs", jobsDetail(j)));
     if (!j.tasksFailing && !j.outputsFailing) {
       auto.appendChild(el("p", "argus-quiet", `All ${j.tasksChecked || 0} scheduled jobs ran on time; ${j.outputsChecked || 0} key outputs are fresh.`));
     } else {
@@ -341,22 +583,27 @@
     const runs = ((data.fleet && data.fleet.agentRuns) || []).filter((r) => r.kind !== "ping").slice(-5).reverse();
     if (runs.length) {
       auto.appendChild(el("div", "argus-group", "Recent unattended agent runs"));
-      runs.forEach((r) => auto.appendChild(el("div", "argus-row",
-        `${shortAgent(r.agent)} · ${r.kind} · ${r.result} · ${r.turns ?? "?"} turns · ${new Date(r.at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`)));
+      runs.forEach((r) => {
+        const row = el("div", "argus-row clickable",
+          `${shortAgent(r.agent)} · ${r.kind} · ${r.result} · ${r.turns ?? "?"} turns · ${new Date(r.at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`);
+        row.addEventListener("click", () => openDetail(shortAgent(r.agent) + " — " + r.kind + " run", runDetail(r)));
+        auto.appendChild(row);
+      });
     }
 
     for (const a of data.agents) {
-      const c = card(colC, a.department || shortAgent(a.agent));
+      const c = card(colC, a.department || shortAgent(a.agent), null, () => openDetail(a.department || shortAgent(a.agent), agentDetail(a)));
       const today = new Date().toISOString().slice(0, 10);
       const metaRow = el("div", "argus-item-meta", shortAgent(a.agent) + " · report " + (a.reportDate || "unknown"));
       if (a.reportDate !== today) metaRow.appendChild(el("span", "argus-tag stale", "not from today"));
       c.appendChild(metaRow);
       (a.metrics || []).forEach((m) => {
-        const r = el("div", "argus-row");
+        const r = el("div", "argus-row clickable");
         r.appendChild(el("span", "", m.label));
         const v = el("span", "argus-row-val", m.value + (m.unit || "") + " ");
         v.appendChild(delta(m.value, m.prev, m.better));
         r.appendChild(v);
+        r.addEventListener("click", () => openDetail(m.label + " — " + shortAgent(a.agent), metricDetail(a, m)));
         c.appendChild(r);
       });
     }
