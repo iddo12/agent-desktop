@@ -652,6 +652,40 @@
           `${run.result} · ${run.turns ?? "?"} turns · ${run.apiEquivalentUsd != null ? "$" + Number(run.apiEquivalentUsd).toFixed(2) : "—"}`,
           () => openDetail(shortAgent(run.agent) + " — " + run.kind + " run", runDetail(run))));
       }
+      // How much to trust the numbers above. Iddo, 2026-09-23: he wants the
+      // meter's own accuracy reported weekly, with the change on last week.
+      const acc = data.usageAccuracy;
+      dSection(host, "How accurate is this percentage?");
+      if (!acc || !acc.thisWeek) {
+        dText(host, "Not measured yet. The System Optimization agent is logging each estimate against the next real reading; once a week of those exists this will show how far off we were and whether it is improving.");
+      } else {
+        if (acc.plainLine) dText(host, acc.plainLine);
+        dLine(host, "Average error this week", acc.thisWeek.maePts != null
+          ? acc.thisWeek.maePts + " points" + (acc.thisWeek.n ? " over " + acc.thisWeek.n + " readings" : "") : "—");
+        dLine(host, "Last week", (acc.lastWeek && acc.lastWeek.maePts != null)
+          ? acc.lastWeek.maePts + " points" + (acc.lastWeek.n ? " over " + acc.lastWeek.n + " readings" : "")
+          : "no earlier figure");
+        if (acc.improvementPts != null) {
+          dLine(host, "Change", (acc.improvementPts > 0 ? "improved by " : "worse by ") +
+            Math.abs(acc.improvementPts) + " points");
+        }
+        if (acc.thisWeek.worstMissPts != null) dLine(host, "Worst single miss", acc.thisWeek.worstMissPts + " points");
+        if (acc.capacity) {
+          dLine(host, "Weekly capacity estimate", (acc.capacity.weeklyUnits != null ? acc.capacity.weeklyUnits + " units" : "—") +
+            (acc.capacity.confidence ? " (" + acc.capacity.confidence + " confidence)" : ""));
+          if (acc.capacity.basis) dText(host, "Based on: " + acc.capacity.basis);
+        }
+        (acc.walls || []).slice(-3).forEach((w) => {
+          const r = el("div", "argus-item alert caution");
+          r.appendChild(el("div", "argus-item-title",
+            `Hit the ${w.window} limit ${w.at ? "on " + new Date(w.at).toLocaleString() : ""}`));
+          r.appendChild(el("div", "argus-detail-text",
+            `We were showing ${w.weShowedPct}% at the time - off by ${w.errorPts} points.`));
+          host.appendChild(r);
+        });
+        addDiscuss(host, (data.agents || []).map((a) => a.agent).find((f) => f.startsWith("System Optimization")),
+          "About the usage meter's accuracy this week: ");
+      }
       dText(host, "These percentages come from the usage model in the System Optimization agent, which reads Claude's own rate-limit figures. When Anthropic's own banner disagrees with this number, believe the banner.");
     };
   }

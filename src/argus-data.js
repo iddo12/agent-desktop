@@ -110,6 +110,11 @@ async function getArgusData(workspace, { refresh = true } = {}) {
     decisions: (readJson(path.join(status, "_decisions.json")) || {}).items || [],
     decisionsBuiltBy: (readJson(path.join(status, "_decisions.json")) || {}).builtBy || null,
     brief: cooBrief(workspace),
+    // How well the usage meter is doing against reality (2026-09-23). Iddo
+    // asked for it weekly, with the improvement on last week - the same
+    // "every number needs a comparison" rule applied to the number that
+    // measures everything else. Written by the System Optimization agent.
+    usageAccuracy: readJson(path.join(status, "_usage_accuracy.json")),
     recommendations: latestRecommendations(workspace),
     research: weeklyResearch(workspace),
   };
