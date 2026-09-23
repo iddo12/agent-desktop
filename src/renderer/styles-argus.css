@@ -242,3 +242,18 @@ body.argus-open .argus-nav-lamps { flex-direction: column; }
 @media (max-width: 1050px) {
   .argus-detail { width: 100%; border-left: 0; }
 }
+
+/* Lamps and in-panel rows are pressable too (v1.42.2). The master lamps carry
+   the three biggest numbers on the screen and did nothing at all until Iddo
+   pointed at a third inert figure - the rule is now "every non-zero number
+   opens what it counts", so the affordance has to follow it everywhere. */
+.argus-lamp.clickable { cursor: pointer; }
+.argus-lamp.clickable:hover { filter: brightness(1.08); }
+
+/* Jumping from a figure to the list that explains it: a brief tint, so the eye
+   lands on the answer rather than hunting for what changed. */
+.argus-group.flash {
+  background: var(--argus-flash, rgba(120, 140, 255, 0.16));
+  border-radius: 4px;
+  transition: background 0.5s ease;
+}

@@ -69,9 +69,9 @@
   title.append(el("span", "argus-title-main", "ARGUS"), el("span", "argus-title-sub", "The Bridge"));
   const stamp = el("span", "argus-stamp");
   const lamps = el("div", "argus-lamps");
-  const lampW = el("span", "argus-lamp warn", "WARNING");
-  const lampC = el("span", "argus-lamp caut", "CAUTION");
-  const lampD = el("span", "argus-lamp dec", "NEEDS YOU");
+  const lampW = el("span", "argus-lamp warn clickable", "WARNING");
+  const lampC = el("span", "argus-lamp caut clickable", "CAUTION");
+  const lampD = el("span", "argus-lamp dec clickable", "NEEDS YOU");
   lamps.append(lampW, lampC, lampD);
   const refreshBtn = el("button", "argus-btn", "Refresh");
   refreshBtn.addEventListener("click", () => load(true));
@@ -213,12 +213,26 @@
 
   // Small builders for the panel's own content.
   const dSection = (host, heading) => { host.appendChild(el("div", "argus-group", heading)); };
-  const dLine = (host, label, value) => {
-    const r = el("div", "argus-row");
+  const dLine = (host, label, value, onClick) => {
+    const r = el("div", "argus-row" + (onClick ? " clickable" : ""));
     r.appendChild(el("span", "", label));
     r.appendChild(el("span", "argus-row-val", value == null || value === "" ? "–" : String(value)));
+    if (onClick) r.addEventListener("click", onClick);
     host.appendChild(r);
   };
+  // Clicking a figure inside the panel jumps to the list that explains it and
+  // flashes it, so the answer is never "the number is right there and nothing
+  // happens" (Iddo, 2026-09-23).
+  function jumpTo(headingText) {
+    return () => {
+      const target = [...detailBody.querySelectorAll(".argus-group")]
+        .find((g) => g.textContent.toLowerCase().startsWith(String(headingText).toLowerCase()));
+      if (!target) return;
+      target.scrollIntoView({ block: "start", behavior: "smooth" });
+      target.classList.add("flash");
+      setTimeout(() => target.classList.remove("flash"), 1200);
+    };
+  }
   const dText = (host, text) => { if (text) host.appendChild(el("p", "argus-detail-text", text)); };
   const dActions = (host, agentFolder, links, starter) => {
     const bar = el("div", "argus-detail-actions");
@@ -263,7 +277,8 @@
         dSection(host, "Every measurement");
         a.metrics.forEach((m) => dLine(host, m.label,
           (m.value == null ? "–" : m.value) + (m.unit || "") +
-          (m.prev == null ? "  (no earlier figure)" : "  (was " + m.prev + ")")));
+          (m.prev == null ? "  (no earlier figure)" : "  (was " + m.prev + ")"),
+          () => openDetail(m.label + " — " + shortAgent(a.agent), metricDetail(a, m))));
       }
       const alerts = a.alerts || [];
       if (alerts.length) {
@@ -314,10 +329,92 @@
     });
   }
 
+  // The three list panels behind the lamps and the card headings.
+  function alertsDetail(W, C, V, tracked) {
+    return (host) => {
+      const block = (heading, list, note) => {
+        if (!list.length) return;
+        dSection(host, `${heading} · ${list.length}`);
+        if (note) dText(host, note);
+        list.forEach((a) => {
+          const r = el("div", "argus-item alert " + a.level);
+          const t = el("div", "argus-item-title");
+          t.appendChild(el("span", "argus-lvl", a.level.toUpperCase()));
+          t.append(a.title);
+          r.appendChild(t);
+          r.appendChild(el("div", "argus-item-meta", (a.agents || []).join(" + ") +
+            (a.domain ? " · " + a.domain : "") +
+            (a.firstSeen ? " · first seen " + a.firstSeen : "")));
+          if (a.why) r.appendChild(el("div", "argus-detail-text", a.why));
+          if (a.action) r.appendChild(el("div", "argus-detail-text", "Do: " + a.action));
+          host.appendChild(r);
+        });
+      };
+      block("Warnings", W);
+      block("Cautions", C);
+      block("Advisories", V);
+      block("Tracked", tracked, "Nothing here counts against any score: accepted risks, and sites frozen for rebuild. They stay visible so they are not forgotten.");
+      if (!W.length && !C.length && !V.length && !tracked.length) dText(host, "No findings at all right now.");
+    };
+  }
+
+  function decisionsDetail(D) {
+    return (host) => {
+      dText(host, /coo/i.test(data.decisionsBuiltBy || "")
+        ? "Ranked and de-duplicated by the COO from every agent's open items."
+        : "Collected from each agent's open items. The COO ranks this queue once it has run today.");
+      if (!D.length) { dText(host, "Nothing is waiting on you."); return; }
+      D.forEach((d, i) => {
+        const r = el("div", "argus-item decision");
+        r.appendChild(el("div", "argus-item-title", (d.rank ? d.rank + ". " : (i + 1) + ". ") + d.title));
+        const bits = [shortAgent(d.agent) || "fleet-wide"];
+        if (d.group) bits.push(d.group);
+        if (d.blocked) bits.push("blocked");
+        r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
+        if (d.detail) r.appendChild(el("div", "argus-detail-text", d.detail));
+        if (d.action) r.appendChild(el("div", "argus-detail-text", "→ " + d.action));
+        if (d.agent) {
+          const go = el("button", "argus-btn", "Discuss with " + shortAgent(d.agent));
+          go.addEventListener("click", () => { closeDetail(); discuss(d.agent, `About "${d.title}": `); });
+          r.appendChild(go);
+        }
+        host.appendChild(r);
+      });
+    };
+  }
+
+  const recsFor = () => data.recommendations || {};
+
+  function ideasDetail(recs) {
+    return (host) => {
+      if (!recs.items || !recs.items.length) {
+        dText(host, "No ideas yet. Every agent writes 3-6 proposals for its own department each Sunday morning; the first set lands on Sunday 27 September.");
+        return;
+      }
+      dLine(host, "Week", recs.week);
+      recs.items.forEach((set) => {
+        dSection(host, shortAgent(set.agent) + " · " + (set.items || []).length);
+        if (set.headline) dText(host, set.headline);
+        (set.items || []).forEach((it) => {
+          const r = el("div", "argus-item idea");
+          r.appendChild(el("div", "argus-item-title", it.title));
+          r.appendChild(el("div", "argus-item-meta",
+            `impact ${it.impact}/5 · effort ${it.effort} · ${it.cost || "cost not stated"}${it.needsIddo ? " · needs you" : ""}`));
+          if (it.why) r.appendChild(el("div", "argus-detail-text", it.why));
+          if (it.firstStep) r.appendChild(el("div", "argus-detail-text", "First step: " + it.firstStep));
+          host.appendChild(r);
+        });
+      });
+    };
+  }
+
   // One measurement, and the findings from the same part of the world.
   function metricDetail(a, m) {
     return (host) => {
-      dLine(host, "Now", (m.value == null ? "–" : m.value) + (m.unit || ""));
+      // "Now" is the number that was clicked to get here, so it jumps straight
+      // to the list that explains it rather than being the one dead row on the
+      // page (Iddo, 2026-09-23 - he pointed at exactly this figure).
+      dLine(host, "Now", (m.value == null ? "–" : m.value) + (m.unit || ""), jumpTo("what this number counts"));
       dLine(host, "Previously", m.prev == null ? "no earlier figure" : m.prev + (m.unit || ""));
       dLine(host, "Better when", m.better === "up" ? "higher" : m.better === "down" ? "lower" : "—");
       dLine(host, "Reported by", shortAgent(a.agent));
@@ -400,8 +497,8 @@
       const ago = (h) => h == null ? "—" : h < 1 ? Math.round(h * 60) + " min ago"
         : h < 48 ? Math.round(h) + "h ago" : Math.round(h / 24) + " days ago";
       dLine(host, "Checked at", j.checkedAt ? new Date(j.checkedAt).toLocaleString() : "—");
-      dLine(host, "Scheduled tasks", (j.tasksChecked ?? "?") + " checked, " + (j.tasksFailing ?? 0) + " failing");
-      dLine(host, "Key outputs", (j.outputsChecked ?? "?") + " checked, " + (j.outputsFailing ?? 0) + " stale");
+      dLine(host, "Scheduled tasks", (j.tasksChecked ?? "?") + " checked, " + (j.tasksFailing ?? 0) + " failing", jumpTo("every scheduled task"));
+      dLine(host, "Key outputs", (j.outputsChecked ?? "?") + " checked, " + (j.outputsFailing ?? 0) + " stale", jumpTo("every output checked"));
 
       const tasks = j.tasks || [];
       if (tasks.length) {
@@ -513,8 +610,15 @@
     const W = live.filter((a) => a.level === "warning"), C = live.filter((a) => a.level === "caution"), V = live.filter((a) => a.level === "advisory");
     const D = data.decisions || [];
 
-    const setLamp = (lamp, n, label) => { lamp.textContent = label + (n ? " " + n : ""); lamp.classList.toggle("on", n > 0); };
-    setLamp(lampW, W.length, "WARNING"); setLamp(lampC, C.length, "CAUTION"); setLamp(lampD, D.length, "NEEDS YOU");
+    const setLamp = (lamp, n, label, open) => {
+      lamp.textContent = label + (n ? " " + n : "");
+      lamp.classList.toggle("on", n > 0);
+      lamp.onclick = open;
+      lamp.title = n ? "Click to see all " + n : "Nothing at this level right now";
+    };
+    setLamp(lampW, W.length, "WARNING", () => openDetail(`Warnings · ${W.length}`, alertsDetail(W, [], [], [])));
+    setLamp(lampC, C.length, "CAUTION", () => openDetail(`Cautions · ${C.length}`, alertsDetail([], C, [], [])));
+    setLamp(lampD, D.length, "NEEDS YOU", () => openDetail(`Decision queue · ${D.length}`, decisionsDetail(D)));
     updateNav(W.length, C.length, D.length);
 
     // Glance: the number strip.
@@ -560,7 +664,8 @@
         : "Written mechanically - the COO agent has not written a brief yet."));
     }
 
-    const dq = card(colA, `Decision queue · ${D.length}`, "argus-decisions");
+    const dq = card(colA, `Decision queue · ${D.length}`, "argus-decisions",
+      () => openDetail(`Decision queue · ${D.length}`, decisionsDetail(D)));
     if (!D.length) dq.appendChild(el("p", "argus-quiet", "Nothing is waiting on you."));
     // Two layouts, because the two builders produce different things. The
     // heuristic queue has no ranking at all, so grouping by agent is the only
@@ -601,7 +706,8 @@
       : "Collected from each agent's OPEN NOW list. The COO ranks this queue once it has run today."));
 
     // Column B: needs attention.
-    const na = card(colB, `Needs attention · ${W.length + C.length}`);
+    const na = card(colB, `Needs attention · ${W.length + C.length}`, null,
+      () => openDetail("Every finding", alertsDetail(W, C, V, tracked)));
     const alertRow = (a, host) => {
       const r = el("div", "argus-item alert expandable " + a.level);
       const t = el("div", "argus-item-title");
@@ -631,7 +737,7 @@
     na.appendChild(det);
 
     // Column C: ideas, automation, departments.
-    const ideas = card(colC, "Ideas this week");
+    const ideas = card(colC, "Ideas this week", null, () => openDetail("Ideas this week", ideasDetail(recsFor())));
     const recs = data.recommendations || {};
     if (recs.items && recs.items.length) {
       ideas.appendChild(el("div", "argus-item-meta", "Week " + recs.week));
