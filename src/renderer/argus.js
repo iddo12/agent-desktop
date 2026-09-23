@@ -44,6 +44,8 @@
 
   let data = null;
   let loading = false;
+  // Live per-agent state for the "Agents" tile; see fleetAgentStates().
+  let agentStates = [];
   let refreshTimer = null;
 
   // ---------------------------------------------------------------- sidebar
@@ -138,11 +140,16 @@
     }
     return s;
   }
-  function kpi(label, val, prev, better, bad, unit, onClick) {
+  // `subText` replaces the comparison line for a figure that has no meaningful
+  // previous value to be compared against - the agent roster is a composition,
+  // not a measurement, so "(no earlier figure)" under it would be noise where
+  // the breakdown it is made of is the useful thing. Every other tile still
+  // carries its comparison, per the workspace rule.
+  function kpi(label, val, prev, better, bad, unit, onClick, subText) {
     const k = el("div", "argus-kpi" + (bad ? " bad" : "") + (onClick ? " clickable" : ""));
     k.appendChild(el("div", "argus-kpi-label", label));
     k.appendChild(el("div", "argus-kpi-val", (val == null ? "–" : val) + (unit || "")));
-    k.appendChild(delta(val, prev, better));
+    k.appendChild(subText ? el("span", "argus-cmp", subText) : delta(val, prev, better));
     if (onClick) k.addEventListener("click", onClick);
     strip.appendChild(k);
   }
@@ -158,6 +165,91 @@
   function dedupeKey(t) {
     return (t || "").toLowerCase().replace(/\d+([.,]\d+)?/g, "").replace(/[^a-z]+/g, " ")
       .split(" ").filter((w) => w.length > 3).sort().filter((w, i, a) => a.indexOf(w) === i).join(" ");
+  }
+
+  // ------------------------------------------------------- the agent roster
+  // Iddo, 2026-09-23, pointing at the gap in the number strip: "I would put
+  // here the total number of agents with the running in parenthesis or
+  // something similar and when pressing it you get the full list of which
+  // agent is running, idle etc."
+  //
+  // Deliberately NOT read from the Bridge's own status files: those are built
+  // from each agent's last written report and say what an agent reported, not
+  // whether it is doing something right now. "Running" here is the same
+  // evidence the chat view trusts - the agent's own transcript. `working` is
+  // an assistant tool_use with no result yet; the transcript's quiet time says
+  // how long since it last wrote anything, which is what makes "idle" mean
+  // something rather than just "not working this instant".
+  const AGENT_STATES = ["running", "idle", "paused", "unknown"];
+  async function fleetAgentStates() {
+    let list = [];
+    try {
+      list = (await window.api.listAgents()) || [];
+    } catch (e) {
+      return [];
+    }
+    return Promise.all(
+      list.map(async (a) => {
+        const row = {
+          folder: a.folderName,
+          name: a.displayName || a.folderName,
+          role: a.role || "",
+          health: a.healthLabel || "Unknown",
+          paused: !!a.paused,
+          working: null,
+          quietMs: null,
+        };
+        if (!row.paused) {
+          try {
+            const act = await window.api.getSessionActivity(a.path);
+            row.working = act ? !!act.working : null;
+          } catch (e) { /* no transcript yet - stays unknown */ }
+          try {
+            row.quietMs = await window.api.getTranscriptQuietMs(a.path);
+          } catch (e) { /* same */ }
+        }
+        row.state = row.paused ? "paused" : row.working === true ? "running" : row.working === false ? "idle" : "unknown";
+        return row;
+      })
+    );
+  }
+
+  function agoText(ms) {
+    if (ms == null) return "never written to";
+    const m = Math.round(ms / 60000);
+    if (m < 1) return "active seconds ago";
+    if (m < 60) return `last active ${m} min ago`;
+    const h = Math.round(m / 60);
+    if (h < 24) return `last active ${h} h ago`;
+    return `last active ${Math.round(h / 24)} d ago`;
+  }
+
+  function agentsDetail(rows) {
+    return (host) => {
+      dText(host, "Live state, read from each agent's own transcript rather than from its last report - \"running\" means it has a tool call in flight right now, \"idle\" means its process is there and waiting. Click an agent to open its chat.");
+      for (const state of AGENT_STATES) {
+        const group = rows.filter((r) => r.state === state);
+        if (!group.length) continue;
+        dSection(host, `${state[0].toUpperCase()}${state.slice(1)} · ${group.length}`);
+        for (const r of group) {
+          const detailBits = [];
+          if (r.role) detailBits.push(r.role);
+          if (r.state === "paused") detailBits.push("paused - no background process");
+          else if (r.state === "unknown") detailBits.push("no transcript found yet");
+          else detailBits.push(agoText(r.quietMs));
+          if (r.health && r.health !== "Healthy" && r.health !== "Unknown") detailBits.push("health: " + r.health);
+          dLine(host, r.name, detailBits.join(" · "), () => openAgent(r.folder));
+        }
+      }
+      if (!rows.length) dText(host, "No agents could be listed - the agent folder could not be read.");
+    };
+  }
+
+  // Open an agent's chat without putting words in the box, unlike discuss().
+  function openAgent(agentFolder) {
+    closeArgus();
+    const row = document.querySelector(`#agent-list .agent-item[data-folder-name="${CSS.escape(agentFolder)}"]`);
+    if (row) row.click();
   }
 
   // Jump to an agent's chat with a starter line - answering a decision is a
@@ -850,6 +942,17 @@
     const j = (data.fleet && data.fleet.jobs) || {};
     if (j.tasksChecked != null) kpi("Scheduled jobs OK", (j.tasksChecked - j.tasksFailing) + "/" + j.tasksChecked, null, "none", j.tasksFailing > 0, "",
       () => openDetail("Scheduled jobs", jobsDetail(j)));
+    if (agentStates.length) {
+      const running = agentStates.filter((r) => r.state === "running").length;
+      const idle = agentStates.filter((r) => r.state === "idle").length;
+      const paused = agentStates.filter((r) => r.state === "paused").length;
+      const unknown = agentStates.filter((r) => r.state === "unknown").length;
+      const bits = [`${running} running`, `${idle} idle`];
+      if (paused) bits.push(`${paused} paused`);
+      if (unknown) bits.push(`${unknown} unknown`);
+      kpi("Agents", `${agentStates.length} (${running})`, null, "none", false, "",
+        () => openDetail(`Agents · ${agentStates.length}`, agentsDetail(agentStates)), bits.join(" · "));
+    }
 
     // Column A: bottom line + Decision Queue.
     // The COO agent writes the bottom line (shared_reports\coo\brief_latest.json).
@@ -1063,7 +1166,16 @@
     refreshBtn.disabled = true;
     refreshBtn.textContent = "Refreshing…";
     try {
-      data = await window.api.argusData({ refresh });
+      // Fetched alongside the Bridge's own data, not inside render(): render is
+      // synchronous, and a tile that populated a moment later would flicker in
+      // on every refresh. A failure here leaves the previous roster in place
+      // rather than blanking the tile.
+      const [next, roster] = await Promise.all([
+        window.api.argusData({ refresh }),
+        fleetAgentStates().catch(() => null),
+      ]);
+      data = next;
+      if (roster) agentStates = roster;
       render();
     } catch (e) {
       console.error("[argus] load", e);
