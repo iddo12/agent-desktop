@@ -296,6 +296,7 @@
           if (al.ageDays >= 1) bits.push("standing " + al.ageDays + (al.ageDays === 1 ? " day" : " days"));
           if (!al.scored) bits.push("not scored - tracked, not counted against the score");
           if (bits.length) r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
+          addDiscuss(r, a.agent, `About the "${al.title}" finding: `);
           host.appendChild(r);
         });
       } else {
@@ -304,15 +305,62 @@
       const open = a.openItems || [];
       if (open.length) {
         dSection(host, `On its open list · ${open.length}`);
-        openItemRows(host, open);
+        openItemRows(host, open, null, a.agent);
       }
       dActions(host, a.agent, a.links, "About your latest report: ");
     };
   }
 
+  // Iddo, 2026-09-23: "make sure that I will always have an option to talk to
+  // the relevant agent right from the info screen about any point - this is so
+  // useful." So every row that can be attributed to an agent carries its own
+  // way into that agent's chat, with a starter line naming the thing clicked,
+  // rather than only the panel-level button at the bottom.
+  function discussBtn(agentFolder, starter) {
+    if (!agentFolder) return null;
+    const b = el("button", "argus-btn discuss-inline", "Discuss with " + shortAgent(agentFolder));
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); closeDetail(); discuss(agentFolder, starter); });
+    return b;
+  }
+  function addDiscuss(row, agentFolder, starter) {
+    const b = discussBtn(agentFolder, starter);
+    if (b) row.appendChild(b);
+  }
+
+  // Which agent owns a scheduled job. The task name prefix is the convention
+  // (SEC_, OPT_, WEEKLY_Recs_, COO_), and an output's file path contains the
+  // agent's own folder, which is the more reliable of the two.
+  function agentForJob(name, file) {
+    const folders = (data.agents || []).map((a) => a.agent);
+    if (file) {
+      const hit = folders.find((f) => String(file).toLowerCase().includes(f.toLowerCase()));
+      if (hit) return hit;
+    }
+    const n = String(name || "");
+    if (/^SEC_/i.test(n)) return folders.find((f) => f === "Security");
+    if (/^OPT_/i.test(n)) return folders.find((f) => f.startsWith("System Optimization"));
+    if (/^COO_/i.test(n)) return folders.find((f) => f === "COO Agent");
+    // Fall back on the display name appearing in the job's own name, which is
+    // how the weekly jobs and the human-readable output checks are labelled
+    // ("WEEKLY_Recs_LensVidContext", "Security morning review (08:40)").
+    const norm = (x) => String(x).toLowerCase().replace(/[^a-z]/g, "");
+    const weekly = n.match(/^WEEKLY_Recs_(.+)$/i);
+    const needle = norm(weekly ? weekly[1] : n);
+    const byShortName = folders.find((f) => {
+      const short = norm(shortAgent(f));
+      if (short.length <= 4) return false;
+      // "WEEKLY_Recs_ProductDev" abbreviates the department, so a prefix match
+      // in either direction counts for the weekly jobs; elsewhere require the
+      // whole name, to avoid a stray substring claiming the wrong agent.
+      return weekly ? (short.startsWith(needle) || needle.startsWith(short)) : needle.includes(short);
+    });
+    if (byShortName) return byShortName;
+    return folders.find((f) => norm(f).length > 4 && needle.includes(norm(f))) || null;
+  }
+
   // The items behind an "open items" / "needs you" / "blocked" count. A count
   // is a claim; this is the evidence for it.
-  function openItemRows(host, items, note) {
+  function openItemRows(host, items, note, agentFolder) {
     if (!items.length) { dText(host, note || "Nothing open."); return; }
     items.forEach((it) => {
       const r = el("div", "argus-item" + (it.needsIddo ? " decision" : ""));
@@ -325,6 +373,7 @@
       if (it.since) bits.push("since " + it.since);
       if (bits.length) r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
       if (it.detail) r.appendChild(el("div", "argus-detail-text", it.detail));
+      addDiscuss(r, agentFolder, `About "${it.title}": `);
       host.appendChild(r);
     });
   }
@@ -347,6 +396,7 @@
             (a.firstSeen ? " · first seen " + a.firstSeen : "")));
           if (a.why) r.appendChild(el("div", "argus-detail-text", a.why));
           if (a.action) r.appendChild(el("div", "argus-detail-text", "Do: " + a.action));
+          addDiscuss(r, a.folder, `About the "${a.title}" finding: `);
           host.appendChild(r);
         });
       };
@@ -402,6 +452,7 @@
             `impact ${it.impact}/5 · effort ${it.effort} · ${it.cost || "cost not stated"}${it.needsIddo ? " · needs you" : ""}`));
           if (it.why) r.appendChild(el("div", "argus-detail-text", it.why));
           if (it.firstStep) r.appendChild(el("div", "argus-detail-text", "First step: " + it.firstStep));
+          addDiscuss(r, set.agent, `About your idea "${it.title}": `);
           host.appendChild(r);
         });
       });
@@ -426,7 +477,7 @@
         const wanted = m.id === "needsIddo" ? open.filter((i) => i.needsIddo)
           : m.id === "blocked" ? open.filter((i) => i.status === "blocked") : open;
         dSection(host, `What this number counts · ${wanted.length}`);
-        openItemRows(host, wanted, "Nothing in this category right now.");
+        openItemRows(host, wanted, "Nothing in this category right now.", a.agent);
         dActions(host, a.agent, a.links, `About your open items: `);
         return;
       }
@@ -446,6 +497,7 @@
           if (al.firstSeen) bits.push("first seen " + al.firstSeen);
           if (!al.scored) bits.push("not scored");
           if (bits.length) r.appendChild(el("div", "argus-item-meta", bits.join(" · ")));
+          addDiscuss(r, a.agent, `About the "${al.title}" finding: `);
           host.appendChild(r);
         });
         dActions(host, a.agent, a.links, `About the ${m.label.toLowerCase()} in your report: `);
@@ -460,6 +512,7 @@
           r.appendChild(el("div", "argus-item-title", al.title));
           if (al.why) r.appendChild(el("div", "argus-detail-text", al.why));
           if (al.action) r.appendChild(el("div", "argus-detail-text", "Do: " + al.action));
+          addDiscuss(r, a.agent, `About the "${al.title}" finding: `);
           host.appendChild(r);
         });
       } else {
@@ -477,15 +530,24 @@
       dLine(host, "Weekly window resets", u.weekResetsAt ? new Date(u.weekResetsAt).toLocaleString() : "—");
       if ((u.topAgentsWeek || []).length) {
         dSection(host, "Who used it this week");
-        u.topAgentsWeek.forEach((t) => dLine(host, shortAgent(t.agent || t.name || "?"),
-          (t.pct != null ? t.pct + "%" : t.messages != null ? t.messages + " messages" : "—")));
+        u.topAgentsWeek.forEach((t) => {
+          const folder = (data.agents || []).map((a) => a.agent)
+            .find((f) => shortAgent(f) === shortAgent(t.agent || t.name || ""));
+          const r = el("div", "argus-row");
+          r.appendChild(el("span", "", shortAgent(t.agent || t.name || "?")));
+          r.appendChild(el("span", "argus-row-val",
+            (t.pct != null ? t.pct + "%" : t.messages != null ? t.messages + " messages" : "—")));
+          addDiscuss(r, folder, "About your Claude usage this week: ");
+          host.appendChild(r);
+        });
       }
       const runs = ((data.fleet && data.fleet.agentRuns) || []).filter((r) => r.kind !== "ping").slice(-12).reverse();
       if (runs.length) {
         dSection(host, "Recent unattended runs, and what they cost");
-        runs.forEach((r) => dLine(host,
-          `${shortAgent(r.agent)} · ${r.kind} · ${new Date(r.at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`,
-          `${r.result} · ${r.turns ?? "?"} turns · ${r.apiEquivalentUsd != null ? "$" + Number(r.apiEquivalentUsd).toFixed(2) : "—"}`));
+        runs.forEach((run) => dLine(host,
+          `${shortAgent(run.agent)} · ${run.kind} · ${new Date(run.at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`,
+          `${run.result} · ${run.turns ?? "?"} turns · ${run.apiEquivalentUsd != null ? "$" + Number(run.apiEquivalentUsd).toFixed(2) : "—"}`,
+          () => openDetail(shortAgent(run.agent) + " — " + run.kind + " run", runDetail(run))));
       }
       dText(host, "These percentages come from the usage model in the System Optimization agent, which reads Claude's own rate-limit figures. When Anthropic's own banner disagrees with this number, believe the banner.");
     };
@@ -512,6 +574,7 @@
           if (t.lastResult != null) bits.push("exit " + t.lastResult);
           r.appendChild(el("div", "argus-item-meta", bits.filter(Boolean).join(" · ")));
           if (t.problem) r.appendChild(el("div", "argus-detail-text", t.problem));
+          addDiscuss(r, agentForJob(t.name), `About the scheduled task ${t.name}: `);
           host.appendChild(r);
         });
       }
@@ -526,6 +589,7 @@
             (o.maxAgeHours != null ? " · expected within " + o.maxAgeHours + "h" : "")));
           if (o.file) r.appendChild(el("div", "argus-item-meta", o.file));
           if (o.problem) r.appendChild(el("div", "argus-detail-text", o.problem));
+          addDiscuss(r, agentForJob(o.name, o.file), `About the "${o.name}" output: `);
           host.appendChild(r);
         });
       }
