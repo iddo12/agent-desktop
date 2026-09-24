@@ -93,4 +93,23 @@ contextBridge.exposeInMainWorld("api", {
   onTerminalExit: (callback) => {
     ipcRenderer.on("terminal-exit", (event, payload) => callback(payload));
   },
+
+  // v1.55.0 IRIS (renderer/iris.js)
+  iris: {
+    status: () => ipcRenderer.invoke("iris-status"),
+    setEnabled: (on) => ipcRenderer.invoke("iris-set-enabled", { on }),
+    setName: (name) => ipcRenderer.invoke("iris-set-name", { name }),
+    createInvite: () => ipcRenderer.invoke("iris-create-invite"),
+    cancelInvite: () => ipcRenderer.invoke("iris-cancel-invite"),
+    join: (invite) => ipcRenderer.invoke("iris-join", { invite }),
+    setPeer: (peerId, patch) => ipcRenderer.invoke("iris-set-peer", { peerId, patch }),
+    unpair: (peerId) => ipcRenderer.invoke("iris-unpair", { peerId }),
+    send: (peerId, text, type, replyTo) => ipcRenderer.invoke("iris-send", { peerId, text, type, replyTo }),
+    log: (limit) => ipcRenderer.invoke("iris-log", { limit }),
+    pending: () => ipcRenderer.invoke("iris-pending"),
+    prepareDelivery: (id, agentPath) => ipcRenderer.invoke("iris-prepare-delivery", { id, agentPath }),
+    delivered: (id, to) => ipcRenderer.invoke("iris-delivered", { id, to }),
+    onChanged: (cb) => ipcRenderer.on("iris-changed", () => cb()),
+    onIncoming: (cb) => ipcRenderer.on("iris-incoming", (e, p) => cb(p)),
+  },
 });
