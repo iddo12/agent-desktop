@@ -4,6 +4,32 @@ A desktop app for running and managing several [Claude Code](https://claude.com/
 
 If you've ever ended up with five terminal windows each running `claude` for a different project and lost track of which one needed your attention, this is for that.
 
+## Download and install (Windows)
+
+Not a developer? This is the section for you — no Node, npm, or git needed.
+
+1. Go to this repo's [Releases](../../releases) page and download the latest **Setup .exe** (or, if you'd rather not install anything, the portable **.zip** — unzip it anywhere and run `Agent Desktop.exe` directly).
+2. Run the Setup file. Windows will likely show a blue **"Windows protected your PC"** SmartScreen warning — that's expected, the app isn't code-signed yet. Click **More info**, then **Run anyway**.
+3. Follow the installer (you can change the install location if you want to).
+4. On first launch, Agent Desktop asks where you'd like your agents to live — pick a folder (an empty one is fine; it defaults to `Documents\Agent Desktop`).
+5. If Claude Code isn't already installed, click **Install Claude Code** when prompted — this runs the official installer and only takes a minute.
+6. Sign in with your own Claude account when asked.
+7. Click **+ Agent** to create your first agent, and you're set.
+
+**Requirements:** Windows 10/11 (x64) and a Claude account. That's it — no Node.js, npm, or git required for this route.
+
+> A one-time note on Claude Code's status line: Agent Desktop installs a small status-line script into your global Claude Code config the first time it runs, so the sidebar's usage badges can show Anthropic's real reported numbers instead of an estimate. It only ever does this if you don't already have a status line configured — it will never overwrite one you've set up yourself.
+
+| Main window | First launch |
+| --- | --- |
+| ![Main window](docs/screenshots/main-window.png) | ![First launch, no agents yet](docs/screenshots/first-launch-empty-state.png) |
+
+| Status at a glance | Creating an agent | ARGUS / the Bridge |
+| --- | --- | --- |
+| ![Sidebar status dots](docs/screenshots/status-dots.png) | ![New agent flow](docs/screenshots/new-agent-flow.png) | ![ARGUS view](docs/screenshots/argus.png) |
+
+(See `docs/screenshots/` — these are placeholders until real screenshots are captured.)
+
 ## What it does
 
 - **A sidebar of agents.** Each agent is just a folder on disk. Add one, and Agent Desktop dispatches a real, native Claude Code background agent (`claude --bg`) for it — the actual CLI's own multi-agent system, not a reimplementation.

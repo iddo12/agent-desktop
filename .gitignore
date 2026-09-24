@@ -1,6 +1,11 @@
 node_modules/
 electron_pid.txt
 
+# electron-builder output (the Setup .exe, the portable .zip, unpacked
+# --dir builds) - built by CI (.github/workflows/release.yml) or locally
+# with `npm run dist`/`npm run pack`, never committed.
+dist/
+
 # Local Claude Code dev tooling (the run-agent-desktop driver skill, etc.) -
 # useful for developing this app, not part of the app itself.
 .claude/
