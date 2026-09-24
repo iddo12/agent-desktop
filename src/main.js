@@ -1498,12 +1498,32 @@ async function runClaudeCommandOnce(shell, args, options) {
     cwd: options.cwd || process.cwd(),
     env: options.env,
   });
-  return new Promise((resolve) => {
+  // options.timeoutMs (opt-in, 2026-09-24): without it a CLI call that never
+  // exits blocks its caller forever. Seen live right after a Claude Code
+  // update: the sweep's `claude --bg` dispatches were spawned before the
+  // CLI's daemon came back, never exited, and ensureAllAgentsBackgrounded()
+  // sat on them - so no agent was relaunched and Software Engineering never
+  // answered. Opt-in because npm installs legitimately run for minutes.
+  return new Promise((resolve, reject) => {
     let output = "";
+    let timer = null;
+    if (options.timeoutMs) {
+      timer = setTimeout(() => {
+        try {
+          proc.kill();
+        } catch (e) {
+          /* already gone */
+        }
+        const err = new Error(`claude ${args.join(" ")} timed out after ${options.timeoutMs}ms`);
+        err.timedOut = true;
+        reject(err);
+      }, options.timeoutMs);
+    }
     proc.onData((data) => {
       output += data;
     });
     proc.onExit(() => {
+      if (timer) clearTimeout(timer);
       resolve(stripTerminalCodes(output));
     });
   });
@@ -1577,11 +1597,15 @@ async function runClaudeCommand(shell, args, options, attempts = 20, delayMs = 9
   }
 }
 
+const CLAUDE_CLI_TIMEOUT_MS = 90 * 1000; // see runClaudeCommandOnce's timeoutMs
 async function listBackgroundAgents(shell, spawnEnv) {
   try {
-    const output = await runClaudeCommand(shell, ["agents", "--json", "--all"], { env: spawnEnv });
+    const output = await runClaudeCommand(shell, ["agents", "--json", "--all"], { env: spawnEnv, timeoutMs: CLAUDE_CLI_TIMEOUT_MS });
     return JSON.parse(output);
   } catch (e) {
+    // A timeout means "unknown", not "none alive": returning [] here would
+    // make callers dispatch a duplicate of an agent that may be running.
+    if (e.timedOut) throw e;
     return [];
   }
 }
@@ -1619,7 +1643,7 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   } else {
     args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
   }
-  const output = await runClaudeCommand(shell, args, { cwd: sessionCwd, env: spawnEnv });
+  const output = await runClaudeCommand(shell, args, { cwd: sessionCwd, env: spawnEnv, timeoutMs: CLAUDE_CLI_TIMEOUT_MS });
   // Real dispatch output (confirmed byte-for-byte via a live test dispatch):
   // "backgrounded \xC2\xB7 5467abbc (idle ...)" - a single U+00B7 MIDDLE DOT,
   // not a literal "." or multiple dots.
@@ -2581,7 +2605,7 @@ async function handlePtyExit(agentPath, isReattachAttempt = false) {
   ptySessions.delete(agentPath);
 
   if (!isReattachAttempt && session.shell && session.spawnEnv) {
-    const stillAlive = await findAliveBackgroundAgent(session.shell, session.spawnEnv, session.sessionCwd);
+    const stillAlive = await findAliveBackgroundAgent(session.shell, session.spawnEnv, session.sessionCwd).catch(() => null);
     if (stillAlive) {
       try {
         await startTerminalSession(agentPath, session.sessionCwd, session.cols, session.rows, stillAlive.id, /* isReattach */ true);
