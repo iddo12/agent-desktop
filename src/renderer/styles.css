@@ -856,6 +856,17 @@ html, body {
   align-self: flex-start;
   max-width: 100%;
 }
+/* Agent bubbles have no padding of their own, so the hover copy button
+   (top-right, absolutely positioned) used to sit on top of the end of the
+   first line. Reserve a right gutter the width of the button so text wraps
+   before it (v1.54.2). */
+.chat-bubble-agent {
+  padding-right: 36px;
+}
+.chat-bubble-agent > .bubble-copy-btn {
+  top: 0;
+  right: 0;
+}
 
 /* --- Rendered Markdown inside a chat bubble / annotated section --------- */
 .chat-bubble p,
