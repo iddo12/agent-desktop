@@ -54,11 +54,18 @@
     if (allRun && !allRun.finished) return;      // a manual sweep owns the fleet
     if (flows.size) return;                       // one at a time, fleet-wide
     for (const a of agents) {
-      if (autoHandedOff.has(a.path)) continue;
       try {
         const u = await window.api.getContextUsage(a.path);
         let t = u && typeof u.contextTokens === "number" ? u.contextTokens : 0;
         if (t && window.guardUsageIsStale(a.path, u)) t = 0;
+        // v1.54.3: re-arm once the agent is back under the warning line (a
+        // real, finished reset). Before, the once-per-app-run lock never
+        // cleared, so an agent auto-handed-off once was never handed off again
+        // until Agent Desktop restarted. That is why some agents handed off on
+        // their own and others sat at 200K+. A handoff that failed leaves
+        // the context high, so this cannot loop.
+        if (t && t < CONTEXT_WARN_TOKENS) autoHandedOff.delete(a.path);
+        if (autoHandedOff.has(a.path)) continue;
         if (t < AUTO_HANDOFF_TOKENS) continue;
         const act = await window.api.getSessionActivity(a.path).catch(() => null);
         if (!act || act.working) continue;        // mid-turn: leave it alone
