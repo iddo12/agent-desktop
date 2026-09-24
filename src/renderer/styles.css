@@ -1017,6 +1017,27 @@ html, body {
   color: var(--accent);
   text-decoration: underline;
 }
+/* Local PDF paths in agent replies (v1.52.0): a span, not an <a>, so there is
+   no href to navigate to - a click asks main to open it (see renderer.js). */
+.pdf-link {
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.pdf-link:hover {
+  text-decoration-thickness: 2px;
+}
+.pdf-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.pdf-link.pdf-link-failed {
+  color: #b3261e;
+  text-decoration-style: wavy;
+}
+.chat-bubble-user .pdf-link {
+  color: #6b4d00;
+}
 .chat-table-wrap {
   overflow-x: auto;
   margin: 0 0 0.7em;

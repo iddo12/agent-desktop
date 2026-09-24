@@ -1041,9 +1041,100 @@ const IMAGE_PATH_RE = /"([A-Za-z]:\\[^"]+\.(?:png|jpe?g|gif|webp|bmp))"/gi;
 // never innerHTML - so agent output can't inject markup. Not a full CommonMark
 // implementation; deliberately small and predictable.
 
+// --- Clickable local PDF paths (v1.52.0) ------------------------------------
+// Iddo: "make the ...pdf clickable and open in a new PDF reader ... a rule for
+// all agents". Agents hand him documents as absolute Windows paths (root
+// CLAUDE.md: every document is delivered as a PDF), usually with spaces in
+// them ("D:\Dropbox\Claude stuff\..."). Any absolute drive-letter path ending
+// in .pdf - in prose, in `inline code`, in a fenced block, or as the target
+// of a [text](D:\...pdf) link - becomes a span.pdf-link. It is deliberately
+// not an <a href>: there is nothing for the window to navigate to, and the
+// click goes to main's open-local-pdf, which re-validates the path (existing
+// .pdf under the workspace or E:\Claude work only) before shell.openPath.
+// Path segments may contain spaces, so a segment runs until the next
+// separator; ':' and the other characters Windows forbids end a match, which
+// is what stops a match that started at an earlier "C:\" from swallowing
+// prose up to a later path.
+const PDF_PATH_RE = /(?<![\w\\/])(?:file:\/\/\/)?[A-Za-z]:[\\/](?:[^\\/\n\r<>"|?*:`]+[\\/])*[^\\/\n\r<>"|?*:`]*?\.pdf(?![\w])/i;
+
+function normalizePdfPath(raw) {
+  let p = String(raw).trim().replace(/^<|>$/g, "");
+  if (/^file:\/\/\//i.test(p)) {
+    p = p.slice(8);
+    try {
+      p = decodeURIComponent(p);
+    } catch (e) {
+      /* leave as-is; main will refuse it if it does not exist */
+    }
+  }
+  return p.replace(/\//g, "\\");
+}
+
+function makePdfLink(pathText, label) {
+  const s = document.createElement("span");
+  s.className = "pdf-link";
+  s.dataset.pdfPath = normalizePdfPath(pathText);
+  s.title = "Open PDF";
+  s.setAttribute("role", "link");
+  s.tabIndex = 0;
+  s.textContent = label != null ? label : pathText;
+  return s;
+}
+
+// Literal text (code, fenced blocks, prose remainder) with any PDF paths in it
+// made clickable. textContent of the parent is unchanged, so copy buttons that
+// read code.textContent still copy exactly what was written.
+function appendTextWithPdfLinks(parent, str) {
+  let rest = String(str);
+  let guard = 0;
+  while (rest && guard++ < 1000) {
+    const m = PDF_PATH_RE.exec(rest);
+    if (!m) break;
+    if (m.index) parent.appendChild(document.createTextNode(rest.slice(0, m.index)));
+    parent.appendChild(makePdfLink(m[0]));
+    rest = rest.slice(m.index + m[0].length);
+  }
+  if (rest) parent.appendChild(document.createTextNode(rest));
+}
+
+async function openPdfLink(el) {
+  const p = el && el.dataset && el.dataset.pdfPath;
+  if (!p || !window.api || !window.api.openLocalPdf) return;
+  const r = await window.api.openLocalPdf(p).catch((err) => ({ ok: false, error: String(err) }));
+  if (r && r.ok) {
+    el.classList.remove("pdf-link-failed");
+    el.title = "Open PDF";
+  } else {
+    el.classList.add("pdf-link-failed");
+    el.title = "Could not open: " + ((r && r.error) || "unknown error");
+  }
+}
+
+// One delegated listener for every bubble, present and future (history
+// re-renders, long-message expanders, the answer-section view).
+document.addEventListener("click", (ev) => {
+  const el = ev.target && ev.target.closest ? ev.target.closest(".pdf-link") : null;
+  if (!el) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  openPdfLink(el);
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Enter" && ev.key !== " ") return;
+  const el = ev.target && ev.target.classList && ev.target.classList.contains("pdf-link") ? ev.target : null;
+  if (!el) return;
+  ev.preventDefault();
+  openPdfLink(el);
+});
+
 function appendInlineMarkdown(parent, str) {
   const patterns = [
     { re: /`([^`]+)`/, tag: "code", literal: true },
+    // [text](D:\...\x.pdf) or [text](file:///D:/.../x.pdf) - a local PDF as a
+    // markdown link target. Checked before the http(s) link pattern only by
+    // position (earliest match wins), same as everything else here.
+    { re: /\[([^\]]+)\]\(<?((?:file:\/\/\/)?[A-Za-z]:[\\/][^<>\n]*?\.pdf)>?\)/i, tag: "mdpdf" },
+    { re: PDF_PATH_RE, tag: "pdfpath" },
     { re: /\*\*([\s\S]+?)\*\*/, tag: "strong" },
     { re: /(?<![\w])__([\s\S]+?)__(?![\w])/, tag: "strong" },
     { re: /(?<![*\w])\*([^*\n]+?)\*(?![*\w])/, tag: "em" },
@@ -1077,8 +1168,12 @@ function appendInlineMarkdown(parent, str) {
     if (m.index) parent.appendChild(document.createTextNode(rest.slice(0, m.index)));
     if (p.tag === "code") {
       const c = document.createElement("code");
-      c.textContent = m[1];
+      appendTextWithPdfLinks(c, m[1]);
       parent.appendChild(c);
+    } else if (p.tag === "mdpdf") {
+      parent.appendChild(makePdfLink(m[2], m[1]));
+    } else if (p.tag === "pdfpath") {
+      parent.appendChild(makePdfLink(m[0]));
     } else if (p.tag === "a") {
       const a = document.createElement("a");
       a.href = m[2];
@@ -1149,7 +1244,7 @@ function appendMarkdownBlocks(container, text) {
       const pre = document.createElement("pre");
       pre.className = "code-block";
       const code = document.createElement("code");
-      code.textContent = buf.join("\n");
+      appendTextWithPdfLinks(code, buf.join("\n"));
       pre.appendChild(code);
       addCopyButton(pre, () => code.textContent, "code-copy-btn");
       container.appendChild(pre);

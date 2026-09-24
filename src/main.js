@@ -2967,6 +2967,21 @@ ipcMain.handle("registry-action", (event, { id, action }) =>
   ["open", "reveal", "copy", "view", "openPdf"].includes(action)
     ? registry.registryAction(AGENTS_ROOT, String(id || ""), action)
     : { ok: false, error: "Unknown action." });
+// Clickable PDF paths in chat bubbles (v1.52.0). The path comes from an
+// agent's reply, so registry.openLocalPdf treats it as untrusted: existing
+// .pdf files under the workspace or E:\Claude work only; refusals logged.
+const PDF_LINK_ROOTS = [ARGUS_WORKSPACE, "E:\\Claude work", AGENTS_ROOT];
+const PDF_LINK_LOG = path.join(app.getPath("userData"), "pdf-links.log");
+function logPdfLink(line) {
+  console.log("[pdf-link] " + line);
+  try {
+    fs.appendFileSync(PDF_LINK_LOG, `${new Date().toISOString()} ${line}\n`);
+  } catch (e) {
+    /* logging must never be why a click fails */
+  }
+}
+ipcMain.handle("open-local-pdf", (event, { filePath } = {}) =>
+  registry.openLocalPdf(filePath, PDF_LINK_ROOTS, logPdfLink));
 ipcMain.handle("approve-telegram-tasks", (event, { ids }) =>
   overview.approveTelegramTasks(ids, path.join(AGENTS_ROOT, "Security", "Tools", "TelegramBridge")));
 

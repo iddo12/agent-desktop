@@ -124,4 +124,59 @@ async function registryAction(workspaceRoot, id, action) {
   return err ? { ok: false, error: err } : { ok: true };
 }
 
-module.exports = { listRegistry, registryAction };
+// Clickable PDF paths in chat bubbles (v1.52.0). Unlike registryAction this
+// DOES take a path from the renderer - an agent's reply is the source - so
+// main treats it as untrusted: a plain drive-letter path only (no UNC, no
+// \\?\ device paths, no alternate data streams), resolved and then
+// realpath'd so neither ".." nor a junction/symlink can step outside the
+// allowed roots, an existing regular file, and a .pdf extension on the REAL
+// target. Anything else is refused and logged; a non-PDF is never handed to
+// shell.openPath, which would execute it.
+function isUnder(root, p) {
+  const r = path.resolve(root).replace(/[\\/]+$/, "").toLowerCase() + path.sep;
+  return p.toLowerCase().startsWith(r);
+}
+
+async function openLocalPdf(rawPath, allowedRoots, log) {
+  const note = (line) => {
+    try {
+      if (log) log(line);
+    } catch (e) {
+      /* logging must never throw */
+    }
+  };
+  const refuse = (why) => {
+    note(`REFUSED ${JSON.stringify(String(rawPath)).slice(0, 400)}: ${why}`);
+    return { ok: false, error: why };
+  };
+  if (typeof rawPath !== "string" || !rawPath || rawPath.length > 1000) return refuse("not a path");
+  const s = rawPath.trim();
+  if (!/^[A-Za-z]:[\\/]/.test(s)) return refuse("not an absolute drive-letter path");
+  if (s.indexOf(":", 2) !== -1) return refuse("colon after the drive letter (stream or device syntax)");
+  if (/[\0<>"|?*]/.test(s)) return refuse("illegal characters in path");
+  const resolved = path.resolve(s);
+  if (!/\.pdf$/i.test(resolved)) return refuse("not a .pdf");
+  const roots = (allowedRoots || []).filter(Boolean);
+  if (!roots.some((r) => isUnder(r, resolved))) return refuse("outside the allowed folders");
+  let real;
+  try {
+    real = fs.realpathSync.native(resolved);
+  } catch (e) {
+    return refuse("file does not exist");
+  }
+  if (!/\.pdf$/i.test(real)) return refuse("real target is not a .pdf");
+  if (!roots.some((r) => isUnder(r, real))) return refuse("real target is outside the allowed folders");
+  let st;
+  try {
+    st = fs.statSync(real);
+  } catch (e) {
+    return refuse("file does not exist");
+  }
+  if (!st.isFile()) return refuse("not a regular file");
+  const err = await shell.openPath(real); // "" on success
+  if (err) return refuse("openPath failed: " + err);
+  note(`OPENED ${real}`);
+  return { ok: true };
+}
+
+module.exports = { listRegistry, registryAction, openLocalPdf };
