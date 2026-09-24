@@ -190,7 +190,14 @@
       const session = terminals.get(agentPath);
       const info = await window.api.getHandoffInfo(agentPath);
       const fresh = info && info.exists && info.mtimeMs > flow.startedAt;
-      const idle = session && !session.busy && !(session.sendQueue && session.sendQueue.length);
+      // v1.52.1: session.busy alone is not "idle" - it drops to false after ~900ms of pty silence,
+      // i.e. between any two tool calls. On 2026-09-24 the COO got the "has NOT been rewritten"
+      // nudge twice while still mid-turn writing it (the file landed seconds later), and the same
+      // test gates the reset below, which could cut a working agent off. The transcript must also
+      // say the turn has ended.
+      const act = await window.api.getSessionActivity(agentPath).catch(() => null);
+      const idle = session && !session.busy && !(session.sendQueue && session.sendQueue.length) &&
+        !(act && act.working);
       flow.quietPolls = fresh && idle ? flow.quietPolls + 1 : 0;
       // v1.24.3: the agent can finish its turn and even say "Handoff saved" WITHOUT writing the file
       // (Product Development, 2026-09-19: answered from an older handoff with zero tool calls, so the
