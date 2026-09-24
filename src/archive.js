@@ -743,6 +743,38 @@ function readArchivedDay(agentPath, dateKey) {
 // (`resets_at` in the past), since a stale figure from an expired window is
 // actively misleading, not just imprecise.
 function getConfirmedRateLimits() {
+  const nowSec0 = Date.now() / 1000;
+  // v1.54.1: prefer statusline.cjs's per-session record. The single cache below
+  // is rewritten every 60 s by EVERY open session, idle ones included, each
+  // with whatever % it last heard - so the badge flip-flopped (weekly showed
+  // 25% for six hours while the truth was 37%). In the per-session file an
+  // entry's changedAt only moves when that session's value really changes, so
+  // "changedAt > firstSeenAt" proves the session was live when it heard it.
+  // Same rule as the usage model's sampler.js. Per window: the most recently
+  // changed live session that has a value for it and whose window hasn't reset.
+  try {
+    const bySess = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claude", "agent-desktop-rate-limits-by-session.json"), "utf-8"));
+    const live = Object.values(bySess || {})
+      .filter((e) => e && e.changedAt && e.firstSeenAt && Date.parse(e.changedAt) > Date.parse(e.firstSeenAt))
+      .sort((a, b) => Date.parse(b.changedAt) - Date.parse(a.changedAt));
+    const pick = (pk, rk) => {
+      const e = live.find((x) => typeof x[pk] === "number" && !(x[rk] && x[rk] < nowSec0));
+      if (!e) return null;
+      return { usedPct: e[pk], resetsAt: e[rk] || null, ageSeconds: Math.max(0, Math.round(nowSec0 - Date.parse(e.changedAt) / 1000)), source: "session" };
+    };
+    const fiveHour = pick("p5", "r5");
+    const sevenDay = pick("p7", "r7");
+    if (fiveHour || sevenDay) {
+      const legacy = getLegacyRateLimits();
+      return { fiveHour: fiveHour || legacy.fiveHour, sevenDay: sevenDay || legacy.sevenDay };
+    }
+  } catch (e) {
+    /* no per-session file yet - fall back to the single cache */
+  }
+  return getLegacyRateLimits();
+}
+
+function getLegacyRateLimits() {
   const cachePath = path.join(os.homedir(), ".claude", "agent-desktop-rate-limits.json");
   let cache;
   try {
