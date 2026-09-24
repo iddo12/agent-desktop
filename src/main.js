@@ -736,6 +736,124 @@ async function checkClaudeExecutableHealth() {
 
 ipcMain.handle("check-claude-executable-health", () => checkClaudeExecutableHealth());
 
+// ------------------------------------------------------- startup countdown --
+// v1.53.0. Iddo: "Can you put some big numbers on the screen (counting down)
+// until agent desktop fully loads so I will know not to interact with it until
+// it's ready?" For the first stretch after a launch (or a relaunch.vbs restart
+// after a CLI update) the window is up but the first ensureAllAgentsBackgrounded
+// sweep is still running `claude agents --json` / `claude --bg` per agent, and
+// clicks into the window are unreliable - it can even show "(Not Responding)".
+//
+// "Ready" means BOTH: the first sweep has processed every unpaused agent
+// (success or failure - a failed agent still counts as processed, the sweep
+// never waits on it again) AND the renderer has finished loading. The renderer
+// (startup-overlay.js) draws a full-window countdown until then.
+//
+// The countdown's starting figure is a measurement, not a guess: every real
+// startup's app-start -> ready duration is appended to startup-timing.json and
+// the next launch counts down from the average of the last 3 (60 s if none).
+// Test-mode launches that skip the sweep are ready at once and are NOT recorded,
+// so a sandbox run cannot drag the live estimate down (the sandbox has its own
+// userData anyway, but the rule holds either way).
+const STARTUP_TIMING_PATH = path.join(app.getPath("userData"), "startup-timing.json");
+const STARTUP_DEFAULT_ESTIMATE_MS = 60 * 1000;
+const STARTUP_TIMING_KEEP = 20; // history kept on disk; only the last 3 are averaged
+const STARTUP_TIMING_AVERAGE_OF = 3;
+// Module load is as close to "process start" as this file can see; the gap
+// before it is Electron's own boot, which the user sees as no window at all.
+const APP_START_MS = Date.now();
+
+function readStartupTimings() {
+  try {
+    const doc = JSON.parse(fs.readFileSync(STARTUP_TIMING_PATH, "utf-8"));
+    return Array.isArray(doc.runs) ? doc.runs.filter((r) => r && Number.isFinite(r.durationMs) && r.durationMs > 0) : [];
+  } catch (e) {
+    return []; // first run, or an unreadable file - fall back to the default
+  }
+}
+
+function estimateStartupMs() {
+  const recent = readStartupTimings().slice(-STARTUP_TIMING_AVERAGE_OF);
+  if (!recent.length) return STARTUP_DEFAULT_ESTIMATE_MS;
+  return Math.round(recent.reduce((sum, r) => sum + r.durationMs, 0) / recent.length);
+}
+
+const startupState = {
+  startedAt: APP_START_MS,
+  estimateMs: estimateStartupMs(),
+  total: 0, // unpaused agents in the first sweep; 0 until the sweep has listed them
+  done: 0,
+  agentName: null, // the agent most recently processed
+  sweepDone: false,
+  rendererLoaded: false,
+  ready: false,
+  readyAt: null,
+  dismissed: false, // "Use it anyway" - remembered here so a renderer reload doesn't re-show it
+};
+
+function sendStartup(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.send(channel, payload);
+    } catch (e) {}
+  }
+}
+
+function startupSnapshot() {
+  const { startedAt, estimateMs, total, done, agentName, ready, readyAt, dismissed } = startupState;
+  return { startedAt, estimateMs, total, done, agentName, ready, readyAt, dismissed, now: Date.now() };
+}
+
+async function recordStartupTiming(durationMs) {
+  try {
+    const runs = readStartupTimings();
+    runs.push({ at: new Date().toISOString(), durationMs, agents: startupState.total, version: app.getVersion() });
+    const doc = JSON.stringify({ runs: runs.slice(-STARTUP_TIMING_KEEP) }, null, 2);
+    await withFsRetryAsync(() => fs.promises.writeFile(STARTUP_TIMING_PATH, doc, "utf-8"));
+  } catch (e) {
+    logStuckWatchdog(`startup timing not saved: ${e.message}`);
+  }
+}
+
+function maybeMarkStartupReady() {
+  if (startupState.ready || !startupState.sweepDone || !startupState.rendererLoaded) return;
+  startupState.ready = true;
+  startupState.readyAt = Date.now();
+  sendStartup("startup-ready", startupSnapshot());
+}
+
+// Called once, when the first sweep returns (however it returns). `measured`
+// is false when there was nothing real to measure - the sweep was skipped in
+// test mode, or listAgents() failed - so those launches don't pollute the
+// estimate.
+function markStartupSweepDone(measured) {
+  if (startupState.sweepDone) return;
+  startupState.sweepDone = true;
+  const durationMs = Date.now() - APP_START_MS;
+  logStuckWatchdog(`startup: first sweep done after ${Math.round(durationMs / 1000)}s (${startupState.done}/${startupState.total} agents${measured ? "" : ", not recorded"})`);
+  if (measured) recordStartupTiming(durationMs);
+  maybeMarkStartupReady();
+}
+
+// Progress hook handed to the FIRST ensureAllAgentsBackgrounded() call only;
+// the 15-minute sweeps after it run without one.
+const startupProgress = {
+  begin(total) {
+    startupState.total = total;
+    sendStartup("startup-progress", startupSnapshot());
+  },
+  agentDone(agentName) {
+    startupState.done += 1;
+    startupState.agentName = agentName;
+    sendStartup("startup-progress", startupSnapshot());
+  },
+};
+
+ipcMain.handle("get-startup-state", () => startupSnapshot());
+ipcMain.on("startup-dismiss", () => {
+  startupState.dismissed = true;
+});
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -821,6 +939,13 @@ function createWindow() {
     });
   }
 
+  // Second half of the startup "ready" condition (see startupState). Fires on
+  // every load, including a renderer reload - harmless after the first.
+  mainWindow.webContents.on("did-finish-load", () => {
+    startupState.rendererLoaded = true;
+    maybeMarkStartupReady();
+  });
+
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   // Electron gives a BrowserWindow no OS-native right-click menu and blocks
@@ -905,8 +1030,20 @@ if (!gotSingleInstanceLock) {
     // settle before launching a CLI process per configured agent. Respects
     // the `paused` flag (agents.js setAgentPaused) - see that function's
     // and this sweep's own comments for why that flag exists.
+    // The first sweep also drives the startup countdown overlay: it reports
+    // each agent through startupProgress, and its end (normal, skipped or
+    // thrown) marks the sweep half of "ready". A throw is logged and still
+    // counts as done - the overlay must never wait on a sweep that has ended.
+    // A sandbox whose sweep will be skipped anyway is ready at once rather
+    // than after the 10 s settle delay below.
+    if (!testMode.liveAgentsPermitted()) markStartupSweepDone(false);
     setTimeout(() => {
-      ensureAllAgentsBackgrounded().catch((e) => logStuckWatchdog(`ensureAllAgentsBackgrounded startup error: ${e.message}`));
+      ensureAllAgentsBackgrounded(startupProgress)
+        .then((result) => markStartupSweepDone(!!(result && result.measured)))
+        .catch((e) => {
+          logStuckWatchdog(`ensureAllAgentsBackgrounded startup error: ${e.message}`);
+          markStartupSweepDone(false);
+        });
     }, 10000);
     setInterval(() => {
       ensureAllAgentsBackgrounded().catch((e) => logStuckWatchdog(`ensureAllAgentsBackgrounded interval error: ${e.message}`));
@@ -1684,26 +1821,33 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
 // above delete-agent): this sweep skips any agent with it set.
 const ENSURE_AGENTS_ALIVE_INTERVAL_MS = 15 * 60 * 1000;
 const ENSURE_AGENTS_ALIVE_STAGGER_MS = 2000; // don't launch every configured agent's CLI process in the same instant
-async function ensureAllAgentsBackgrounded() {
+// `progress` (optional) is the startup countdown's hook - see startupProgress.
+// Returns { measured: true } only when it actually walked the agent list, so
+// the caller can tell a real sweep from a skipped/failed one.
+async function ensureAllAgentsBackgrounded(progress) {
   // Tier 1/2 sandboxes must never dispatch a real `claude --bg` process: that
   // spends real quota and, in a fixtures-only sandbox, there is nothing for a
   // live process to do anyway. Tier 3 turns it on explicitly, and stops again
   // by itself once the token budget is gone.
   if (!testMode.liveAgentsPermitted()) {
     logStuckWatchdog(`ensureAllAgentsBackgrounded: skipped - ${testMode.describe()}`);
-    return;
+    return { measured: false };
   }
   let agents;
   try {
     agents = listAgents();
   } catch (e) {
     logStuckWatchdog(`ensureAllAgentsBackgrounded: listAgents failed: ${e.message}`);
-    return;
+    return { measured: false };
   }
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
-  for (const agent of agents) {
-    if (agent.paused) continue; // Iddo explicitly stopped this one - see set-agent-paused above
+  // Paused agents are skipped (Iddo explicitly stopped them - see
+  // set-agent-paused above), so they are left out of the countdown's total too.
+  const toCheck = agents.filter((agent) => !agent.paused);
+  if (progress) progress.begin(toCheck.length);
+  for (let i = 0; i < toCheck.length; i++) {
+    const agent = toCheck[i];
     try {
       const sessionCwd = sessionCwdFor(agent.path);
       let alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
@@ -1736,8 +1880,13 @@ async function ensureAllAgentsBackgrounded() {
       // One agent's own hiccup must never block the rest of the sweep.
       logStuckWatchdog(`ensureAllAgentsBackgrounded: ${agent.folderName} failed: ${e.message}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, ENSURE_AGENTS_ALIVE_STAGGER_MS));
+    if (progress) progress.agentDone(agent.displayName || agent.folderName);
+    // The stagger only separates one agent's CLI launch from the next, so
+    // there is nothing to wait for after the last one (it used to add a dead
+    // 2 s to every sweep, which the startup countdown would now show).
+    if (i < toCheck.length - 1) await new Promise((resolve) => setTimeout(resolve, ENSURE_AGENTS_ALIVE_STAGGER_MS));
   }
+  return { measured: true };
 }
 
 // The 15-minute sweep above pins each agent's cross-session name once per

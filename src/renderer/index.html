@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="styles-header-tasks.css">
 <link rel="stylesheet" href="styles-library.css">
 <link rel="stylesheet" href="styles-argus.css">
+<link rel="stylesheet" href="styles-startup.css">
 </head>
 <body>
   <div id="app">
@@ -206,6 +207,9 @@
     </div>
   </div>
 
+  <!-- First, so the startup countdown is up before the heavier scripts run
+       and cannot be prevented by an error in one of them. -->
+  <script src="startup-overlay.js"></script>
   <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="renderer.js"></script>

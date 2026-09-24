@@ -64,6 +64,16 @@ contextBridge.exposeInMainWorld("api", {
   disableInterferingService: (serviceName) => ipcRenderer.invoke("disable-interfering-service", { serviceName }),
   checkClaudeExecutableHealth: () => ipcRenderer.invoke("check-claude-executable-health"),
 
+  // Startup countdown overlay (v1.53.0) - see startupState in main.js.
+  getStartupState: () => ipcRenderer.invoke("get-startup-state"),
+  dismissStartup: () => ipcRenderer.send("startup-dismiss"),
+  onStartupProgress: (callback) => {
+    ipcRenderer.on("startup-progress", (event, payload) => callback(payload));
+  },
+  onStartupReady: (callback) => {
+    ipcRenderer.on("startup-ready", (event, payload) => callback(payload));
+  },
+
   onTerminalData: (callback) => {
     ipcRenderer.on("terminal-data", (event, payload) => callback(payload));
   },

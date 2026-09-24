@@ -1,0 +1,80 @@
+/* Startup countdown overlay (v1.53.0) - drawn by startup-overlay.js; what
+   "ready" means is decided in main.js (startupState). Uses the app's own
+   tokens from styles.css so it follows any retheme. */
+
+#startup-overlay {
+  position: fixed;
+  inset: 0;
+  /* Above everything the app draws, including the ad-hoc toasts at 9999. */
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-app);
+  /* Blocks pointer events underneath: the overlay itself is the hit target. */
+  pointer-events: auto;
+  cursor: progress;
+  user-select: none;
+  opacity: 1;
+  transition: opacity 400ms ease; /* keep in step with FADE_MS */
+}
+
+#startup-overlay.startup-overlay-fading {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.startup-overlay-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 0 24px;
+}
+
+.startup-overlay-title {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.startup-overlay-number {
+  font-size: 36vh;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  margin: 2vh 0;
+  min-height: 36vh;
+  display: flex;
+  align-items: center;
+}
+
+/* "Almost ready..." / "Ready" are words, not digits - far too wide at 36vh. */
+.startup-overlay-number.startup-overlay-almost,
+.startup-overlay-number.startup-overlay-ready {
+  font-size: 12vh;
+}
+
+.startup-overlay-number.startup-overlay-ready {
+  color: var(--health-healthy);
+}
+
+.startup-overlay-progress {
+  font-size: 18px;
+  color: var(--text-muted);
+  min-height: 1.4em;
+}
+
+.startup-overlay-skip {
+  margin-top: 28px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.startup-overlay-skip:hover,
+.startup-overlay-skip:focus {
+  color: var(--accent);
+}
