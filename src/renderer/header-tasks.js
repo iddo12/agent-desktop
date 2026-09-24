@@ -146,6 +146,15 @@
   let overview = null;
   let scopeKey = "agent";
   let body = null;
+  // Packaged-install feature probe (v1.55.0): a clean install has no
+  // Telegram bridge task queue, so the "From Telegram" section (and its
+  // approve buttons) is hidden rather than shown as permanently empty.
+  // Defaults true so nothing changes before the probe resolves or on
+  // Iddo's own machine, where it always resolves true anyway.
+  let telegramFeature = true;
+  window.api.getFeatures().then((f) => {
+    if (f && f.telegram === false) { telegramFeature = false; render(); }
+  }).catch(() => {});
 
   function activeFolder() {
     // activeAgentPath is renderer.js's top-level `let` - shared global scope.
@@ -252,18 +261,22 @@
     if (scopeKey === "agent") {
       const a = activeFolder();
       if (!a) { body.appendChild(emptyNote("Select an agent to see its open tasks.")); return; }
-      const pending = a.telegram.filter((t) => t.status === "pending").map((t) => ({ text: t.body, taskId: t.id }));
-      const approved = a.telegram.filter((t) => t.status === "approved").map((t) => ({ text: "Approved: " + t.body }));
-      body.appendChild(section("From Telegram", "Dictated while away - not acted on until you approve.",
-        pending.concat(approved), { approvable: true, empty: "No Telegram tasks for this agent." }));
+      if (telegramFeature) {
+        const pending = a.telegram.filter((t) => t.status === "pending").map((t) => ({ text: t.body, taskId: t.id }));
+        const approved = a.telegram.filter((t) => t.status === "approved").map((t) => ({ text: "Approved: " + t.body }));
+        body.appendChild(section("From Telegram", "Dictated while away - not acted on until you approve.",
+          pending.concat(approved), { approvable: true, empty: "No Telegram tasks for this agent." }));
+      }
       body.appendChild(section("Agreed with this agent",
         a.openFile ? `This agent's OPEN NOW list (${a.openFile}).` : "This agent keeps no OPEN NOW list yet.",
         a.openItems.map((t) => ({ text: t })), { empty: "Its OPEN NOW list is empty." }));
     } else {
       const waiting = [];
-      overview.unassigned.forEach((t) => waiting.push({ text: "Unassigned - " + t.body }));
-      overview.agents.forEach((a) => a.telegram.filter((t) => t.status === "pending")
-        .forEach((t) => waiting.push({ text: `${a.displayName} - approve: ${t.body}`, taskId: t.id })));
+      if (telegramFeature) {
+        overview.unassigned.forEach((t) => waiting.push({ text: "Unassigned - " + t.body }));
+        overview.agents.forEach((a) => a.telegram.filter((t) => t.status === "pending")
+          .forEach((t) => waiting.push({ text: `${a.displayName} - approve: ${t.body}`, taskId: t.id })));
+      }
       const attention = [];
       overview.agents.forEach((a) => {
         const ctx = contextAttention(a);
@@ -285,9 +298,10 @@
     const count = document.querySelector(".xp-tasks-btn .xp-count");
     if (!count) return;
     const a = activeFolder();
-    count.textContent = String(a ? a.openItems.length + a.telegram.filter((t) => t.status === "pending").length : 0);
-    const waiting = overview ? overview.unassigned.length +
-      overview.agents.reduce((s, x) => s + x.telegram.filter((t) => t.status === "pending").length, 0) : 0;
+    const pendingTelegram = (agent) => telegramFeature ? agent.telegram.filter((t) => t.status === "pending").length : 0;
+    count.textContent = String(a ? a.openItems.length + pendingTelegram(a) : 0);
+    const waiting = overview ? (telegramFeature ? overview.unassigned.length : 0) +
+      overview.agents.reduce((s, x) => s + pendingTelegram(x), 0) : 0;
     count.classList.toggle("xp-count-alert", waiting > 0);
     count.title = waiting ? `${waiting} Telegram task(s) waiting for your approval` : "";
   }

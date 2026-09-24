@@ -4,7 +4,12 @@ const fs = require("fs");
 const https = require("https");
 const { execSync, execFileSync, execFile, spawn } = require("child_process");
 const pty = require("node-pty");
-const { listAgents, createAgent, updateAgent, deleteAgent, setAgentPaused, ROOT: AGENTS_ROOT } = require("./agents");
+// Required as the module object (not destructured) so `agents.ROOT` always
+// reads the CURRENT value, including after a packaged install's first-run
+// folder picker calls agents.setRoot() - a destructured `const` would freeze
+// whatever ROOT was at this require, before that resolution has happened.
+const agents = require("./agents");
+const { listAgents, createAgent, updateAgent, deleteAgent, setAgentPaused } = agents;
 const { readGroups, writeGroups } = require("./groups");
 const {
   syncArchive,
@@ -151,10 +156,70 @@ function privateCliReady() {
   }
 }
 
+// The official native installer's target directory (irm https://claude.ai/
+// install.ps1 | iex, per code.claude.com's own install docs) - used only for
+// a packaged install, which has no Node/npm to lean on (see below). Checked
+// directly rather than only via PATH, since a just-installed claude.exe may
+// not be on PATH yet in THIS already-running process's environment even
+// though a fresh shell would see it (Windows broadcasts the PATH change,
+// but doesn't reach a process already running).
+function nativeClaudeExeDir() {
+  return process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".local", "bin") : null;
+}
+function nativeClaudeExePath() {
+  const dir = nativeClaudeExeDir();
+  return dir ? path.join(dir, "claude.exe") : null;
+}
+function findNativeClaudeExe() {
+  const direct = nativeClaudeExePath();
+  if (direct && fs.existsSync(direct)) return direct;
+  try {
+    const found = execSync("where claude.exe", { encoding: "utf-8" }).split("\n")[0].trim();
+    if (found) return found;
+  } catch (e) {
+    /* not on PATH either */
+  }
+  return null;
+}
+
+// Packaged installs have neither a bundled Node/npm (so the private-CLI npm
+// install this app otherwise prefers can't run) nor Claude Desktop's own
+// package-store symlink to fall back on (a from-source `electron .` checkout
+// is the only thing that ever had that) - the official native installer
+// (claude.exe) is the primary route there instead. See the "Install Claude
+// Code" IPC handlers below for how it gets onto the machine in the first
+// place; this only resolves an already-installed one.
+function resolvePackagedClaudeExecutable() {
+  const native = findNativeClaudeExe();
+  if (native) return native;
+  // A plain PATH install (e.g. Node present, user ran `npm install -g
+  // @anthropic-ai/claude-code` themselves) still works even though this app
+  // didn't put it there.
+  try {
+    const found = execSync("where claude.cmd", { encoding: "utf-8" }).split("\n")[0].trim();
+    if (found) return found;
+  } catch (e) {
+    /* not on PATH either - caller (checkClaudeExecutableHealth) is what
+       surfaces this as "not installed yet" and offers the install button,
+       not a throw reaching all the way to the UI as a generic error */
+  }
+  throw new Error("Claude Code isn't installed yet - use the \"Install Claude Code\" button.");
+}
+
 function resolveClaudeExecutable() {
   // Agent Desktop's own managed copy wins when present - it's the one this
-  // app can actually keep updated (see the block comment above).
+  // app can actually keep updated (see the block comment above). Checked
+  // first for both packaged and unpackaged.
   if (privateCliReady()) return privateCliCmd();
+
+  // Packaged: unpackaged = unchanged (see below); packaged = private npm CLI
+  // (just checked) -> native claude.exe -> PATH -> the install prompt.
+  if (app.isPackaged) return resolvePackagedClaudeExecutable();
+
+  // -------------------------------------------------------------------
+  // Unpackaged (Iddo's own `electron .` checkout) - byte-for-byte the same
+  // resolution this app has always used. Nothing below this line changes
+  // for him; the packaged path above is a separate branch entirely.
   const localAppData = process.env.LOCALAPPDATA || (process.env.USERPROFILE && path.join(process.env.USERPROFILE, "AppData", "Local"));
   if (localAppData) {
     try {
@@ -333,12 +398,29 @@ function ensureRemoteControlEnabled() {
 // package.json rather than via `claude --version` - no process spawn
 // needed at all for a simple version string, and avoids relying on
 // child_process/pty exec just to answer this one question.
-function getInstalledClaudeCodeVersion() {
+async function getInstalledClaudeCodeVersion() {
+  let claudeCmdPath;
   try {
-    const claudeCmdPath = resolveClaudeExecutable();
+    claudeCmdPath = resolveClaudeExecutable();
+  } catch (e) {
+    return null;
+  }
+  // An npm install (Agent Desktop's private CLI, or any other npm-global
+  // install) publishes its version in a package.json alongside it - no
+  // process spawn needed for a simple version string.
+  try {
     const pkgPath = path.join(path.dirname(claudeCmdPath), "node_modules", "@anthropic-ai", "claude-code", "package.json");
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    return pkg.version || null;
+    if (pkg.version) return pkg.version;
+  } catch (e) {
+    /* not an npm install (or unreadable) - a native single-binary install
+       (claude.exe, see the packaged installer below) has no such file, so
+       fall through to actually asking it */
+  }
+  try {
+    const output = await runClaudeCommand(claudeCmdPath, ["--version"], { env: process.env, timeoutMs: 15000 }, 3, 500);
+    const m = String(output).match(/(\d+\.\d+\.\d+)/);
+    return m ? m[1] : null;
   } catch (e) {
     return null;
   }
@@ -423,7 +505,7 @@ ipcMain.handle("ui-flag-set", (event, { key, value }) => {
 });
 
 ipcMain.handle("check-claude-code-update", async () => {
-  const current = getInstalledClaudeCodeVersion();
+  const current = await getInstalledClaudeCodeVersion();
   const latest = await getLatestClaudeCodeVersion();
   return { current, latest, updateAvailable: isVersionNewer(latest, current) };
 });
@@ -468,7 +550,7 @@ ipcMain.handle("update-claude-code", async () => {
   if (!verified) {
     verified = await updateClaudeCodeOnce(npmPath, shell);
   }
-  const current = getInstalledClaudeCodeVersion();
+  const current = await getInstalledClaudeCodeVersion();
   if (!verified || !current) {
     throw new Error(
       "The update ran, but the install couldn't be verified as working afterward - this can happen if a running " +
@@ -493,7 +575,29 @@ ipcMain.handle("update-claude-code", async () => {
 // all of it: install into a fresh private dir, and only ever stop THIS
 // app's own background agents (by the cwds it dispatched), never anything
 // matched by process name, and never the app itself.
+// A packaged install running on the native installer (no private npm CLI,
+// and often no Node to run one - see resolvePackagedClaudeExecutable) has no
+// npm-global copy of anything to reinstall here. The native binary
+// maintains its own updater instead.
+async function updateNativeClaudeExe(nativeExePath) {
+  await runClaudeCommand(nativeExePath, ["update"], { env: process.env }, 3, 500);
+  const version = await getInstalledClaudeCodeVersion();
+  if (!version) {
+    throw new Error(
+      "The update ran, but the install couldn't be verified afterward. Try again, or run 'claude update' in a terminal."
+    );
+  }
+  // Unlike the private-CLI swap below, this never stops any of this app's
+  // own background agent processes and touches no file they might have
+  // open - there's nothing to reconnect, so no restart is needed.
+  return { version, restarting: false };
+}
+
 ipcMain.handle("update-claude-cli", async () => {
+  if (app.isPackaged && !privateCliReady()) {
+    const native = findNativeClaudeExe();
+    if (native) return updateNativeClaudeExe(native);
+  }
   if (process.platform !== "win32") {
     throw new Error("Managed CLI update is implemented for Windows only.");
   }
@@ -568,6 +672,54 @@ ipcMain.handle("update-claude-cli", async () => {
   });
   relaunchApp();
   return { version, restarting: true };
+});
+
+// ------------------------------------------- native Claude Code installer --
+//
+// A packaged install with neither Agent Desktop's private npm CLI ready nor
+// any existing claude.exe/claude.cmd has nothing resolveClaudeExecutable()
+// can find - checkClaudeExecutableHealth() reports that distinctly (see its
+// "not-installed" reason below) so the renderer can offer this button
+// instead of a dead-end error. Runs the same command the official install
+// docs give (code.claude.com/docs: irm https://claude.ai/install.ps1 | iex),
+// which drops claude.exe into %USERPROFILE%\.local\bin. Streams its output
+// to the renderer live (same pty-based approach as start-terminal) since the
+// download can take a while and a silent wait looks like a hang.
+let installClaudeInProgress = false;
+
+ipcMain.handle("install-claude-code-native", async () => {
+  if (process.platform !== "win32") {
+    throw new Error("The native installer is only available on Windows.");
+  }
+  if (installClaudeInProgress) {
+    throw new Error("An install is already running.");
+  }
+  installClaudeInProgress = true;
+  try {
+    const proc = await spawnPtyWithRetry(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://claude.ai/install.ps1 | iex"],
+      { name: "xterm-color", cols: 120, rows: 30, cwd: app.getPath("temp"), env: process.env }
+    );
+    await new Promise((resolve, reject) => {
+      proc.onData((data) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("install-claude-code-output", data);
+      });
+      proc.onExit((e) => {
+        const exitCode = e && typeof e === "object" ? e.exitCode : e;
+        if (exitCode === 0) resolve();
+        else reject(new Error(`Installer exited with code ${exitCode}`));
+      });
+    });
+    const native = findNativeClaudeExe();
+    if (!native) {
+      throw new Error("The installer finished, but claude.exe still can't be found. Try restarting Agent Desktop.");
+    }
+    const version = await getInstalledClaudeCodeVersion();
+    return { ok: true, path: native, version };
+  } finally {
+    installClaudeInProgress = false;
+  }
 });
 
 // Restart Agent Desktop. Two mechanisms fired together, which is safe
@@ -704,7 +856,11 @@ async function checkClaudeExecutableHealth() {
   try {
     resolvedPath = resolveClaudeExecutable();
   } catch (e) {
-    return { healthy: false, reason: "not-resolved", detail: e.message };
+    // Packaged with nothing found at all (no private CLI, no native
+    // claude.exe, nothing on PATH) - offer the native installer rather than
+    // just a "make sure it's installed" dead end, since there's no Node/npm
+    // for this app to install it with itself.
+    return { healthy: false, reason: "not-resolved", detail: e.message, installable: app.isPackaged };
   }
 
   let viaSymlink = false;
@@ -854,6 +1010,80 @@ ipcMain.handle("get-startup-state", () => startupSnapshot());
 ipcMain.on("startup-dismiss", () => {
   startupState.dismissed = true;
 });
+
+// ------------------------------------------------- agents root (packaged) --
+//
+// Unpackaged (Iddo's own machine) needs none of this: agents.js's default -
+// AGENT_DESKTOP_ROOT if set, else the folder above agent-desktop itself - is
+// exactly the ROOT this app has always used, decided synchronously at
+// require time, with no dialog and no settings file. resolveAgentsRoot()
+// below returns immediately, before touching anything, whenever
+// !app.isPackaged - this whole feature is a new code path for a packaged
+// install, not a change to his.
+//
+// A packaged install has no folder of agents to sit "above" - it's wherever
+// electron-builder's installer put it - so on first run it asks: an env
+// override still wins if one is set (e.g. a portable/test build), then a
+// previously-saved choice, then a folder picker defaulting to
+// Documents\Agent Desktop (created if missing, used as a silent fallback if
+// the picker itself fails or is dismissed with no other choice on record).
+// The choice is saved in userData\settings.json, a plain JSON file in the
+// same non-destructive style as ui-flags.json above.
+function appSettingsPath() {
+  return path.join(app.getPath("userData"), "settings.json");
+}
+function readAppSettings() {
+  try {
+    const v = JSON.parse(fs.readFileSync(appSettingsPath(), "utf-8"));
+    return v && typeof v === "object" ? v : {};
+  } catch (e) {
+    return {};
+  }
+}
+function writeAppSettings(settings) {
+  try {
+    fs.writeFileSync(appSettingsPath(), JSON.stringify(settings, null, 2), "utf-8");
+  } catch (e) {
+    /* best-effort - worst case the picker just runs again next launch */
+  }
+}
+
+async function resolveAgentsRoot() {
+  if (process.env.AGENT_DESKTOP_ROOT) return; // explicit override always wins - agents.js already applied it
+  if (!app.isPackaged) return; // unpackaged: today's ROOT, byte-for-byte - see block comment above
+
+  const settings = readAppSettings();
+  if (settings.agentsRoot && fs.existsSync(settings.agentsRoot)) {
+    agents.setRoot(settings.agentsRoot);
+    return;
+  }
+
+  const defaultDir = path.join(app.getPath("documents"), "Agent Desktop");
+  let chosen = null;
+  try {
+    const result = await dialog.showOpenDialog({
+      title: "Choose where your agents live",
+      message:
+        "Agent Desktop keeps each agent as its own folder here. Pick a folder to use (an empty one is fine) - " +
+        "you can create your first agent once it's set.",
+      defaultPath: fs.existsSync(defaultDir) ? defaultDir : app.getPath("documents"),
+      properties: ["openDirectory", "createDirectory"],
+    });
+    if (!result.canceled && result.filePaths.length) chosen = result.filePaths[0];
+  } catch (e) {
+    /* fall through to the default below */
+  }
+  if (!chosen) {
+    chosen = defaultDir;
+    try {
+      fs.mkdirSync(chosen, { recursive: true });
+    } catch (e) {
+      /* agents.setRoot still points here either way - listAgents()/createAgent() surface any real problem */
+    }
+  }
+  agents.setRoot(chosen);
+  writeAppSettings(Object.assign({}, settings, { agentsRoot: chosen }));
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -1008,7 +1238,9 @@ if (!gotSingleInstanceLock) {
       mainWindow.focus();
     }
   });
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    await resolveAgentsRoot();
+    if (app.isPackaged) overview.configureWorkspacePaths(agents.ROOT);
     createWindow();
     ensureRateLimitStatusLine();
     ensureRemoteControlEnabled();
@@ -1141,7 +1373,7 @@ function agentClaudeMdPath(agentPath) {
   // Only ever touch a CLAUDE.md that sits directly inside a real agent
   // folder one level under the agents root - refuse anything else outright
   // rather than trust the caller's path.
-  if (path.dirname(resolved) !== path.resolve(AGENTS_ROOT)) {
+  if (path.dirname(resolved) !== path.resolve(agents.ROOT)) {
     throw new Error("Refusing to touch a path outside the agents root");
   }
   return path.join(resolved, "CLAUDE.md");
@@ -1922,7 +2154,7 @@ ipcMain.handle("get-untrusted-agents", () => untrustedAgentsList());
 // so a renderer bug cannot be used to trust an arbitrary folder.
 ipcMain.handle("trust-agent-folders", async (event, { agentPaths } = {}) => {
   const requested = Array.isArray(agentPaths) ? agentPaths.map((p) => path.resolve(String(p))) : [];
-  const root = path.resolve(AGENTS_ROOT);
+  const root = path.resolve(agents.ROOT);
   const targets = requested.filter((p) => path.dirname(p) === root && untrustedAgents.has(p));
   if (!targets.length) return { ok: false, error: "None of those agents are waiting for trust.", results: [] };
 
@@ -3302,29 +3534,48 @@ ipcMain.handle("get-transcript-quiet-ms", (event, { agentPath }) => {
 // Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
 ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor));
 // ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
-// AGENTS_ROOT: in the sandbox the agents are fixtures but the report files are
-// real, and they are only ever read here.
-const ARGUS_WORKSPACE = "D:\\Dropbox\\Claude stuff";
-ipcMain.handle("argus-data", (event, opts) => argus.getArgusData(ARGUS_WORKSPACE, opts || {}));
-ipcMain.handle("argus-decision-count", () => argus.getDecisionCount(ARGUS_WORKSPACE));
+// agents.ROOT: in the sandbox the agents are fixtures but the report files
+// are real, and they are only ever read here.
+//
+// Unpackaged (Iddo's own PC) keeps the exact literal it has always used -
+// D:\Dropbox\Claude stuff. That happens to be his agents root too, but the
+// literal (not agents.ROOT) is what actually proves this byte-for-byte
+// unchanged, rather than relying on the two being equal. A packaged install
+// has no such fixed workspace to point at, so it falls back to wherever the
+// user actually chose to keep their agents - the ARGUS/Bridge tab is hidden
+// there anyway when that workspace has no shared_reports (see get-features).
+function argusWorkspace() {
+  return app.isPackaged ? agents.ROOT : "D:\\Dropbox\\Claude stuff";
+}
+ipcMain.handle("argus-data", (event, opts) => argus.getArgusData(argusWorkspace(), opts || {}));
+ipcMain.handle("argus-decision-count", () => argus.getDecisionCount(argusWorkspace()));
 // Drill-down (v1.42.0): opening the report behind a number. argus-data
 // validates the path against the links the status files themselves publish,
 // so a renderer cannot ask for an arbitrary file.
-ipcMain.handle("argus-open-source", (event, { file }) => argus.openSource(ARGUS_WORKSPACE, file));
+ipcMain.handle("argus-open-source", (event, { file }) => argus.openSource(argusWorkspace(), file));
 // Iddo's verdict on a weekly idea (v1.44.0). The only write path the Argus
 // view has into an agent-owned file, and argus-data validates every field
 // before touching it - see setIdeaDecision.
-ipcMain.handle("argus-set-idea-decision", (event, payload) => argus.setIdeaDecision(ARGUS_WORKSPACE, payload || {}));
+ipcMain.handle("argus-set-idea-decision", (event, payload) => argus.setIdeaDecision(argusWorkspace(), payload || {}));
 // Library tabs (v1.38.0) - see registry.js. Opening is by entry id only.
-ipcMain.handle("registry-list", () => registry.listRegistry(AGENTS_ROOT));
+ipcMain.handle("registry-list", () => registry.listRegistry(agents.ROOT));
 ipcMain.handle("registry-action", (event, { id, action }) =>
   ["open", "reveal", "copy", "view", "openPdf"].includes(action)
-    ? registry.registryAction(AGENTS_ROOT, String(id || ""), action)
+    ? registry.registryAction(agents.ROOT, String(id || ""), action)
     : { ok: false, error: "Unknown action." });
 // Clickable PDF paths in chat bubbles (v1.52.0). The path comes from an
 // agent's reply, so registry.openLocalPdf treats it as untrusted: existing
 // .pdf files under the workspace or E:\Claude work only; refusals logged.
-const PDF_LINK_ROOTS = [ARGUS_WORKSPACE, "E:\\Claude work", AGENTS_ROOT];
+// Unpackaged keeps the exact same three-entry array, in the same order, as
+// before - E:\Claude work included unconditionally, matching today's
+// behaviour exactly. Packaged has no reason to expect that second drive to
+// exist at all, so it's only included there when it actually does.
+function pdfLinkRoots() {
+  if (!app.isPackaged) return [argusWorkspace(), "E:\\Claude work", agents.ROOT];
+  const roots = [argusWorkspace(), agents.ROOT];
+  if (fs.existsSync("E:\\Claude work")) roots.push("E:\\Claude work");
+  return roots;
+}
 const PDF_LINK_LOG = path.join(app.getPath("userData"), "pdf-links.log");
 function logPdfLink(line) {
   console.log("[pdf-link] " + line);
@@ -3335,9 +3586,31 @@ function logPdfLink(line) {
   }
 }
 ipcMain.handle("open-local-pdf", (event, { filePath } = {}) =>
-  registry.openLocalPdf(filePath, PDF_LINK_ROOTS, logPdfLink));
+  registry.openLocalPdf(filePath, pdfLinkRoots(), logPdfLink));
 ipcMain.handle("approve-telegram-tasks", (event, { ids }) =>
-  overview.approveTelegramTasks(ids, path.join(AGENTS_ROOT, "Security", "Tools", "TelegramBridge")));
+  overview.approveTelegramTasks(ids, path.join(agents.ROOT, "Security", "Tools", "TelegramBridge")));
+
+// Packaged-install feature probe (v1.55.0): a clean install starts with none
+// of Iddo's shared workspace folders - ARGUS's shared_reports, the Library's
+// shared_registry, the Telegram bridge's task queue, the structured task
+// store - so rather than showing those tabs/panels empty, the renderer asks
+// here first and hides them outright when the answer is false. Unpackaged
+// reports all four true via the same existence checks, trivially, since
+// every one of these already exists on Iddo's machine - this is a new
+// endpoint, not a behaviour change for him.
+function computeFeatures() {
+  return {
+    argus: fs.existsSync(path.join(argusWorkspace(), "shared_reports")),
+    library: fs.existsSync(path.join(agents.ROOT, "shared_registry")),
+    telegram: fs.existsSync(overview.telegramTasksDir()),
+    tasks: fs.existsSync(overview.taskStoreDir()),
+    // Also doubles as the plan-badge's own "is there a real default to fall
+    // back to" check (renderer.js DEFAULT_PLAN_ID) - Iddo's Max 5x default
+    // means nothing on a packaged install with no infrastructure_facts.md.
+    packaged: app.isPackaged,
+  };
+}
+ipcMain.handle("get-features", () => computeFeatures());
 
 ipcMain.handle("get-usage-windows", () => getUsageWindows());
 
@@ -3353,10 +3626,13 @@ ipcMain.handle("get-usage-windows", () => getUsageWindows());
 // so read the plan from there instead of asking Iddo to separately keep a
 // second copy of the same fact in sync inside this app. mtime-gated so a
 // plain-text file this small still isn't re-read on every single call.
-const INFRA_FACTS_PATH = path.join(AGENTS_ROOT, "infrastructure_facts.md");
+function infraFactsPath() {
+  return path.join(agents.ROOT, "infrastructure_facts.md");
+}
 let infraFactsPlanCache = { mtimeMs: null, planId: null };
 function getInferredPlanId() {
   try {
+    const INFRA_FACTS_PATH = infraFactsPath();
     const mtimeMs = fs.statSync(INFRA_FACTS_PATH).mtimeMs;
     if (infraFactsPlanCache.mtimeMs === mtimeMs) return infraFactsPlanCache.planId;
     const text = fs.readFileSync(INFRA_FACTS_PATH, "utf-8");

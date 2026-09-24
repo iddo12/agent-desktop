@@ -159,6 +159,24 @@ html, body {
   border: 1px solid var(--border);
 }
 
+/* Live output from the native Claude Code installer (v1.55.0) - a packaged
+   install with nothing on PATH runs irm https://claude.ai/install.ps1 | iex
+   from a button in #claude-cli-warning; this is where that streams to. */
+.install-claude-code-log {
+  margin: 8px 0 0;
+  max-height: 160px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-muted);
+}
+
 #agent-list {
   flex: 1;
   overflow-y: auto;

@@ -60,6 +60,14 @@
   const libNav = document.getElementById("library-nav");
   agentList.parentNode.insertBefore(nav, libNav || agentList);
 
+  // Packaged-install feature probe (v1.55.0): a clean install has no
+  // shared_reports for ARGUS to show, so hide the tab entirely rather than
+  // opening onto an empty control room. Always true today for Iddo's own
+  // workspace, so this never hides anything for him.
+  window.api.getFeatures().then((f) => {
+    if (f && f.argus === false) nav.classList.add("hidden");
+  }).catch(() => {});
+
   // ---------------------------------------------------------------- view
   const view = el("div");
   view.id = "argus-view";

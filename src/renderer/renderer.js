@@ -93,6 +93,22 @@ function renderAvatarEl(agent) {
 
 let uiFlags = null; // persistent one-time-note flags from main (ui-flags.json); null until loaded
 
+const emptyStateTextEl = document.getElementById("empty-state-text");
+const emptyStateCreateBtn = document.getElementById("empty-state-create-btn");
+emptyStateCreateBtn.addEventListener("click", openCreateAgentModal);
+
+// A genuinely empty agent list (a fresh packaged install, before Merav has
+// created anything) needs a real call to action, not just the normal
+// "nothing selected" hint - which is what the empty state otherwise always
+// meant, since Iddo's own instance has never been without an agent.
+function updateEmptyStateForAgentCount() {
+  const empty = agents.length === 0;
+  emptyStateTextEl.textContent = empty
+    ? "No agents yet."
+    : "Select an agent on the left, or create a new one.";
+  emptyStateCreateBtn.classList.toggle("hidden", !empty);
+}
+
 async function loadAgents() {
   const [agentList, gDoc, flags] = await Promise.all([window.api.listAgents(), window.api.listGroups(), window.api.getUiFlags().catch(() => ({}))]);
   uiFlags = flags || {};
@@ -100,6 +116,7 @@ async function loadAgents() {
   groupsDoc = gDoc && Array.isArray(gDoc.groups) ? gDoc : { version: 1, groups: [] };
   renderAgentList();
   updateAgentGroupsNote();
+  updateEmptyStateForAgentCount();
 }
 
 // Persist the in-memory groupsDoc and re-render. The main process normalizes
@@ -2186,12 +2203,33 @@ const PLAN_FIVE_HOUR_ESTIMATES = {
 const DEFAULT_PLAN_ID = "max5x"; // 2026-09-20: Iddo's actual current plan - see infrastructure_facts.md
 const PLAN_STORAGE_KEY = "agentDesktop.selectedPlanId";
 
+// Packaged installs have no infrastructure_facts.md to read a real plan from
+// and no reason to assume Merav/Iddo's-own-Max-5x either - "not set" until
+// picked, rather than silently defaulting to a plan the user may not be on.
+// Set once from get-features (main.js computeFeatures()); false (today's
+// behaviour) until that resolves, which only ever narrows a brief startup
+// window on a packaged build, never changes anything unpackaged.
+let appPackaged = false;
+window.api.getFeatures().then((f) => {
+  if (f && typeof f.packaged === "boolean") {
+    appPackaged = f.packaged;
+    if (typeof syncPlanDropdown === "function") syncPlanDropdown();
+  }
+}).catch(() => {});
+
 function getSelectedPlanId() {
   const stored = localStorage.getItem(PLAN_STORAGE_KEY);
-  return stored && PLAN_FIVE_HOUR_ESTIMATES[stored] ? stored : DEFAULT_PLAN_ID;
+  if (stored && PLAN_FIVE_HOUR_ESTIMATES[stored]) return stored;
+  return appPackaged ? null : DEFAULT_PLAN_ID;
 }
 
 function setSelectedPlanId(planId) {
+  // "" is the dropdown's own "Not set" option (see planNotSetOption below) -
+  // an explicit choice to go back to unset, not an invalid value to ignore.
+  if (planId === "") {
+    localStorage.removeItem(PLAN_STORAGE_KEY);
+    return;
+  }
   if (!PLAN_FIVE_HOUR_ESTIMATES[planId]) return;
   localStorage.setItem(PLAN_STORAGE_KEY, planId);
 }
@@ -2277,6 +2315,13 @@ async function refreshUsageWindows() {
     if (pct >= 90) fiveHourUsageEl.classList.add("critical");
     else if (pct >= 70) fiveHourUsageEl.classList.add("warning");
     if (age.stale) fiveHourUsageEl.classList.add("stale");
+  } else if (!PLAN_FIVE_HOUR_ESTIMATES[await getEffectivePlanId()]) {
+    // Packaged, no infrastructure_facts.md, and nothing picked yet - no
+    // default to estimate against (see DEFAULT_PLAN_ID/appPackaged above).
+    fiveHourUsageEl.textContent = "Plan: not set";
+    fiveHourUsageEl.title = "Pick your Claude plan from the sidebar dropdown to estimate 5-hour usage - no confirmed usage figure is available yet either.";
+    fiveHourUsageEl.classList.remove("hidden", "critical", "stale");
+    fiveHourUsageEl.classList.add("warning");
   } else {
     const plan = PLAN_FIVE_HOUR_ESTIMATES[await getEffectivePlanId()];
     const fivePct = Math.min(100, Math.round((windows.messagesInLast5h / plan.fiveHourMessages) * 100));
@@ -4634,13 +4679,21 @@ window.api.getAppVersion().then((v) => {
 // own words: "currently 3 but maybe they will add more later") is a
 // one-line addition to that object, not an HTML edit too.
 const planSelectEl = document.getElementById("plan-select");
+// Only ever selected on a packaged install with nothing picked yet and no
+// infrastructure_facts.md to infer from (see appPackaged/getSelectedPlanId
+// above) - picking a real plan below moves off this permanently for good,
+// there's no way back to it short of clearing localStorage.
+const planNotSetOption = document.createElement("option");
+planNotSetOption.value = "";
+planNotSetOption.textContent = "Not set";
+planSelectEl.appendChild(planNotSetOption);
 for (const [planId, plan] of Object.entries(PLAN_FIVE_HOUR_ESTIMATES)) {
   const option = document.createElement("option");
   option.value = planId;
   option.textContent = plan.label;
   planSelectEl.appendChild(option);
 }
-planSelectEl.value = getSelectedPlanId();
+planSelectEl.value = getSelectedPlanId() || "";
 getEffectivePlanId(); // sync the dropdown to infrastructure_facts.md right away, not only once the fallback estimate happens to be needed
 planSelectEl.addEventListener("change", () => {
   setSelectedPlanId(planSelectEl.value);
@@ -4650,7 +4703,7 @@ planSelectEl.addEventListener("change", () => {
 // synced into localStorage from infrastructure_facts.md, so it never sits
 // visibly stale even though nothing here required Iddo to click it.
 function syncPlanDropdown() {
-  planSelectEl.value = getSelectedPlanId();
+  planSelectEl.value = getSelectedPlanId() || "";
 }
 
 // --------------------------------------------------- Claude Code updates --
@@ -4781,6 +4834,17 @@ checkForInterferingServices();
 // exists, since a file existing was never the reliable signal here.
 const claudeCliWarningEl = document.getElementById("claude-cli-warning");
 
+// One listener for the whole renderer lifetime, writing into whichever
+// install's log box is currently open - checkClaudeCliHealth() rebuilds the
+// warning box's DOM on every check, so a listener registered inside it would
+// otherwise stack up a new one on every retry.
+let activeInstallLogEl = null;
+window.api.onInstallClaudeCodeOutput((data) => {
+  if (!activeInstallLogEl) return;
+  activeInstallLogEl.textContent += data;
+  activeInstallLogEl.scrollTop = activeInstallLogEl.scrollHeight;
+});
+
 function claudeCliWarningMessage(result) {
   if (result.viaSymlink) {
     return (
@@ -4789,6 +4853,9 @@ function claudeCliWarningMessage(result) {
       "troubleshooting section). Run this in PowerShell to confirm: " +
       "Get-Item \"$env:APPDATA\\npm\\claude.cmd\" | Select-Object LinkType, Target"
     );
+  }
+  if (result.installable) {
+    return "Claude Code isn't installed yet. Click Install Claude Code below to set it up.";
   }
   if (result.reason === "missing" || result.reason === "not-resolved") {
     return (
@@ -4826,6 +4893,37 @@ async function checkClaudeCliHealth() {
   body.className = "warning-body";
   body.textContent = claudeCliWarningMessage(result);
   claudeCliWarningEl.appendChild(body);
+
+  // Packaged install, nothing found at all: offer the native installer
+  // itself (irm https://claude.ai/install.ps1 | iex) rather than only a
+  // Retry button with nothing for it to find yet. Output streams in live
+  // (install-claude-code-output) since the download can take a while.
+  if (result.installable) {
+    const installBtn = document.createElement("button");
+    installBtn.textContent = "Install Claude Code";
+    const log = document.createElement("pre");
+    log.className = "install-claude-code-log hidden";
+    installBtn.addEventListener("click", async () => {
+      installBtn.disabled = true;
+      installBtn.textContent = "Installing…";
+      log.textContent = "";
+      log.classList.remove("hidden");
+      activeInstallLogEl = log;
+      try {
+        const r = await window.api.installClaudeCodeNative();
+        installBtn.textContent = r.version ? `Installed Claude Code ${r.version}` : "Installed";
+        await checkClaudeCliHealth();
+      } catch (e) {
+        installBtn.disabled = false;
+        installBtn.textContent = "Install failed - click to retry";
+        installBtn.title = String((e && e.message) || e);
+      } finally {
+        if (activeInstallLogEl === log) activeInstallLogEl = null;
+      }
+    });
+    claudeCliWarningEl.appendChild(installBtn);
+    claudeCliWarningEl.appendChild(log);
+  }
 
   const retryBtn = document.createElement("button");
   retryBtn.textContent = "Retry";

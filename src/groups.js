@@ -1,13 +1,17 @@
 const fs = require("fs");
 const path = require("path");
 const { withFsRetry } = require("./fsRetry");
+const agents = require("./agents");
 
 // Groups ("folders" / "categories" in the UI) live in ONE JSON file next to
-// the agent folders, under the same shared parent directory agents.js scans.
-// Override the parent with AGENT_DESKTOP_ROOT, same as agents.js.
-const ROOT = process.env.AGENT_DESKTOP_ROOT || path.resolve(__dirname, "..", "..");
+// the agent folders, under the same shared parent directory agents.js scans -
+// read through agents.ROOT (a getter) rather than a second copy of the same
+// computation, so a packaged install's first-run folder picker (which only
+// ever calls agents.setRoot()) moves this file along with it.
 const GROUPS_FILENAME = "agent_groups.json";
-const GROUPS_PATH = path.join(ROOT, GROUPS_FILENAME);
+function groupsPath() {
+  return path.join(agents.ROOT, GROUPS_FILENAME);
+}
 
 // ---------------------------------------------------------------------------
 // What this file is, and just as importantly what it is NOT
@@ -50,9 +54,10 @@ function defaultGroupsDoc() {
 }
 
 function readGroups() {
-  if (!fs.existsSync(GROUPS_PATH)) return defaultGroupsDoc();
+  const groupsFile = groupsPath();
+  if (!fs.existsSync(groupsFile)) return defaultGroupsDoc();
   try {
-    const parsed = JSON.parse(fs.readFileSync(GROUPS_PATH, "utf-8"));
+    const parsed = JSON.parse(fs.readFileSync(groupsFile, "utf-8"));
     if (!parsed || !Array.isArray(parsed.groups)) return defaultGroupsDoc();
     return normalizeGroupsDoc(parsed);
   } catch (e) {
@@ -133,8 +138,8 @@ function normalizeGroupsDoc(doc) {
 
 function writeGroups(doc) {
   const normalized = normalizeGroupsDoc(doc && typeof doc === "object" ? doc : defaultGroupsDoc());
-  withFsRetry(() => fs.writeFileSync(GROUPS_PATH, JSON.stringify(normalized, null, 2), "utf-8"));
+  withFsRetry(() => fs.writeFileSync(groupsPath(), JSON.stringify(normalized, null, 2), "utf-8"));
   return normalized;
 }
 
-module.exports = { readGroups, writeGroups, GROUPS_PATH, GROUPS_FILENAME };
+module.exports = { readGroups, writeGroups, groupsPath, GROUPS_FILENAME };

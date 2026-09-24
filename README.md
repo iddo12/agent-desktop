@@ -57,6 +57,52 @@ Selecting the agent starts a real `claude` session with that folder as its worki
 - `src/fsRetry.js` — retry-with-backoff wrapper for file operations, since cloud-synced folders (Dropbox, OneDrive, etc.) and antivirus/security software can transiently lock files mid-write.
 - `src/renderer/` — the UI itself.
 
+## Packaged vs unpackaged behaviour
+
+Running from source (`npm start`, i.e. `!app.isPackaged`) and running an
+installed build (the Setup `.exe` or the portable `.zip` — see "Download and
+install" above if this repo has that section) differ in a few places, all of
+it added for a packaged install running on a machine that has none of the
+things a from-source checkout can assume:
+
+- **Where agents live.** Unpackaged, agents are sibling folders next to
+  `agent-desktop` itself (or `AGENT_DESKTOP_ROOT`, unchanged - see Setup
+  above). A packaged install has no such parent folder, so on first run it
+  asks you to pick one (a folder picker, defaulting to `Documents\Agent
+  Desktop`, created if it doesn't exist) and remembers the choice in a
+  `settings.json` inside the app's data folder. An empty or freshly-picked
+  folder just means an empty agent list with a "Create your first agent"
+  button — nothing else changes.
+- **The Claude Code CLI.** Unpackaged, this app manages its own private npm
+  install of the CLI under its data folder (see `privateCli*` in
+  `src/main.js`), which needs Node.js on the machine. A packaged install has
+  no such guarantee, so it prefers a native `claude.exe` install instead
+  (the official installer, `irm https://claude.ai/install.ps1 | iex`,
+  installing to `%USERPROFILE%\.local\bin`) — offering an in-app "Install
+  Claude Code" button when nothing is found at all. `resolveClaudeExecutable()`'s
+  order for a packaged install is: the private npm CLI if one is already set
+  up → a native `claude.exe` → anything already on `PATH` → the install
+  prompt. Signing in and updating both work the same way either route got
+  there.
+- **The ARGUS/Bridge tab, the Library tabs, and the Telegram/Tasks panels.**
+  These all read from shared workspace folders/scripts that only exist on
+  the original developer's own machine (`shared_reports`, `shared_registry`,
+  a Telegram-bridge task queue). A packaged install hides each of these
+  outright rather than showing them permanently empty — an agent's own
+  `OPEN NOW` list in the Tasks panel still works regardless, since that's
+  read from the agent's own folder, not a shared one.
+- **The Plan badge.** Unpackaged, the 5-hour usage estimate falls back to a
+  known default plan read from a workspace-local `infrastructure_facts.md`.
+  A packaged install has no such file and no reason to assume any particular
+  plan, so the badge reads "Plan: not set" until you pick one from the
+  sidebar's Plan dropdown.
+- **User-visible text.** A handful of UI strings that used to name the
+  original developer by name now say "you" instead — this never affected
+  behaviour, only wording.
+
+Everything else — the sidebar, the chat view, groups, the conversation
+archive, restart/reset, and so on — behaves identically either way.
+
 ## Known limitations
 
 - Windows-first: paths and the hidden-launch script (`Launch.vbs`) assume Windows conventions.

@@ -24,7 +24,13 @@ const path = require("path");
 const { execFile } = require("child_process");
 const { getSessionActivity, getLatestUsage, getHaltInfo, newestTranscript } = require("./archive");
 
-const TELEGRAM_TASKS_DIR = "E:\\Claude work\\Security\\TelegramBridge\\tasks";
+// `let`, not `const`: unpackaged (Iddo's own PC) keeps these two literals
+// exactly as they have always been - main.js never calls
+// configureWorkspacePaths() unless the app is packaged, so nothing here
+// changes for him. A packaged install has neither of these fixed drives, so
+// main.js points them at the agents root the user actually chose instead,
+// once, right after that root is resolved at startup.
+let TELEGRAM_TASKS_DIR = "E:\\Claude work\\Security\\TelegramBridge\\tasks";
 const UNASSIGNED = "(unassigned)";
 const OPEN_ITEM_FILES = ["Active_Tasks.md", "master_state.md"];
 const CONTEXT_ATTENTION_TOKENS = 150000; // same line as guards.js's warning banner
@@ -103,7 +109,22 @@ function parseOpenNow(text) {
 // tasks; a store has a status field and a needsIddo field, so neither has to
 // be guessed. Adoption is per agent - nothing breaks for the ones still on
 // prose.
-const TASK_STORE_DIR = path.join("D:\\Dropbox\\Claude stuff", "shared_reports", "tasks");
+let TASK_STORE_DIR = path.join("D:\\Dropbox\\Claude stuff", "shared_reports", "tasks");
+
+// Called once by main.js, only for a packaged install - see the `let`
+// comment on TELEGRAM_TASKS_DIR above for why unpackaged never calls this.
+function configureWorkspacePaths(agentsRoot) {
+  TELEGRAM_TASKS_DIR = path.join(agentsRoot, "Security", "TelegramBridge", "tasks");
+  TASK_STORE_DIR = path.join(agentsRoot, "shared_reports", "tasks");
+}
+
+function telegramTasksDir() {
+  return TELEGRAM_TASKS_DIR;
+}
+
+function taskStoreDir() {
+  return TASK_STORE_DIR;
+}
 
 function readTaskStore(folderName) {
   try {
@@ -216,4 +237,4 @@ function approveTelegramTasks(ids, telegramDir) {
   });
 }
 
-module.exports = { getAgentOverview, approveTelegramTasks, parseOpenNow };
+module.exports = { getAgentOverview, approveTelegramTasks, parseOpenNow, configureWorkspacePaths, telegramTasksDir, taskStoreDir };

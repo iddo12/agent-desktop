@@ -56,6 +56,8 @@ contextBridge.exposeInMainWorld("api", {
   getUiFlags: () => ipcRenderer.invoke("ui-flags-get"),
   setUiFlag: (key, value) => ipcRenderer.invoke("ui-flag-set", { key, value }),
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
+  // Packaged-install feature probe (v1.55.0) - {argus, library, telegram, tasks}.
+  getFeatures: () => ipcRenderer.invoke("get-features"),
   checkClaudeCodeUpdate: () => ipcRenderer.invoke("check-claude-code-update"),
   updateClaudeCode: () => ipcRenderer.invoke("update-claude-code"),
   updateClaudeCli: () => ipcRenderer.invoke("update-claude-cli"),
@@ -63,6 +65,12 @@ contextBridge.exposeInMainWorld("api", {
   checkInterferingServices: () => ipcRenderer.invoke("check-interfering-services"),
   disableInterferingService: (serviceName) => ipcRenderer.invoke("disable-interfering-service", { serviceName }),
   checkClaudeExecutableHealth: () => ipcRenderer.invoke("check-claude-executable-health"),
+
+  // Native Claude Code installer (packaged installs, v1.55.0).
+  installClaudeCodeNative: () => ipcRenderer.invoke("install-claude-code-native"),
+  onInstallClaudeCodeOutput: (callback) => {
+    ipcRenderer.on("install-claude-code-output", (event, data) => callback(data));
+  },
 
   // Startup countdown overlay (v1.53.0) - see startupState in main.js.
   getStartupState: () => ipcRenderer.invoke("get-startup-state"),

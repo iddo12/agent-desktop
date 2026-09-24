@@ -6,7 +6,19 @@ const { withFsRetry } = require("./fsRetry");
 // shared parent directory. Defaults to that parent directory so it works
 // out of the box wherever you clone this repo; override with
 // AGENT_DESKTOP_ROOT if you want your agents to live somewhere else.
-const ROOT = process.env.AGENT_DESKTOP_ROOT || path.resolve(__dirname, "..", "..");
+//
+// `let`, not `const`: a packaged install has no fixed parent folder to fall
+// back to (it isn't cloned next to a folder of agents at all), so main.js
+// resolves a real root at startup - env override, then a saved choice, then
+// a first-run folder picker - and calls setRoot() once that's known, before
+// any agent-listing IPC handler can fire. Unpackaged never calls setRoot():
+// the env-var-or-parent-folder default below is used exactly as it always
+// was, unchanged.
+let ROOT = process.env.AGENT_DESKTOP_ROOT || path.resolve(__dirname, "..", "..");
+
+function setRoot(newRoot) {
+  ROOT = newRoot;
+}
 const STATE_FILENAME = "master_state.md";
 const CONFIG_FILENAME = "agent_config.json";
 const AVATAR_FILENAME = "avatar.png";
@@ -275,4 +287,20 @@ function deleteAgent(agentPath) {
   fs.rmSync(resolved, { recursive: true, force: true });
 }
 
-module.exports = { ROOT, listAgents, createAgent, updateAgent, deleteAgent, setAgentPaused, SESSIONS_DIRNAME };
+module.exports = {
+  // A getter, not a plain value: `const { ROOT } = require("./agents")` would
+  // freeze whatever ROOT was at require time, before setRoot() (if it's ever
+  // called) has run. Callers that need the current value read `agents.ROOT`
+  // off the module object itself (property access re-invokes the getter),
+  // rather than destructuring it.
+  get ROOT() {
+    return ROOT;
+  },
+  setRoot,
+  listAgents,
+  createAgent,
+  updateAgent,
+  deleteAgent,
+  setAgentPaused,
+  SESSIONS_DIRNAME,
+};

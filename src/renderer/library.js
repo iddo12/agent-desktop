@@ -51,6 +51,14 @@
   const agentList = document.getElementById("agent-list");
   agentList.parentNode.insertBefore(nav, agentList);
 
+  // Packaged-install feature probe (v1.55.0): a clean install has no
+  // shared_registry for the Library to show, so hide it entirely rather than
+  // opening onto three empty tabs. Always true today for Iddo's own
+  // workspace, so this never hides anything for him.
+  window.api.getFeatures().then((f) => {
+    if (f && f.library === false) nav.classList.add("hidden");
+  }).catch(() => {});
+
   // --- the view -------------------------------------------------------------
   const view = el("div");
   view.id = "library-view";
