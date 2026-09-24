@@ -74,6 +74,13 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("startup-ready", (event, payload) => callback(payload));
   },
 
+  // Untrusted agents (v1.54.0) - see untrustedAgents in main.js.
+  getUntrustedAgents: () => ipcRenderer.invoke("get-untrusted-agents"),
+  trustAgentFolders: (agentPaths) => ipcRenderer.invoke("trust-agent-folders", { agentPaths }),
+  onUntrustedAgents: (callback) => {
+    ipcRenderer.on("untrusted-agents", (event, list) => callback(list));
+  },
+
   onTerminalData: (callback) => {
     ipcRenderer.on("terminal-data", (event, payload) => callback(payload));
   },

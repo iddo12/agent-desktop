@@ -26,6 +26,7 @@ const testMode = require("./testMode");
 const overview = require("./overview");
 const registry = require("./registry");
 const argus = require("./argus-data");
+const workspaceTrust = require("./workspaceTrust");
 
 // Must run before ANY app.getPath("userData") call, including the module-scope
 // consts further down (UI_FLAGS_PATH, SENT_LOG_PATH, the watchdog logs) - they
@@ -1101,6 +1102,23 @@ ipcMain.handle("create-agent", (event, { name, role, avatarPath }) => {
     avatarBuffer = fs.readFileSync(avatarPath);
   }
   const agentDir = createAgent({ name, role, avatarBuffer });
+  // v1.54.0: Claude Code (2.1.281+) will not run `claude --bg` in a folder
+  // whose workspace-trust prompt was never accepted - under this app's pty it
+  // just waits on the prompt, so the new agent would never start. Creating
+  // the agent here IS Iddo's consent for this one folder (he just named it
+  // and clicked Create), so its .claude-session is trusted now. Existing
+  // agents are never trusted silently - they go through the untrusted banner
+  // and its button instead. Skipped in a fixtures-only sandbox, which must not
+  // touch the real ~/.claude.json. A failure is logged, not fatal: the agent
+  // then shows up in the untrusted banner on its first dispatch.
+  if (testMode.liveAgentsPermitted()) {
+    try {
+      const r = workspaceTrust.markFoldersTrusted([sessionCwdFor(agentDir)]);
+      logStuckWatchdog(`create-agent: trusted new agent folder ${agentDir} (verified=${r.verified}, backup=${r.backupPath || "none"})`);
+    } catch (e) {
+      logStuckWatchdog(`create-agent: could not trust new agent folder ${agentDir}: ${e.message}`);
+    }
+  }
   return { agentDir };
 });
 
@@ -1220,6 +1238,7 @@ ipcMain.handle("delete-agent", async (event, { agentPath }) => {
   }
   await stopBackgroundAgentForCwd(sessionCwdFor(agentPath));
   await deleteAgentWithRetry(agentPath);
+  if (untrustedAgents.delete(path.resolve(agentPath))) sendUntrustedAgents();
   return { ok: true };
 });
 
@@ -1641,11 +1660,35 @@ async function runClaudeCommandOnce(shell, args, options) {
   // CLI's daemon came back, never exited, and ensureAllAgentsBackgrounded()
   // sat on them - so no agent was relaunched and Software Engineering never
   // answered. Opt-in because npm installs legitimately run for minutes.
+  //
+  // options.abortPattern (opt-in, v1.54.0): a RegExp checked against the
+  // output as it streams. On a match the pty is killed at once and the call
+  // rejects with err.aborted = true and err.abortOutput, instead of waiting
+  // for the process to exit or for timeoutMs. Built for Claude Code's
+  // workspace-trust prompt, which under a pty waits for a keypress forever
+  // (see workspaceTrust.js) - but generic, for any interactive prompt a
+  // one-shot call must never sit on. The pattern is tested against the text
+  // with terminal codes and ALL whitespace removed (ConPTY can draw a space
+  // as a cursor move), so write it with \s* between words.
   return new Promise((resolve, reject) => {
     let output = "";
     let timer = null;
+    let settled = false;
+    const abortMatches = () => {
+      if (!options.abortPattern) return false;
+      const tail = output.length > 8000 ? output.slice(-8000) : output;
+      return options.abortPattern.test(stripTerminalCodes(tail).replace(/\s+/g, ""));
+    };
+    const abortError = () => {
+      const err = new Error(`claude ${args.join(" ")} aborted: output matched ${options.abortPattern}`);
+      err.aborted = true;
+      err.abortOutput = stripTerminalCodes(output);
+      return err;
+    };
     if (options.timeoutMs) {
       timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         try {
           proc.kill();
         } catch (e) {
@@ -1658,9 +1701,26 @@ async function runClaudeCommandOnce(shell, args, options) {
     }
     proc.onData((data) => {
       output += data;
+      if (settled || !abortMatches()) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try {
+        proc.kill();
+      } catch (e) {
+        /* already gone */
+      }
+      reject(abortError());
     });
     proc.onExit(() => {
       if (timer) clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      // The plain-shell form of a prompt (e.g. "Workspace not trusted ...")
+      // prints and exits rather than waiting - still an abort, not output.
+      if (abortMatches()) {
+        reject(abortError());
+        return;
+      }
       resolve(stripTerminalCodes(output));
     });
   });
@@ -1780,7 +1840,31 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   } else {
     args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
   }
-  const output = await runClaudeCommand(shell, args, { cwd: sessionCwd, env: spawnEnv, timeoutMs: CLAUDE_CLI_TIMEOUT_MS });
+  // Every `claude --bg` in this app goes through here (the sweep, opening a
+  // chat, resume-after-pause, conversation switch, login recovery), so this is
+  // the one place the workspace-trust prompt is caught - see workspaceTrust.js
+  // and the untrusted-agents registry below. A match kills the pty at once
+  // (no 90 s timeout) and rejects with err.untrusted = true.
+  let output;
+  try {
+    output = await runClaudeCommand(shell, args, {
+      cwd: sessionCwd,
+      env: spawnEnv,
+      timeoutMs: CLAUDE_CLI_TIMEOUT_MS,
+      abortPattern: workspaceTrust.TRUST_PROMPT_RE,
+    });
+  } catch (e) {
+    if (e.aborted) {
+      const err = new Error(
+        `workspace not trusted: ${sessionCwd} - Claude Code wants its trust prompt accepted once before it will run this agent`
+      );
+      err.untrusted = true;
+      err.sessionCwd = sessionCwd;
+      noteAgentUntrusted(sessionCwd);
+      throw err;
+    }
+    throw e;
+  }
   // Real dispatch output (confirmed byte-for-byte via a live test dispatch):
   // "backgrounded \xC2\xB7 5467abbc (idle ...)" - a single U+00B7 MIDDLE DOT,
   // not a literal "." or multiple dots.
@@ -1788,8 +1872,100 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   if (!match) {
     throw new Error("Could not parse background agent id from dispatch output: " + output);
   }
+  // A clean dispatch proves the folder is trusted now (the button below, or
+  // Iddo accepting the prompt in a terminal himself).
+  clearAgentUntrusted(sessionCwd);
   return match[1];
 }
+
+// --- Untrusted agents (v1.54.0) ---------------------------------------------
+// Agents whose `claude --bg` hit Claude Code's workspace-trust prompt. Keyed by
+// agent folder path. The renderer shows a banner listing them with a "Trust and
+// start them" button, and the same message in an untrusted agent's own chat
+// pane instead of a silent hang. Nothing here grants trust by itself - only
+// the "trust-agent-folders" IPC (Iddo's click) and create-agent do.
+const untrustedAgents = new Map(); // agentPath -> { agentPath, displayName, sessionCwd, since }
+
+function untrustedAgentsList() {
+  return [...untrustedAgents.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+function sendUntrustedAgents() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.send("untrusted-agents", untrustedAgentsList());
+    } catch (e) {}
+  }
+}
+
+function noteAgentUntrusted(sessionCwd) {
+  const agentPath = path.dirname(path.resolve(sessionCwd));
+  if (untrustedAgents.has(agentPath)) return;
+  const displayName = agentDisplayName(agentPath);
+  untrustedAgents.set(agentPath, { agentPath, displayName, sessionCwd: path.resolve(sessionCwd), since: new Date().toISOString() });
+  logStuckWatchdog(`untrusted: ${displayName} (${sessionCwd}) - Claude Code's workspace-trust prompt blocks it; waiting for Iddo to trust it`);
+  sendUntrustedAgents();
+}
+
+function clearAgentUntrusted(sessionCwd) {
+  const agentPath = path.dirname(path.resolve(sessionCwd));
+  if (!untrustedAgents.delete(agentPath)) return;
+  logStuckWatchdog(`untrusted: cleared ${agentDisplayName(agentPath)} - it dispatched normally`);
+  sendUntrustedAgents();
+}
+
+ipcMain.handle("get-untrusted-agents", () => untrustedAgentsList());
+
+// Iddo's "Trust and start them" click. The ONLY path besides create-agent that
+// writes workspace trust. Accepts agent folder paths, but only ones that are
+// both real agents under the agents root AND currently in the untrusted list -
+// so a renderer bug cannot be used to trust an arbitrary folder.
+ipcMain.handle("trust-agent-folders", async (event, { agentPaths } = {}) => {
+  const requested = Array.isArray(agentPaths) ? agentPaths.map((p) => path.resolve(String(p))) : [];
+  const root = path.resolve(AGENTS_ROOT);
+  const targets = requested.filter((p) => path.dirname(p) === root && untrustedAgents.has(p));
+  if (!targets.length) return { ok: false, error: "None of those agents are waiting for trust.", results: [] };
+
+  const names = targets.map((p) => untrustedAgents.get(p).displayName);
+  let trustResult;
+  try {
+    trustResult = workspaceTrust.markFoldersTrusted(targets.map((p) => sessionCwdFor(p)));
+  } catch (e) {
+    logStuckWatchdog(`untrusted: trusting ${names.join(", ")} FAILED: ${e.message}`);
+    return { ok: false, error: e.message, results: [] };
+  }
+  logStuckWatchdog(
+    `untrusted: Iddo trusted ${names.join(", ")} - changed=${trustResult.changed.length} already=${trustResult.alreadyTrusted.length} ` +
+      `verified=${trustResult.verified} backup=${trustResult.backupPath || "(no existing file)"}`
+  );
+
+  // Start them straight away with the same dispatch the sweep uses, one at a
+  // time with the sweep's stagger. A successful dispatch clears the agent from
+  // the untrusted list itself (clearAgentUntrusted, in dispatchBackgroundAgent).
+  const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
+  const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
+  const results = [];
+  for (let i = 0; i < targets.length; i++) {
+    const agentPath = targets[i];
+    const name = names[i];
+    if (!testMode.liveAgentsPermitted()) {
+      results.push({ agentPath, name, ok: false, error: "sandbox: live agents are off" });
+      continue;
+    }
+    try {
+      const found = await findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwdFor(agentPath));
+      clearAgentUntrusted(sessionCwdFor(agentPath)); // also covers "was already alive"
+      logStuckWatchdog(`untrusted: ${name} started after trust -> ${found.id}`);
+      results.push({ agentPath, name, ok: true, id: found.id });
+    } catch (e) {
+      logStuckWatchdog(`untrusted: ${name} still failed after trust: ${e.message}`);
+      results.push({ agentPath, name, ok: false, error: e.message, untrusted: !!e.untrusted });
+    }
+    if (i < targets.length - 1) await new Promise((resolve) => setTimeout(resolve, ENSURE_AGENTS_ALIVE_STAGGER_MS));
+  }
+  sendUntrustedAgents();
+  return { ok: results.every((r) => r.ok), verified: trustResult.verified, backupPath: trustResult.backupPath, results };
+});
 
 // --- Always-on background agents (2026-09-20) ------------------------------
 // Iddo's requirement: agents must be able to reach each other via
@@ -1852,9 +2028,14 @@ async function ensureAllAgentsBackgrounded(progress) {
       const sessionCwd = sessionCwdFor(agent.path);
       let alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
       if (!alive) {
+        // An untrusted folder rejects here within a second or two (the trust
+        // prompt is caught as it is drawn), is logged by the catch below and
+        // still counts as processed for the startup countdown.
         const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
         logStuckWatchdog(`ensureAllAgentsBackgrounded: dispatched ${agent.folderName} -> ${id}`);
         alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd); // re-fetch for its full sessionId, below
+      } else {
+        clearAgentUntrusted(sessionCwd); // running now, e.g. Iddo started it by hand
       }
       // 2026-09-20: Iddo's ask, after the Trade Show agent reported "no
       // Product Development agent is running" - confirmed live it actually
