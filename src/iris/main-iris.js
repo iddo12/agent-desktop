@@ -21,7 +21,10 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
   const dir = path.join(app.getPath("userData"), "iris");
   fs.mkdirSync(dir, { recursive: true });
   const isTest = !!testMode;
-  const pipeName = `\\\\.\\pipe\\agent-desktop-iris${isTest ? "-test" : ""}`;
+  // Random per start and published in the token file (security review
+  // 2026-09-25): a fixed, guessable pipe name could be taken first by another
+  // process, which tools/iris.js would then hand the token and message to.
+  const pipeName = `\\\\.\\pipe\\agent-desktop-iris${isTest ? "-test" : ""}-${crypto.randomBytes(8).toString("hex")}`;
   const toolPath = path.join(__dirname, "..", "..", "tools", "iris.js");
 
   const canProtect = !!(safeStorage && safeStorage.isEncryptionAvailable && safeStorage.isEncryptionAvailable());
@@ -41,7 +44,8 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
 
   const svc = new IrisService({
     dir,
-    name: isTest ? "Sandbox Agent Desktop" : require("os").hostname(),
+    // Not the hostname: the name travels in the clear during pairing.
+    name: isTest ? "Sandbox Agent Desktop" : "Agent Desktop",
     port: undefined,
     // The sandbox stays on loopback: no firewall prompt, nothing reachable from the LAN.
     bindHost: process.env.IRIS_BIND_HOST || (isTest ? "127.0.0.1" : "0.0.0.0"),
@@ -95,8 +99,13 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
   h("iris-prepare-delivery", ({ id, agentPath }) => {
     const item = pending.find((p) => p.id === id);
     if (!item) return { ok: false, reason: "unknown-id" };
-    const sessionDir = path.join(String(agentPath || ""), ".claude-session");
-    if (!agentPath || !fs.existsSync(sessionDir)) return { ok: false, reason: "no-session-folder" };
+    // Only a real agent folder from the app's own agent list (security review
+    // 2026-09-25: the path comes from the renderer, so never trust it as given).
+    let known = [];
+    try { known = require("../agents").listAgents().map((a) => path.resolve(a.path).toLowerCase()); } catch (e) {}
+    if (!agentPath || !known.includes(path.resolve(String(agentPath)).toLowerCase())) return { ok: false, reason: "not-an-agent" };
+    const sessionDir = path.join(String(agentPath), ".claude-session");
+    if (!fs.existsSync(sessionDir)) return { ok: false, reason: "no-session-folder" };
     const outDir = path.join(sessionDir, "iris-inbox");
     fs.mkdirSync(outDir, { recursive: true });
     const out = path.join(outDir, path.basename(item.inboxFile));
@@ -120,15 +129,19 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
     token = crypto.randomBytes(24).toString("hex");
     fs.writeFileSync(tokenFile, token, { encoding: "utf8", mode: 0o600 });
   }
+  fs.writeFileSync(path.join(dir, "pipe-name"), pipeName, "utf8");
   const pipe = net.createServer((sock) => {
     let buf = "";
+    let handled = false; // one command per connection
     sock.setTimeout(15000, () => sock.destroy());
     sock.on("error", () => {});
     sock.on("data", async (d) => {
+      if (handled) return;
       buf += d.toString("utf8");
       if (buf.length > 64 * 1024) return sock.destroy();
       const nl = buf.indexOf("\n");
       if (nl < 0) return;
+      handled = true;
       let req;
       try { req = JSON.parse(buf.slice(0, nl)); } catch (e) { return sock.destroy(); }
       const tok = Buffer.from(String(req.token || ""));

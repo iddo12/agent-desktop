@@ -25,7 +25,7 @@ function opt(name) {
 
 const appData = process.env.APPDATA || path.join(require("os").homedir(), "AppData", "Roaming");
 const dir = path.join(appData, isTest ? "agent-desktop-test" : "agent-desktop", "iris");
-const pipeName = `\\\\.\\pipe\\agent-desktop-iris${isTest ? "-test" : ""}`;
+let pipeName;
 
 function fail(msg) {
   console.error(`iris: ${msg}`);
@@ -35,6 +35,11 @@ function fail(msg) {
 let token;
 try { token = fs.readFileSync(path.join(dir, "local-token"), "utf8").trim(); } catch (e) {
   fail(`can't read the local token in ${dir} - is Agent Desktop running with IRIS installed?`);
+}
+
+// The app picks a random pipe name at each start and writes it here.
+try { pipeName = fs.readFileSync(path.join(dir, "pipe-name"), "utf8").trim(); } catch (e) {
+  fail("can't find the IRIS pipe name - is Agent Desktop running?");
 }
 
 let req;

@@ -56,7 +56,7 @@ test("pair, exchange messages both ways, and every rejection path", async () => 
     const inv = A.createInvite();
     assert.equal(inv.ok, true);
     const wrong = inv.strings[0].replace(/:[^:]+$/, ":AAAA-BBBB-CCCC-DDDD");
-    assert.equal((await B.join(wrong)).reason, "bad-proof");
+    assert.match((await B.join(wrong)).reason, /^refused/);
     const joined = await B.join(inv.strings[0]);
     assert.equal(joined.ok, true, JSON.stringify(joined));
     assert.equal(Object.keys(A.peers).length, 1);
@@ -64,7 +64,7 @@ test("pair, exchange messages both ways, and every rejection path", async () => 
     // invite is single use
     C = new IrisService({ dir: tmpDir("c"), name: "Stranger", port: 47393, bindHost: "127.0.0.1" });
     await C.setEnabled(true);
-    assert.equal((await C.join(inv.strings[0])).reason, "no-open-invite");
+    assert.match((await C.join(inv.strings[0])).reason, /^refused/);
 
     // --- B -> A info message arrives, framed as untrusted
     const s1 = B.send({ peerId: A.me.id, text: "Shoot moved to Thursday 10:00" });

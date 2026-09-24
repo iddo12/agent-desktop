@@ -83,10 +83,19 @@ function normalizeCode(code) {
     .replace(/[IL]/g, "1").replace(/O/g, "0");
 }
 
+// The proof covers everything the other side will store from this message -
+// id, keys, display name and listening port - so none of it can be altered in
+// transit (security review 2026-09-25, finding 7).
 function pairingProof(code, role, first, second) {
   const key = normalizeCode(code);
-  const msg = `iris-pair-v1|${role}|${first.id}|${first.signPk}|${first.boxPk}|${second ? `${second.id}|${second.signPk}|${second.boxPk}` : "-"}`;
+  const part = (x) => `${x.id}|${x.signPk}|${x.boxPk}|${x.name || ""}|${x.port || ""}`;
+  const msg = `iris-pair-v2|${role}|${part(first)}|${second ? part(second) : "-"}`;
   return crypto.createHmac("sha256", key).update(msg).digest("base64");
+}
+
+// 32-byte keys only - anything else is rejected at pairing and never stored.
+function validKeys(pub) {
+  return !!pub && unb64(pub.signPk).length === nacl.sign.publicKeyLength && unb64(pub.boxPk).length === nacl.box.publicKeyLength;
 }
 
 function proofMatches(expected, given) {
@@ -115,7 +124,7 @@ function open(frame, me, lookupPeer) {
   }
   if (frame.to !== me.id) return { ok: false, reason: "not-for-us" };
   const peer = lookupPeer(frame.from);
-  if (!peer) return { ok: false, reason: "unknown-peer" };
+  if (!peer || !validKeys(peer)) return { ok: false, reason: "unknown-peer" };
   const nonce = unb64(frame.n);
   if (nonce.length !== nacl.box.nonceLength) return { ok: false, reason: "malformed-frame" };
   const plain = nacl.box.open(unb64(frame.c), nonce, unb64(peer.boxPk), unb64(me.boxSk));
@@ -141,6 +150,7 @@ module.exports = {
   normalizeCode,
   pairingProof,
   proofMatches,
+  validKeys,
   seal,
   open,
 };
