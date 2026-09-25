@@ -217,7 +217,10 @@
     });
     main.appendChild(meta);
     const actions = el("div", "library-card-actions");
-    const open = el("button", "library-btn library-btn-primary", e.isUrl ? "Open link" : "Open");
+    // v1.59.4: a phone app package is installed on the phone, not opened here;
+    // the click shows main's explanation instead of silently doing nothing.
+    const phonePkg = !e.isUrl && /\.(apk|aab|ipa)$/i.test(e.link || "");
+    const open = el("button", "library-btn library-btn-primary", e.isUrl ? "Open link" : phonePkg ? "Install on phone" : "Open");
     open.addEventListener("click", () => act(e, "open"));
     actions.appendChild(open);
     // A web page that also has a PDF copy: the link opens in the browser, the
