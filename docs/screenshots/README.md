@@ -1,10 +1,6 @@
-Placeholder images referenced from the main README's "Download and install"
-section. Each one is a 1x1 transparent PNG stand-in — replace it with a real
-screenshot (same filename) once one is captured locally:
+Screenshots for the main README. Take them only from the sandbox/test-mode
+instance (AGENT_DESKTOP_TEST_MODE=1 with fixture agents) and check each one
+for real data (paths, conversations, emails, IPs, account or usage) before
+committing.
 
-- `main-window.png` — the main window with a few agents in the sidebar
-- `status-dots.png` — the sidebar's health/status indicators
-- `argus.png` — the ARGUS/Bridge view
-- `new-agent-flow.png` — the "+ Agent" creation modal
-- `first-launch-empty-state.png` — first launch with no agents yet (the
-  "Create your first agent" empty state)
+- `first-launch-empty-state.png`: first launch with no agents yet (v1.59.0).
