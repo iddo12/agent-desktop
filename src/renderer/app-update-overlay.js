@@ -21,6 +21,7 @@
 
   const CHECK_EVERY_MS = 60 * 60 * 1000;
   const FIRST_CHECK_MS = 20 * 1000; // after startup has settled
+  const FOCUS_CHECK_MIN_MS = 5 * 60 * 1000;
   const POLL_MS = 3000;
   const AUTO_RESTART_SECONDS = 5;
   const DRAFT_KEY = "appUpdateSavedDraft";
@@ -46,7 +47,26 @@
 
   // ------------------------------------------------------------ banner --
 
+  // v1.58.2: Iddo went looking for the update at the version line and found
+  // only grey text - a waiting update has to be visible right there too.
+  let newLine = null;
+  function renderVersionNotice() {
+    if (!versionEl) return;
+    if (!newLine) {
+      newLine = el("div", "app-version-new hidden");
+      newLine.addEventListener("click", () => btn && btn.click());
+      versionEl.parentNode.insertBefore(newLine, versionEl);
+    }
+    const show = !!(status && status.available && status.target);
+    newLine.classList.toggle("hidden", !show);
+    if (show) {
+      newLine.textContent = `New version v${status.target} ready - click to update`;
+      newLine.title = btn ? btn.title : "";
+    }
+  }
+
   function renderButton() {
+    try { renderVersionNotice(); } catch (e) { /* never block the button */ }
     if (!btn) return;
     if (!status || !status.available) {
       btn.classList.add("hidden");
@@ -337,4 +357,13 @@
   setTimeout(restoreDraft, 3000);
   setTimeout(() => check(true), FIRST_CHECK_MS);
   setInterval(() => check(true), CHECK_EVERY_MS);
+  // v1.58.2: an hourly-only check left the button hidden for up to an hour
+  // after a push. Also check when the window regains focus, at most every
+  // FOCUS_CHECK_MIN_MS so switching windows doesn't hammer git/GitHub.
+  let lastFocusCheck = Date.now();
+  window.addEventListener("focus", () => {
+    if (Date.now() - lastFocusCheck < FOCUS_CHECK_MIN_MS) return;
+    lastFocusCheck = Date.now();
+    check(true);
+  });
 })();
