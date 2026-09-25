@@ -38,11 +38,27 @@ const HEALTH_LABELS = {
   error: "Critical",
   down: "Critical",
   red: "Critical",
+  working: "Healthy",
+  fine: "Healthy",
 };
 
+// v1.58.1: agents don't all write a one-word Health section. Optimization
+// writes "- **Workstation:** good. All 3 NVMe SSDs Healthy; ...", Product
+// Development "Working. ExoCam ...", Trade Show "OK - this agent's ...". An
+// exact-match lookup turned all three into "Unknown" (grey dot) while the
+// agents were fine. So: exact match first, then the earliest health word in
+// the first sentence only - prose further on ("error counts", "went down")
+// must not flip the dot.
 function healthLabel(raw) {
-  const key = (raw || "").trim().toLowerCase();
-  return HEALTH_LABELS[key] || "Unknown";
+  const text = (raw || "").replace(/[*_`#]/g, "").trim().toLowerCase();
+  if (HEALTH_LABELS[text]) return HEALTH_LABELS[text];
+  const first = text.split(/(?<=[.;!?])\s|\n/)[0].slice(0, 160);
+  let best = null;
+  for (const [word, label] of Object.entries(HEALTH_LABELS)) {
+    const m = new RegExp(`\\b${escapeRegExp(word)}\\b`).exec(first);
+    if (m && (!best || m.index < best.index)) best = { index: m.index, label };
+  }
+  return best ? best.label : "Unknown";
 }
 
 function extractSection(text, names) {
