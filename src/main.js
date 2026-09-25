@@ -32,6 +32,7 @@ const overview = require("./overview");
 const registry = require("./registry");
 const argus = require("./argus-data");
 const workspaceTrust = require("./workspaceTrust");
+const appUpdate = require("./app-update");
 
 // Must run before ANY app.getPath("userData") call, including the module-scope
 // consts further down (UI_FLAGS_PATH, SENT_LOG_PATH, the watchdog logs) - they
@@ -777,6 +778,35 @@ function relaunchApp() {
   }
   setTimeout(() => app.quit(), 500);
 }
+
+// ------------------------------------------------ Update & restart (v1.58.0) --
+// See src/app-update.js for what counts as "newer" and what is refused. Here:
+// the IPC, and the restart. Agents are `claude --bg` processes that survive
+// the app quitting and are reattached on start, so a restart costs them
+// nothing - the renderer's overlay still waits for them to be idle first, so
+// no reply is mid-stream on screen when the window goes away.
+appUpdate.init({ app, runClaudeCommand, testMode, isVersionNewer });
+
+ipcMain.handle("app-update-status", (event, opts) => appUpdate.getStatus(opts || {}));
+
+ipcMain.handle("app-update-apply", async () => {
+  const r = await appUpdate.apply();
+  if (!r.ok) return r;
+  if (r.testMode) return { ...r, restarting: false }; // never relaunch the live app from the sandbox
+  // app.quit() does not fire window-all-closed, so flush the chat archive here.
+  for (const [agentPath, session] of ptySessions) {
+    try {
+      syncArchive(agentPath, session.sessionCwd);
+    } catch (e) {}
+  }
+  logStuckWatchdog(`update & restart: v${app.getVersion()} -> v${r.version || "?"}`);
+  setTimeout(relaunchApp, 300); // let this reply reach the renderer first
+  return { ...r, restarting: true };
+});
+
+ipcMain.handle("app-update-open-release", (event, url) => {
+  if (typeof url === "string" && url.startsWith(`https://github.com/${appUpdate.RELEASES_REPO}/`)) shell.openExternal(url);
+});
 
 // -------------------------------------------- known-interfering software --
 //
@@ -3748,7 +3778,7 @@ ipcMain.handle("open-local-pdf", (event, { filePath } = {}) =>
 ipcMain.handle("approve-telegram-tasks", (event, { ids }) =>
   overview.approveTelegramTasks(ids, path.join(agents.ROOT, "Security", "Tools", "TelegramBridge")));
 
-// Packaged-install feature probe (v1.56.0): a clean install starts with none
+// Packaged-install feature probe (v1.59.0): a clean install starts with none
 // of Iddo's shared workspace folders - ARGUS's shared_reports, the Library's
 // shared_registry, the Telegram bridge's task queue, the structured task
 // store - so rather than showing those tabs/panels empty, the renderer asks

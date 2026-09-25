@@ -159,7 +159,7 @@ html, body {
   border: 1px solid var(--border);
 }
 
-/* Live output from the native Claude Code installer (v1.56.0) - a packaged
+/* Live output from the native Claude Code installer (v1.59.0) - a packaged
    install with nothing on PATH runs irm https://claude.ai/install.ps1 | iex
    from a button in #claude-cli-warning; this is where that streams to. */
 .install-claude-code-log {
