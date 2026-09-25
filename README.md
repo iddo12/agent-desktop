@@ -20,15 +20,7 @@ Not a developer? This is the section for you — no Node, npm, or git needed.
 
 > A one-time note on Claude Code's status line: Agent Desktop installs a small status-line script into your global Claude Code config the first time it runs, so the sidebar's usage badges can show Anthropic's real reported numbers instead of an estimate. It only ever does this if you don't already have a status line configured — it will never overwrite one you've set up yourself.
 
-| Main window | First launch |
-| --- | --- |
-| ![Main window](docs/screenshots/main-window.png) | ![First launch, no agents yet](docs/screenshots/first-launch-empty-state.png) |
-
-| Status at a glance | Creating an agent | ARGUS / the Bridge |
-| --- | --- | --- |
-| ![Sidebar status dots](docs/screenshots/status-dots.png) | ![New agent flow](docs/screenshots/new-agent-flow.png) | ![ARGUS view](docs/screenshots/argus.png) |
-
-(See `docs/screenshots/` — these are placeholders until real screenshots are captured.)
+![First launch: no agents yet, with the Install Claude Code prompt](docs/screenshots/first-launch-empty-state.png)
 
 ## What it does
 
