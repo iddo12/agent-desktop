@@ -54,11 +54,18 @@
     if (allRun && !allRun.finished) return;      // a manual sweep owns the fleet
     if (flows.size) return;                       // one at a time, fleet-wide
     for (const a of agents) {
-      if (autoHandedOff.has(a.path)) continue;
       try {
         const u = await window.api.getContextUsage(a.path);
         let t = u && typeof u.contextTokens === "number" ? u.contextTokens : 0;
         if (t && window.guardUsageIsStale(a.path, u)) t = 0;
+        // v1.54.3: re-arm once the agent is back under the warning line (a
+        // real, finished reset). Before, the once-per-app-run lock never
+        // cleared, so an agent auto-handed-off once was never handed off again
+        // until Agent Desktop restarted. That is why some agents handed off on
+        // their own and others sat at 200K+. A handoff that failed leaves
+        // the context high, so this cannot loop.
+        if (t && t < CONTEXT_WARN_TOKENS) autoHandedOff.delete(a.path);
+        if (autoHandedOff.has(a.path)) continue;
         if (t < AUTO_HANDOFF_TOKENS) continue;
         const act = await window.api.getSessionActivity(a.path).catch(() => null);
         if (!act || act.working) continue;        // mid-turn: leave it alone
@@ -129,11 +136,11 @@
   function handoffPrompt(agentPath) {
     const file = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";
     return (
-      "[Agent Desktop - planned context reset] You approved resetting this session to cut usage. " +
+      "[Agent Desktop - planned context reset] The user approved resetting this session to cut usage. " +
       "Before it happens, please do ALL of this now, without starting any new work:\n" +
-      "1. Compile a 'lessons for the future' list from this session (gotchas + fixes, preferences/decisions you stated, environment quirks) and save each durable one into your memory files per your memory rules.\n" +
+      "1. Compile a 'lessons for the future' list from this session (gotchas + fixes, preferences/decisions the user stated, environment quirks) and save each durable one into your memory files per your memory rules.\n" +
       "2. Update your open-items file (OPEN NOW) so it reflects what is still outstanding.\n" +
-      "3. Write the file " + file + " with exactly these sections: '# Handoff <date/time>', '## LESSONS' (concise bullets - this section is shown to you), '## OPEN NOW', '## STATE' (what you were in the middle of, key file paths, the exact next step), '## KEY FACTS' (anything else a fresh session needs). Keep it under ~1500 words; write it LAST, after steps 1-2.\n" +
+      "3. Write the file " + file + " with exactly these sections: '# Handoff <date/time>', '## LESSONS' (concise bullets - this section is shown to the user), '## OPEN NOW', '## STATE' (what you were in the middle of, key file paths, the exact next step), '## KEY FACTS' (anything else a fresh session needs). Keep it under ~1500 words; write it LAST, after steps 1-2.\n" +
       "4. Reply with only the LESSONS list and the words 'Handoff saved'."
     );
   }

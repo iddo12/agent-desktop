@@ -159,7 +159,7 @@ html, body {
   border: 1px solid var(--border);
 }
 
-/* Live output from the native Claude Code installer (v1.55.0) - a packaged
+/* Live output from the native Claude Code installer (v1.56.0) - a packaged
    install with nothing on PATH runs irm https://claude.ai/install.ps1 | iex
    from a button in #claude-cli-warning; this is where that streams to. */
 .install-claude-code-log {
@@ -873,6 +873,17 @@ html, body {
   color: var(--text);
   align-self: flex-start;
   max-width: 100%;
+}
+/* Agent bubbles have no padding of their own, so the hover copy button
+   (top-right, absolutely positioned) used to sit on top of the end of the
+   first line. Reserve a right gutter the width of the button so text wraps
+   before it (v1.54.2). */
+.chat-bubble-agent {
+  padding-right: 36px;
+}
+.chat-bubble-agent > .bubble-copy-btn {
+  top: 0;
+  right: 0;
 }
 
 /* --- Rendered Markdown inside a chat bubble / annotated section --------- */

@@ -302,8 +302,22 @@ const RATE_LIMIT_REFRESH_INTERVAL_SECONDS = 60;
 
 function ensureRateLimitStatusLine() {
   const settingsPath = path.join(app.getPath("home"), ".claude", "settings.json");
-  const ourScriptPath = path.join(__dirname, "statusline.cjs");
+  let ourScriptPath = path.join(__dirname, "statusline.cjs");
   try {
+    // Packaged: __dirname is inside app.asar, which the Claude CLI (a separate
+    // process) can't read, and a clean PC may have no Node at all. So copy
+    // the self-contained script to ~/.claude (visible to the CLI, and not under
+    // %APPDATA%, which an MSIX parent would redirect) and skip the install
+    // entirely when no real node.exe exists - the badges keep their estimate.
+    // Unpackaged is untouched.
+    if (app.isPackaged) {
+      const nodeExe = resolveNodeExecutable();
+      if (!fs.existsSync(nodeExe)) return;
+      const dir = path.join(app.getPath("home"), ".claude", "agent-desktop");
+      fs.mkdirSync(dir, { recursive: true });
+      ourScriptPath = path.join(dir, "statusline.cjs");
+      fs.writeFileSync(ourScriptPath, fs.readFileSync(path.join(__dirname, "statusline.cjs")));
+    }
     let settings = {};
     if (fs.existsSync(settingsPath)) {
       settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
@@ -688,6 +702,9 @@ ipcMain.handle("update-claude-cli", async () => {
 let installClaudeInProgress = false;
 
 ipcMain.handle("install-claude-code-native", async () => {
+  if (!app.isPackaged) {
+    throw new Error("The native installer is only used by a packaged install.");
+  }
   if (process.platform !== "win32") {
     throw new Error("The native installer is only available on Windows.");
   }
@@ -1048,6 +1065,42 @@ function writeAppSettings(settings) {
   }
 }
 
+// Refuse a root that is a drive root, the user profile or a standard user
+// folder, or one that already holds many subfolders: every subfolder of the
+// root can become an agent, and deleteAgent() removes its folder recursively.
+const AGENTS_ROOT_MAX_EXISTING_SUBFOLDERS = 20;
+function agentsRootTooBroad(dir) {
+  const norm = (p) => path.resolve(p).replace(/[\\/]+$/, "").toLowerCase();
+  const target = norm(dir);
+  if (target === norm(path.parse(path.resolve(dir)).root)) return "it is a whole drive.";
+  // A parent of the user folder (e.g. C:\Users) would expose every profile.
+  try {
+    if (norm(app.getPath("home")).startsWith(target + path.sep)) return "it contains your user folder.";
+  } catch (e) {
+    /* no home path - the checks below still apply */
+  }
+  for (const envName of ["WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"]) {
+    const sys = process.env[envName];
+    if (!sys) continue;
+    const sysNorm = norm(sys);
+    if (target === sysNorm || target.startsWith(sysNorm + path.sep)) return "it is a Windows system folder.";
+  }
+  for (const name of ["home", "documents", "desktop", "downloads", "pictures", "videos", "music"]) {
+    try {
+      if (target === norm(app.getPath(name))) return `it is your ${name === "home" ? "user" : name} folder.`;
+    } catch (e) {
+      /* unknown path name on this platform - skip it */
+    }
+  }
+  try {
+    const subfolders = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).length;
+    if (subfolders > AGENTS_ROOT_MAX_EXISTING_SUBFOLDERS) return `it already contains ${subfolders} folders.`;
+  } catch (e) {
+    /* unreadable - listAgents() will surface the real problem */
+  }
+  return null;
+}
+
 async function resolveAgentsRoot() {
   if (process.env.AGENT_DESKTOP_ROOT) return; // explicit override always wins - agents.js already applied it
   if (!app.isPackaged) return; // unpackaged: today's ROOT, byte-for-byte - see block comment above
@@ -1060,18 +1113,42 @@ async function resolveAgentsRoot() {
 
   const defaultDir = path.join(app.getPath("documents"), "Agent Desktop");
   let chosen = null;
-  try {
-    const result = await dialog.showOpenDialog({
-      title: "Choose where your agents live",
-      message:
-        "Agent Desktop keeps each agent as its own folder here. Pick a folder to use (an empty one is fine) - " +
-        "you can create your first agent once it's set.",
-      defaultPath: fs.existsSync(defaultDir) ? defaultDir : app.getPath("documents"),
-      properties: ["openDirectory", "createDirectory"],
-    });
-    if (!result.canceled && result.filePaths.length) chosen = result.filePaths[0];
-  } catch (e) {
-    /* fall through to the default below */
+  // Up to 3 tries: a folder that is too broad is refused and the picker
+  // reopens, because every subfolder of the root can become an agent and
+  // deleting an agent deletes its folder.
+  for (let attempt = 0; attempt < 3 && !chosen; attempt++) {
+    let picked = null;
+    try {
+      const result = await dialog.showOpenDialog({
+        title: "Choose where your agents live",
+        message:
+          "Agent Desktop keeps each agent as its own folder here. Pick a folder to use (an empty one is fine) - " +
+          "you can create your first agent once it's set.",
+        defaultPath: fs.existsSync(defaultDir) ? defaultDir : app.getPath("documents"),
+        properties: ["openDirectory", "createDirectory"],
+      });
+      if (!result.canceled && result.filePaths.length) picked = result.filePaths[0];
+    } catch (e) {
+      /* fall through to the default below */
+    }
+    if (!picked) break;
+    const reason = agentsRootTooBroad(picked);
+    if (!reason) {
+      chosen = picked;
+      break;
+    }
+    try {
+      await dialog.showMessageBox({
+        type: "warning",
+        title: "Pick a more specific folder",
+        message: `That folder can't hold your agents: ${reason}`,
+        detail:
+          "Every subfolder of this folder can show up as an agent, and deleting an agent deletes its folder. " +
+          "Choose or create a dedicated folder, for example Documents\\Agent Desktop.",
+      });
+    } catch (e) {
+      /* the picker reopens either way */
+    }
   }
   if (!chosen) {
     chosen = defaultDir;
@@ -3590,7 +3667,7 @@ ipcMain.handle("open-local-pdf", (event, { filePath } = {}) =>
 ipcMain.handle("approve-telegram-tasks", (event, { ids }) =>
   overview.approveTelegramTasks(ids, path.join(agents.ROOT, "Security", "Tools", "TelegramBridge")));
 
-// Packaged-install feature probe (v1.55.0): a clean install starts with none
+// Packaged-install feature probe (v1.56.0): a clean install starts with none
 // of Iddo's shared workspace folders - ARGUS's shared_reports, the Library's
 // shared_registry, the Telegram bridge's task queue, the structured task
 // store - so rather than showing those tabs/panels empty, the renderer asks
