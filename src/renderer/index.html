@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="styles-argus.css">
 <link rel="stylesheet" href="styles-startup.css">
 <link rel="stylesheet" href="styles-trust.css">
+<link rel="stylesheet" href="styles-update.css">
 </head>
 <body>
   <div id="app">
@@ -21,6 +22,7 @@
           <button id="new-agent-btn" title="Create new agent">+ Agent</button>
         </div>
       </div>
+      <button id="app-update-btn" class="hidden"></button>
       <button id="update-available-btn" class="hidden"></button>
       <div id="interfering-service-warning" class="hidden"></div>
       <div id="claude-cli-warning" class="hidden"></div>
@@ -219,5 +221,6 @@
   <script src="library.js"></script>
   <script src="argus.js"></script>
   <script src="trust-banner.js"></script>
+  <script src="app-update-overlay.js"></script>
 </body>
 </html>

@@ -1,0 +1,64 @@
+/* Update & restart (v1.58.0) - drawn by app-update-overlay.js. Uses the app's
+   tokens from styles.css so it follows any retheme. */
+
+#app-update-btn {
+  margin: 0 16px 12px;
+  background: var(--bg-hover);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 0.78rem;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#app-update-btn:hover { filter: brightness(1.15); }
+
+#app-version.app-version-clickable { cursor: pointer; }
+#app-version.app-version-clickable:hover { opacity: 1; text-decoration: underline; }
+
+#app-update-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99000; /* under the startup overlay (100000), over everything else */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.app-update-box {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  padding: 20px 22px 16px;
+  font-size: 0.9rem;
+}
+
+.app-update-title { font-size: 1.15rem; font-weight: 600; }
+.app-update-sub { margin-top: 4px; color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+.app-update-h { margin: 16px 0 6px; font-weight: 600; font-size: 0.85rem; }
+.app-update-p { margin-top: 12px; }
+.app-update-commits, .app-update-list { margin: 0; padding-left: 20px; line-height: 1.5; }
+.app-update-commits li { font-size: 0.82rem; }
+.app-update-muted { color: var(--text-muted); }
+.app-update-ok { color: var(--health-healthy); }
+.app-update-bad { color: var(--health-critical); }
+.app-update-status { margin-top: 14px; min-height: 1.2em; font-weight: 600; }
+
+.app-update-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.app-update-actions button {
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text);
+  cursor: pointer;
+}
+.app-update-actions button.primary { background: var(--accent); border-color: var(--accent-2); color: #fff; }
+.app-update-actions button:disabled { opacity: 0.6; cursor: default; }
