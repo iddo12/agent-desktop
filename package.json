@@ -7,7 +7,7 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win nsis zip",
+    "dist": "electron-builder --win nsis zip --publish never",
     "pack": "electron-builder --dir"
   },
   "dependencies": {
