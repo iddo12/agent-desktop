@@ -309,14 +309,12 @@ function ensureRateLimitStatusLine() {
     // the self-contained script to ~/.claude (visible to the CLI, and not under
     // %APPDATA%, which an MSIX parent would redirect) and skip the install
     // entirely when no real node.exe exists - the badges keep their estimate.
+    // The copy itself happens only after the "someone else's statusLine"
+    // check below, so nothing is written when we leave settings alone.
     // Unpackaged is untouched.
     if (app.isPackaged) {
-      const nodeExe = resolveNodeExecutable();
-      if (!fs.existsSync(nodeExe)) return;
-      const dir = path.join(app.getPath("home"), ".claude", "agent-desktop");
-      fs.mkdirSync(dir, { recursive: true });
-      ourScriptPath = path.join(dir, "statusline.cjs");
-      fs.writeFileSync(ourScriptPath, fs.readFileSync(path.join(__dirname, "statusline.cjs")));
+      if (!fs.existsSync(resolveNodeExecutable())) return;
+      ourScriptPath = path.join(app.getPath("home"), ".claude", "agent-desktop", "statusline.cjs");
     }
     let settings = {};
     if (fs.existsSync(settingsPath)) {
@@ -331,6 +329,13 @@ function ensureRateLimitStatusLine() {
     // it as "someone else's, leave it alone" forever.
     const isOurs = existing && existing.type === "command" && typeof existing.command === "string" && existing.command.includes(ourScriptPath);
     if (existing && !isOurs) return;
+
+    // Packaged: refresh the copy every start, so an app update also updates
+    // the script the CLI runs.
+    if (app.isPackaged) {
+      fs.mkdirSync(path.dirname(ourScriptPath), { recursive: true });
+      fs.writeFileSync(ourScriptPath, fs.readFileSync(path.join(__dirname, "statusline.cjs")));
+    }
 
     const desired = {
       type: "command",
