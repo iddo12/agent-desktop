@@ -51,7 +51,7 @@
   const agentList = document.getElementById("agent-list");
   agentList.parentNode.insertBefore(nav, agentList);
 
-  // Packaged-install feature probe (v1.56.0): a clean install has no
+  // Packaged-install feature probe (v1.59.0): a clean install has no
   // shared_registry for the Library to show, so hide it entirely rather than
   // opening onto three empty tabs. Always true today for Iddo's own
   // workspace, so this never hides anything for him.

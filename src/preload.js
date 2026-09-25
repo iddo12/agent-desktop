@@ -56,8 +56,12 @@ contextBridge.exposeInMainWorld("api", {
   getUiFlags: () => ipcRenderer.invoke("ui-flags-get"),
   setUiFlag: (key, value) => ipcRenderer.invoke("ui-flag-set", { key, value }),
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
-  // Packaged-install feature probe (v1.56.0) - {argus, library, telegram, tasks}.
+  // Packaged-install feature probe (v1.59.0) - {argus, library, telegram, tasks}.
   getFeatures: () => ipcRenderer.invoke("get-features"),
+  // Update & restart (v1.58.0) - see src/app-update.js.
+  getAppUpdateStatus: (opts) => ipcRenderer.invoke("app-update-status", opts),
+  applyAppUpdate: () => ipcRenderer.invoke("app-update-apply"),
+  openAppRelease: (url) => ipcRenderer.invoke("app-update-open-release", url),
   checkClaudeCodeUpdate: () => ipcRenderer.invoke("check-claude-code-update"),
   updateClaudeCode: () => ipcRenderer.invoke("update-claude-code"),
   updateClaudeCli: () => ipcRenderer.invoke("update-claude-cli"),
@@ -66,7 +70,7 @@ contextBridge.exposeInMainWorld("api", {
   disableInterferingService: (serviceName) => ipcRenderer.invoke("disable-interfering-service", { serviceName }),
   checkClaudeExecutableHealth: () => ipcRenderer.invoke("check-claude-executable-health"),
 
-  // Native Claude Code installer (packaged installs, v1.56.0).
+  // Native Claude Code installer (packaged installs, v1.59.0).
   installClaudeCodeNative: () => ipcRenderer.invoke("install-claude-code-native"),
   onInstallClaudeCodeOutput: (callback) => {
     ipcRenderer.on("install-claude-code-output", (event, data) => callback(data));
