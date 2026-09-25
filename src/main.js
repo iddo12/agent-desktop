@@ -3544,7 +3544,7 @@ try {
 }
 
 try {
-  require("./voice-main").init({ ipcMain, log: (line) => logStuckWatchdog(line) });
+  require("./voice-main").init({ ipcMain, app, log: (line) => logStuckWatchdog(line) });
 } catch (e) {
   console.error("voice-main failed to load:", e);
 }

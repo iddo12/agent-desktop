@@ -3627,7 +3627,9 @@ let voiceRec = null; // { stream, recorder, chunks, timer }
 
 // Visible toast above the compose box (the placeholder alone was too easy to miss - a failed
 // transcription looked like "nothing happened").
-function voiceToast(msg, ms, isError) {
+// v1.59.5: optional `action` ({ label, fn }) adds a button - used for Retry after a failed
+// transcription, so a long dictation is one click from recovery instead of lost.
+function voiceToast(msg, ms, isError, action) {
   let t = document.getElementById("voice-toast");
   if (!t) {
     t = document.createElement("div");
@@ -3637,13 +3639,20 @@ function voiceToast(msg, ms, isError) {
   }
   t.style.background = isError ? "#b3261e" : "#2e6b3a";
   t.textContent = msg;
+  if (action) {
+    const b = document.createElement("button");
+    b.textContent = action.label;
+    b.style.cssText = "margin-left:12px;padding:3px 12px;border-radius:6px;border:1px solid #fff;background:transparent;color:#fff;cursor:pointer;font-size:14px;";
+    b.addEventListener("click", () => { t.style.display = "none"; action.fn(); });
+    t.appendChild(b);
+  }
   t.style.display = "block";
   clearTimeout(voiceToast._t);
   if (ms) voiceToast._t = setTimeout(() => { t.style.display = "none"; }, ms);
 }
 
-function voiceNote(msg, ms) {
-  voiceToast(msg, ms, /error|could not|failed|used up|not found|nothing/i.test(msg));
+function voiceNote(msg, ms, action) {
+  voiceToast(msg, ms, /error|could not|failed|used up|not found|nothing/i.test(msg), action);
   const old = chatInputEl.dataset.voiceOldPlaceholder !== undefined ? chatInputEl.dataset.voiceOldPlaceholder : chatInputEl.placeholder;
   chatInputEl.dataset.voiceOldPlaceholder = old;
   chatInputEl.placeholder = msg;
@@ -3737,7 +3746,7 @@ function stitchTranscripts(parts) {
   }, "");
 }
 
-async function blobToWavChunks(blob) {
+async function blobToPcm16k(blob) {
   const buf = await blob.arrayBuffer();
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   let decoded;
@@ -3752,8 +3761,11 @@ async function blobToWavChunks(blob) {
   src.buffer = decoded;
   src.connect(off.destination);
   src.start();
-  const pcm = (await off.startRendering()).getChannelData(0);
+  return (await off.startRendering()).getChannelData(0);
+}
 
+function pcmToWavChunks(pcm) {
+  const rate = 16000;
   const chunkLen = VOICE_CHUNK_SECONDS * rate;
   const overlap = Math.floor(VOICE_CHUNK_OVERLAP_SECONDS * rate);
   const chunks = [];
@@ -3802,47 +3814,76 @@ function stopVoiceRecording() {
   voiceRec.stream.getTracks().forEach((t) => t.stop());
 }
 
+// v1.59.5: the recording is saved to disk (voice-save) BEFORE transcription, and a failure
+// shows a Retry button instead of discarding it. On 2026-09-25 a long dictation was lost when
+// Cloudflare's daily allowance ran out - the audio simply wasn't kept anywhere. With the local
+// engine (voice-main.js) the whole recording goes in one pass; the 50 s chunking below is only
+// for the Cloudflare fallback, whose requests must stay small.
 async function finishVoiceRecording(rec) {
   voiceRec = null;
   try {
     voiceNote("Transcribing...", 60000);
     voiceInputBtn.disabled = true;
     const blob = new Blob(rec.chunks, { type: rec.recorder.mimeType || "audio/webm" });
-    const wavChunks = await blobToWavChunks(blob);
-    const parts = [];
-    for (let i = 0; i < wavChunks.length; i++) {
-      if (wavChunks.length > 1) voiceNote(`Transcribing part ${i + 1} of ${wavChunks.length}...`, 60000);
-      const res = await window.api.transcribeAudio(wavChunks[i]);
-      if (!res || !res.ok) {
-        // Keep what already transcribed rather than discarding everything -
-        // losing four minutes of dictation because the last chunk failed is
-        // exactly the sort of silent loss this app has already cost Iddo.
-        if (parts.length) {
-          voiceNote(`Part ${i + 1} failed (${(res && res.error) || "unknown"}) - keeping the rest.`, 12000);
-          break;
-        }
-        voiceNote((res && res.error) || "Transcription failed.", 12000);
-        return;
-      }
-      if (res.text) parts.push(res.text.trim());
-    }
-    const joined = stitchTranscripts(parts).trim();
-    if (!joined) {
-      voiceNote("Nothing was heard - try again a bit closer to the mic.", 6000);
-      return;
-    }
-    const res = { text: joined };
-    const cur = chatInputEl.value;
-    chatInputEl.value = cur && !/\s$/.test(cur) ? cur + " " + res.text : cur + res.text;
-    autoGrowChatInput();
-    chatInputEl.focus();
-    chatInputEl.setSelectionRange(chatInputEl.value.length, chatInputEl.value.length);
-    voiceNote("Transcribed - review it, then press Enter to send", 5000);
+    const pcm = await blobToPcm16k(blob);
+    let saved = null;
+    try { saved = await window.api.voiceSave(encodeWav16k(pcm, 16000)); } catch (e) {}
+    await transcribeVoicePcm(pcm, saved && saved.ok ? saved.file : null);
   } catch (e) {
     voiceNote("Voice input error: " + e.message, 10000);
   } finally {
     voiceInputBtn.disabled = false;
   }
+}
+
+async function transcribeVoicePcm(pcm, savedFile) {
+  const retry = {
+    label: "Retry",
+    fn: async () => {
+      voiceInputBtn.disabled = true;
+      try { await transcribeVoicePcm(pcm, savedFile); } finally { voiceInputBtn.disabled = false; }
+    },
+  };
+  const keptNote = savedFile ? " The recording is saved - click Retry." : " Click Retry to try again.";
+  let local = false;
+  try { local = !!(window.api.voiceEngine && (await window.api.voiceEngine()).local); } catch (e) {}
+  voiceNote(local ? "Transcribing on this PC..." : "Transcribing...", 600000);
+  const parts = [];
+  if (local) {
+    const res = savedFile ? await window.api.transcribeAudio(null, savedFile) : await window.api.transcribeAudio(encodeWav16k(pcm, 16000));
+    if (!res || !res.ok) {
+      voiceNote(((res && res.error) || "Transcription failed.") + keptNote, 0, retry);
+      return;
+    }
+    if (res.text) parts.push(res.text.trim());
+  } else {
+    const wavChunks = pcmToWavChunks(pcm);
+    for (let i = 0; i < wavChunks.length; i++) {
+      if (wavChunks.length > 1) voiceNote(`Transcribing part ${i + 1} of ${wavChunks.length}...`, 60000);
+      const res = await window.api.transcribeAudio(wavChunks[i]);
+      if (!res || !res.ok) {
+        // Keep what already transcribed rather than discarding everything.
+        if (parts.length) {
+          voiceNote(`Part ${i + 1} failed (${(res && res.error) || "unknown"}) - keeping the rest.` + keptNote, 0, retry);
+          break;
+        }
+        voiceNote(((res && res.error) || "Transcription failed.") + keptNote, 0, retry);
+        return;
+      }
+      if (res.text) parts.push(res.text.trim());
+    }
+  }
+  const joined = stitchTranscripts(parts).trim();
+  if (!joined) {
+    voiceNote("Nothing was heard - try again a bit closer to the mic.", 6000);
+    return;
+  }
+  const cur = chatInputEl.value;
+  chatInputEl.value = cur && !/\s$/.test(cur) ? cur + " " + joined : cur + joined;
+  autoGrowChatInput();
+  chatInputEl.focus();
+  chatInputEl.setSelectionRange(chatInputEl.value.length, chatInputEl.value.length);
+  voiceNote("Transcribed - review it, then press Enter to send", 5000);
 }
 
 voiceInputBtn.addEventListener("click", () => {
