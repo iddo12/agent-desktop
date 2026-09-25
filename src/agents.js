@@ -296,6 +296,11 @@ module.exports = {
   get ROOT() {
     return ROOT;
   },
+  // The one place to ask "where do the agents live?" (IRIS and any later
+  // module import this rather than recomputing it).
+  getRoot() {
+    return ROOT;
+  },
   setRoot,
   listAgents,
   createAgent,

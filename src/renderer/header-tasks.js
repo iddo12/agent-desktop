@@ -146,7 +146,7 @@
   let overview = null;
   let scopeKey = "agent";
   let body = null;
-  // Packaged-install feature probe (v1.55.0): a clean install has no
+  // Packaged-install feature probe (v1.56.0): a clean install has no
   // Telegram bridge task queue, so the "From Telegram" section (and its
   // approve buttons) is hidden rather than shown as permanently empty.
   // Defaults true so nothing changes before the probe resolves or on
