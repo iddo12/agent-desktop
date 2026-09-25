@@ -2145,7 +2145,25 @@ async function findAliveBackgroundAgent(shell, spawnEnv, sessionCwd) {
 //                     instead of the most-recent one `--continue` would pick.
 //   forceFresh      - start a brand-new conversation (`--bg`, no --continue)
 //                     even though prior sessions exist for this cwd.
+// v1.54.4 (2026-09-25): duplicate-dispatch guard. Seen live at 03:06: a
+// planned context reset dispatched a fresh `--bg` for System Optimization,
+// and 3 s later the keep-alive sweep - whose `claude agents` listing did not
+// show the new process yet - dispatched a SECOND one for the same folder. Two
+// live copies of one agent left the app showing it "not running" and Iddo's
+// messages undelivered. Every dispatch stamps its cwd here, and the sweep
+// leaves alone any agent something else dispatched within the grace window.
+const DISPATCH_GRACE_MS = 90 * 1000;
+const lastDispatchAt = new Map(); // path.resolve(sessionCwd).toLowerCase() -> ms
+function dispatchKey(sessionCwd) {
+  return path.resolve(sessionCwd).toLowerCase();
+}
+function dispatchedRecently(sessionCwd) {
+  const at = lastDispatchAt.get(dispatchKey(sessionCwd));
+  return !!at && Date.now() - at < DISPATCH_GRACE_MS;
+}
+
 async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
+  lastDispatchAt.set(dispatchKey(sessionCwd), Date.now());
   let args;
   if (opts.resumeSessionId) {
     args = ["--bg", "--resume", opts.resumeSessionId];
@@ -2189,6 +2207,9 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   // A clean dispatch proves the folder is trusted now (the button below, or
   // Iddo accepting the prompt in a terminal himself).
   clearAgentUntrusted(sessionCwd);
+  // Stamp again on completion: the grace window runs from when the process
+  // exists, not from when a possibly slow dispatch call began.
+  lastDispatchAt.set(dispatchKey(sessionCwd), Date.now());
   return match[1];
 }
 
@@ -2309,6 +2330,47 @@ ipcMain.handle("trust-agent-folders", async (event, { agentPaths } = {}) => {
 // interval, with delete-agent as the only escape. Fixed by the `paused` flag
 // (agents.js setAgentPaused(), set via the "set-agent-paused" IPC handler
 // above delete-agent): this sweep skips any agent with it set.
+// v1.54.4 self-heal for the duplicate race above, in case one ever slips
+// through: when one agent folder has more than one live background process,
+// stop the extras that have never written a transcript (an empty copy holds
+// no conversation, so stopping it loses nothing). A copy WITH a transcript is
+// never touched - two real conversations are logged for a human instead.
+// Skips a folder dispatched within the grace window (its new copy may not
+// have written its first line yet).
+async function stopEmptyDuplicateAgents(shell, spawnEnv, agentsToCheck) {
+  const all = await listBackgroundAgents(shell, spawnEnv);
+  for (const agent of agentsToCheck) {
+    const sessionCwd = sessionCwdFor(agent.path);
+    if (dispatchedRecently(sessionCwd)) continue;
+    const target = path.resolve(sessionCwd);
+    const live = all.filter((a) => a.kind === "background" && a.pid && path.resolve(a.cwd || "") === target);
+    if (live.length < 2) continue;
+    const projDir = path.join(app.getPath("home"), ".claude", "projects", encodeProjectPath(sessionCwd));
+    const hasTranscript = (a) => {
+      try {
+        return fs.statSync(path.join(projDir, (a.sessionId || a.id) + ".jsonl")).size > 0;
+      } catch (e) {
+        return false;
+      }
+    };
+    const real = live.filter(hasTranscript);
+    const empty = live.filter((a) => !hasTranscript(a));
+    // Keep at least one: if none has a transcript yet, keep the newest.
+    if (!real.length) empty.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)).shift();
+    for (const dup of empty) {
+      try {
+        await runClaudeCommand(shell, ["stop", dup.id], { env: spawnEnv, timeoutMs: CLAUDE_CLI_TIMEOUT_MS });
+        logStuckWatchdog(`stopEmptyDuplicateAgents: ${agent.folderName} had ${live.length} live copies - stopped empty duplicate ${dup.id}`);
+      } catch (e) {
+        logStuckWatchdog(`stopEmptyDuplicateAgents: ${agent.folderName} stop ${dup.id} failed: ${e.message}`);
+      }
+    }
+    if (real.length > 1) {
+      logStuckWatchdog(`stopEmptyDuplicateAgents: ${agent.folderName} has ${real.length} live copies WITH conversations (${real.map((a) => a.id).join(", ")}) - left alone, needs a human`);
+    }
+  }
+}
+
 const ENSURE_AGENTS_ALIVE_INTERVAL_MS = 15 * 60 * 1000;
 const ENSURE_AGENTS_ALIVE_STAGGER_MS = 2000; // don't launch every configured agent's CLI process in the same instant
 // `progress` (optional) is the startup countdown's hook - see startupProgress.
@@ -2335,13 +2397,21 @@ async function ensureAllAgentsBackgrounded(progress) {
   // Paused agents are skipped (Iddo explicitly stopped them - see
   // set-agent-paused above), so they are left out of the countdown's total too.
   const toCheck = agents.filter((agent) => !agent.paused);
+  await stopEmptyDuplicateAgents(shell, spawnEnv, toCheck).catch((e) =>
+    logStuckWatchdog(`stopEmptyDuplicateAgents failed: ${e.message}`)
+  );
   if (progress) progress.begin(toCheck.length);
   for (let i = 0; i < toCheck.length; i++) {
     const agent = toCheck[i];
     try {
       const sessionCwd = sessionCwdFor(agent.path);
       let alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
-      if (!alive) {
+      if (!alive && dispatchedRecently(sessionCwd)) {
+        // v1.54.4: something else (a reset, a chat open, a resume) launched
+        // this agent moments ago and `claude agents` doesn't list it yet.
+        // Launching again here is exactly how the 09-25 duplicate happened.
+        logStuckWatchdog(`ensureAllAgentsBackgrounded: ${agent.folderName} dispatched <${DISPATCH_GRACE_MS / 1000}s ago elsewhere - not dispatching again`);
+      } else if (!alive) {
         // An untrusted folder rejects here within a second or two (the trust
         // prompt is caught as it is drawn), is logged by the catch below and
         // still counts as processed for the startup countdown.
@@ -2498,7 +2568,13 @@ async function enforceTestTokenBudget() {
 // registerRemoteControl(), below) or one it's simply reattaching to (already
 // registered, if it ever was, back when IT was first dispatched).
 async function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
-  const existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+  let existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+  // v1.54.4: launched moments ago by something else but not listed yet - give
+  // it up to ~10 s to show up before launching a second copy.
+  for (let i = 0; !existing && i < 5 && dispatchedRecently(sessionCwd); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
+  }
   if (existing) return { id: existing.id, freshlyDispatched: false };
   const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
   return { id, freshlyDispatched: true };
