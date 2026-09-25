@@ -62,3 +62,17 @@
 }
 .app-update-actions button.primary { background: var(--accent); border-color: var(--accent-2); color: #fff; }
 .app-update-actions button:disabled { opacity: 0.6; cursor: default; }
+
+/* v1.58.2: a waiting update is shown right above the version line, in colour */
+.app-version-new {
+  margin: 0 16px 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.app-version-new:hover { filter: brightness(1.1); }
+.app-version-new.hidden { display: none; }
