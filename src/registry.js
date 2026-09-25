@@ -120,6 +120,13 @@ async function registryAction(workspaceRoot, id, action) {
     shell.showItemInFolder(e.link);
     return { ok: true };
   }
+  // v1.59.4: phone app packages can't be opened on Windows - shell.openPath
+  // "succeeded" on the Show Rolodex .apk and nothing happened (Iddo, 2026-09-25).
+  const NOT_FOR_WINDOWS = { ".apk": "an Android app", ".aab": "an Android app bundle", ".ipa": "an iPhone app" };
+  const kind = NOT_FOR_WINDOWS[path.extname(e.link).toLowerCase()];
+  if (action === "open" && kind) {
+    return { ok: false, error: `This is ${kind} package - it installs on the phone, not on Windows. Use "Show in folder" and copy it to the phone.` };
+  }
   const err = await shell.openPath(e.link); // "" on success
   return err ? { ok: false, error: err } : { ok: true };
 }

@@ -2057,6 +2057,19 @@ async function runClaudeCommandOnce(shell, args, options) {
     });
     proc.onExit(() => {
       if (timer) clearTimeout(timer);
+      // v1.59.2: release the pty even on a normal exit. With the winpty
+      // backend (useConpty: false) the child exiting does NOT end its
+      // winpty-agent.exe + conhost.exe; only closing the pty does. Every
+      // one-shot call (the once-a-minute `claude agents` poll among them)
+      // leaked a pair - 451 pairs / ~900 processes in 8 h on 2026-09-25,
+      // cleared only by an app restart - and Iddo saw the PC stalling.
+      setImmediate(() => {
+        try {
+          proc.kill();
+        } catch (e) {
+          /* already gone */
+        }
+      });
       if (settled) return;
       settled = true;
       // The plain-shell form of a prompt (e.g. "Workspace not trusted ...")
