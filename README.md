@@ -26,7 +26,7 @@ If you've ever ended up with five terminal windows each running `claude` for a d
 
 Below the agent list is a **Library** with three tabs: **Projects**, **Documents** and **Images**. It is a single place that answers "what have my agents made, and where is it?", so you don't have to remember links or ask an agent to dig one up.
 
-The Library only *shows* things; it is only as useful as what gets registered into it. It reads a folder named `shared_registry` inside your agents root (the folder set by `AGENT_DESKTOP_ROOT`, or the parent of `agent-desktop`). **A fresh install starts with an empty Library**; it fills up when your agents write entries there. The helper scripts I use to write and sync entries are not part of this repo (yet), but an entry is just one small JSON file, so any agent can write one directly.
+The Library only *shows* things; it is only as useful as what gets registered into it. It reads a folder named `shared_registry` inside your agents root (the folder set by `AGENT_DESKTOP_ROOT`, or the parent of `agent-desktop`). **A fresh install starts with an empty Library**; it fills up when your agents write entries there. Two helper scripts ship with the app in `tools/registry/`: `registry.py` (add, update, list, confirm and remove entries from the command line, so agents don't hand-write JSON) and `registry_sync.py` (the optional nightly sweep, below). An entry is also just one small JSON file, so any agent can write one directly.
 
 ### An entry
 
@@ -71,7 +71,9 @@ Ideas and Researched can hold projects *and* the research documents behind them;
 1. **Tell your agents to register what they make.** Put a standing line in each agent's `CLAUDE.md`, for example: *"Any document you write for me and anything I can open and use gets a JSON entry in `shared_registry`. Update the entry when the thing changes. Do not register helper scripts."*
 2. **Capture ideas the moment you voice them.** Another standing line: *"When I mention a project or tool idea, write an entry with `"stage": "idea"` in that same turn."*
 3. **Give one agent the weekly review.** Someone has to move ideas to Researched or Active and archive dead ones, or the Ideas list becomes a graveyard.
-4. **Optionally sweep automatically.** A nightly script can register research PDFs it finds and turn tasks tagged `idea` into entries; that is how I keep the Ideas list fed.
+4. **Optionally sweep automatically.** `python tools/registry/registry_sync.py` (safe to run any time; `--dry-run` shows what it would change) registers PDFs found under a `Research` folder as *researched*, turns idea-tagged tasks from a task store into ideas, and turns headings containing "idea", "proposal" or "concept" in `*_pending_notes.md` files into ideas. Run it nightly with Windows Task Scheduler (or cron). Entries it creates are marked `"auto": true` and it never rewrites ones you registered by hand.
+
+Both scripts find the registry the same way the app does: the `AGENT_DESKTOP_ROOT` environment variable, or the folder that contains `agent-desktop`.
 
 Keep the registry to destinations you would actually go back to. Registering every script buries the few things you want to find again.
 
