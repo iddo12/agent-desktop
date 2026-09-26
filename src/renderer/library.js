@@ -18,6 +18,15 @@
     { type: "image", label: "Images", empty: "No images registered yet." },
   ];
   const POLL_MS = 30000;
+  // v1.60.0: the Projects tab is a pipeline. Ideas and Researched can be projects
+  // OR the research papers behind them; Active is real projects only.
+  const STAGES = [
+    { stage: "idea", label: "Ideas", empty: "No ideas parked right now." },
+    { stage: "researched", label: "Researched", empty: "Nothing researched and waiting." },
+    { stage: "active", label: "Active", empty: "No active projects." },
+  ];
+  const IDLE_DAYS = 14; // an idea or researched item nobody has touched for this long is flagged
+  let stage = "active";
 
   let entries = [];
   let tab = "project";
@@ -92,9 +101,19 @@
 
   const status = el("div", "library-status");
   const body = el("div", "library-body");
+  // Stage buttons sit at the bottom of the Projects tab (Iddo's layout choice).
+  const stageBar = el("div", "library-stagebar");
+  const stageBtns = new Map();
+  STAGES.forEach((s) => {
+    const b = el("button", "library-stage");
+    b.addEventListener("click", () => { stage = s.stage; render(); });
+    stageBtns.set(s.stage, b);
+    stageBar.appendChild(b);
+  });
   view.appendChild(head);
   view.appendChild(status);
   view.appendChild(body);
+  view.appendChild(stageBar);
   document.getElementById("main-panel").appendChild(view);
 
   function openLibrary(type) {
@@ -208,6 +227,10 @@
     if (e.status !== "active") titleRow.appendChild(el("span", "library-tag", e.status));
     if (e.missing) titleRow.appendChild(el("span", "library-tag library-tag-bad", "file missing"));
     if (e.stale) titleRow.appendChild(el("span", "library-tag", `unconfirmed ${e.staleDays} days`));
+    const idle = idleDays(e);
+    if (tab === "project" && stage !== "active" && idle > IDLE_DAYS) {
+      titleRow.appendChild(el("span", "library-tag library-tag-bad", `no movement ${idle} days`));
+    }
     main.appendChild(titleRow);
     if (e.description) main.appendChild(el("div", "library-card-desc", e.description));
     const meta = el("div", "library-card-meta");
@@ -243,14 +266,30 @@
     return c;
   }
 
+  function idleDays(e) {
+    const t = Date.parse(e.updatedAt || "");
+    return Number.isFinite(t) ? Math.floor((Date.now() - t) / 86400000) : 0;
+  }
+
+  // Which entries belong to a stage. Active is projects only; Ideas and
+  // Researched also take documents carrying that stage (a research paper).
+  function inStage(e, st) {
+    return st === "active" ? e.type === "project" && e.stage === "active" : e.stage === st;
+  }
+
   function visible(type) {
     return entries.filter((e) => e.type === type && (showArchived || e.status === "active"));
+  }
+
+  function stageItems(st) {
+    return entries.filter((e) => inStage(e, st) && (showArchived || e.status === "active"));
   }
 
   function updateCounts() {
     TABS.forEach((t) => {
       const b = navBtns.get(t.type);
-      b.querySelector(".library-nav-count").textContent = String(visible(t.type).length);
+      const n = t.type === "project" ? STAGES.reduce((a, s) => a + stageItems(s.stage).length, 0) : visible(t.type).length;
+      b.querySelector(".library-nav-count").textContent = String(n);
     });
   }
 
@@ -260,7 +299,13 @@
     navBtns.forEach((b, type) => b.classList.toggle("active", libOpen && type === tab));
     tabBtns.forEach((b, type) => {
       b.classList.toggle("active", type === tab);
-      b.textContent = `${TABS.find((t) => t.type === type).label} (${visible(type).length})`;
+      const n = type === "project" ? STAGES.reduce((a, s) => a + stageItems(s.stage).length, 0) : visible(type).length;
+      b.textContent = `${TABS.find((t) => t.type === type).label} (${n})`;
+    });
+    stageBar.classList.toggle("hidden", tab !== "project");
+    stageBtns.forEach((b, st) => {
+      b.classList.toggle("active", st === stage);
+      b.textContent = `${STAGES.find((x) => x.stage === st).label} (${stageItems(st).length})`;
     });
 
     // Agent filter lists only agents that actually have entries.
@@ -274,11 +319,12 @@
 
     body.textContent = "";
     body.className = "library-body" + (tab === "image" ? " library-grid" : "");
-    const rows = visible(tab).filter((e) =>
+    const pool = tab === "project" ? stageItems(stage) : visible(tab);
+    const rows = pool.filter((e) =>
       (!agentFilter || e.agent === agentFilter) &&
       (!query || [e.title, e.description, e.topic, e.agent].join(" ").toLowerCase().includes(query)));
     if (!rows.length) {
-      const t = TABS.find((x) => x.type === tab);
+      const t = tab === "project" ? STAGES.find((x) => x.stage === stage) : TABS.find((x) => x.type === tab);
       body.appendChild(el("p", "library-empty", query || agentFilter ? "Nothing matches." : t.empty));
       return;
     }

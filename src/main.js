@@ -1100,6 +1100,52 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
+// Exit trace (2026-09-26): on 09-26 Iddo found Agent Desktop closed after hours away and there was no
+// evidence either way (no crash handlers, no Crashpad reports, no clean-exit record). These leave a trail:
+// every crash/quit path is logged, and a heartbeat file lets the NEXT start say when the previous instance
+// was last alive and whether it exited cleanly.
+const HEARTBEAT_PATH = path.join(app.getPath("userData"), "heartbeat.json");
+let heartbeatQuitting = false; // once will-quit has written "clean-exit", the interval must not overwrite it
+function writeHeartbeat(state) {
+  if (!gotSingleInstanceLock) return; // a second instance that lost the lock must not clobber the running one's record
+  if (heartbeatQuitting && state === "running") return;
+  try {
+    fs.writeFileSync(HEARTBEAT_PATH, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), state }));
+  } catch (e) {}
+}
+// Read the previous heartbeat now, but log it after ready: STUCK_WATCHDOG_LOG_PATH is a const defined further down.
+let previousHeartbeat = null;
+try {
+  previousHeartbeat = JSON.parse(fs.readFileSync(HEARTBEAT_PATH, "utf8"));
+} catch (e) {}
+writeHeartbeat("running");
+setInterval(() => writeHeartbeat("running"), 60 * 1000).unref();
+app.whenReady().then(() => {
+  const prev = previousHeartbeat;
+  if (gotSingleInstanceLock && prev && prev.pid !== process.pid) {
+    logStuckWatchdog(
+      prev.state === "clean-exit"
+        ? `previous instance pid=${prev.pid} exited cleanly at ${prev.at}`
+        : `previous instance pid=${prev.pid} did NOT exit cleanly - last heartbeat ${prev.at} (killed, crashed, or machine off)`
+    );
+  }
+});
+app.on("before-quit", () => logStuckWatchdog(`before-quit pid=${process.pid}`));
+app.on("will-quit", () => {
+  logStuckWatchdog(`will-quit pid=${process.pid}`);
+  heartbeatQuitting = true;
+  writeHeartbeat("clean-exit");
+});
+app.on("render-process-gone", (_e, wc, d) =>
+  logStuckWatchdog(`render-process-gone reason=${d && d.reason} exitCode=${d && d.exitCode} url=${wc && wc.getURL ? wc.getURL() : ""}`)
+);
+app.on("child-process-gone", (_e, d) =>
+  logStuckWatchdog(`child-process-gone type=${d && d.type} reason=${d && d.reason} exitCode=${d && d.exitCode}`)
+);
+process.on("uncaughtExceptionMonitor", (err) => {  // monitor variant: logs without changing Electron's default handling
+  logStuckWatchdog(`uncaughtException: ${err && err.stack ? err.stack.split("\n").slice(0, 4).join(" | ") : err}`);
+});
+
 // ---------------------------------------------------------------- agents --
 
 ipcMain.handle("list-agents", () => listAgents());
