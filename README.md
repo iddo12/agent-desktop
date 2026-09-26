@@ -6,6 +6,7 @@ If you've ever ended up with five terminal windows each running `claude` for a d
 
 ## What it does
 
+- **A Library of everything your agents made** — projects, documents and images in one place, with an Ideas / Researched / Active pipeline. See [The Library](#the-library-never-lose-track-of-what-your-agents-made).
 - **A sidebar of agents.** Each agent is just a folder on disk. Add one, and Agent Desktop dispatches a real, native Claude Code background agent (`claude --bg`) for it — the actual CLI's own multi-agent system, not a reimplementation.
 - **Groups to organize the sidebar.** Collect agents into colored, collapsible groups ("+ Group" in the sidebar), drag agents between them, and reorder groups by dragging their headers. **Groups are purely a visual aid** — they do not define reporting lines, which agent is a "manager", or any relationship between agents. What an agent does and answers to lives in that agent's own instructions (its `CLAUDE.md`), not in how it's grouped here. Group definitions live in one `agent_groups.json` file next to your agent folders; agents you haven't placed in a group show under "Ungrouped".
 - **Restart an agent's process without losing the conversation.** A "Restart Session" button re-dispatches the agent's background process while resuming the same conversation — so it re-reads its `.claude/settings.local.json` and `CLAUDE.md` (which a normal app restart doesn't, since that just re-attaches to the still-running process). Distinct from "Reset Session", which clears the conversation.
@@ -20,6 +21,59 @@ If you've ever ended up with five terminal windows each running `claude` for a d
 - **Tells you when the Claude Code CLI itself is outdated.** Agent Desktop depends on its own separate, npm-global Claude Code install (distinct from whatever the Claude Desktop app bundles) - a sidebar button appears only when that install is genuinely behind the latest published version, and updates it with one click.
 - **Real rate-limit usage in the chat header, not a guess.** On first launch, Agent Desktop installs a small [statusLine](https://code.claude.com/docs/en/statusline) script as your global Claude Code config (only if you don't already have one configured - it never overwrites your own). From then on, any interactive `claude` session on the machine - this app's own agents included - feeds it Anthropic's actual reported 5-hour/weekly rate-limit percentages, which show up as real badges instead of an estimate. Falls back to a labeled, message-count-based estimate until that data exists (e.g. right after first install) - the sidebar's **Plan** dropdown (Pro / Max 5x / Max 20x) picks which community-sourced estimate that fallback uses.
 - **A "this month" view too**, alongside the 5-hour/weekly ones - real message counts for the current calendar month, a daily average, and a plain linear projection for where that pace lands by month's end, plus a clearly-labeled *estimated* percentage (extrapolated from your real weekly rate-limit usage - Anthropic doesn't publish a monthly cap the way it does for the 5-hour and weekly windows, so this is the best available estimate, not a reported figure).
+
+## The Library: never lose track of what your agents made
+
+Below the agent list is a **Library** with three tabs: **Projects**, **Documents** and **Images**. It is a single place that answers "what have my agents made, and where is it?", so you don't have to remember links or ask an agent to dig one up.
+
+The Library only *shows* things; it is only as useful as what gets registered into it. It reads a folder named `shared_registry` inside your agents root (the folder set by `AGENT_DESKTOP_ROOT`, or the parent of `agent-desktop`). **A fresh install starts with an empty Library**; it fills up when your agents write entries there. The helper scripts I use to write and sync entries are not part of this repo (yet), but an entry is just one small JSON file, so any agent can write one directly.
+
+### An entry
+
+One file per entry, `shared_registry/<id>.json`:
+
+```json
+{
+  "id": "quick-cull-research",
+  "type": "document",
+  "title": "Quick-cull tool: market research",
+  "description": "What exists, the gap, and a recommendation.",
+  "agent": "Research Agent",
+  "topic": "Video tools",
+  "link": "C:/Projects/Research/quick_cull_research.pdf",
+  "status": "active",
+  "stage": "researched",
+  "createdAt": "2026-09-26T10:00:00",
+  "updatedAt": "2026-09-26T10:00:00",
+  "confirmedAt": "2026-09-26T10:00:00"
+}
+```
+
+- `type`: `project` (something you can open and use), `document` (a report or spec, ideally a PDF so it opens inside the app) or `image` (with a `thumbnail` path).
+- `link`: a local file, a launcher, or a web URL. Documents open full-size inside the app with a Back button; web links open in your browser. Add `"pdf": "<path>"` to give a web page a PDF copy.
+- `status`: only `active` entries are shown by default; the **Archived** checkbox reveals the rest. Use `archived` or `superseded` instead of deleting.
+- `confirmedAt`: entries nobody has confirmed for 90 days get an "unconfirmed" tag, and a link to a file that no longer exists gets "file missing", so the Library does not quietly point at nothing.
+
+### Ideas, Researched, Active: the Projects pipeline
+
+Ideas get lost when many efforts run in parallel. The Projects tab has three buttons at the bottom, driven by the optional `"stage"` field:
+
+| Stage | Meaning |
+|---|---|
+| **Ideas** | Written down, nobody has studied it yet |
+| **Researched** | A research paper or brief exists |
+| **Active** | Being built or in use (a project with no `stage` counts as active) |
+
+Ideas and Researched can hold projects *and* the research documents behind them; Active holds projects only. An idea or researched item that nobody has touched for 14 days gets a red "no movement" tag, which is the cue to decide: build it, park it, or drop it.
+
+### Making it actually useful
+
+1. **Tell your agents to register what they make.** Put a standing line in each agent's `CLAUDE.md`, for example: *"Any document you write for me and anything I can open and use gets a JSON entry in `shared_registry`. Update the entry when the thing changes. Do not register helper scripts."*
+2. **Capture ideas the moment you voice them.** Another standing line: *"When I mention a project or tool idea, write an entry with `"stage": "idea"` in that same turn."*
+3. **Give one agent the weekly review.** Someone has to move ideas to Researched or Active and archive dead ones, or the Ideas list becomes a graveyard.
+4. **Optionally sweep automatically.** A nightly script can register research PDFs it finds and turn tasks tagged `idea` into entries; that is how I keep the Ideas list fed.
+
+Keep the registry to destinations you would actually go back to. Registering every script buries the few things you want to find again.
 
 ## Requirements
 
