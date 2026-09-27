@@ -1142,8 +1142,23 @@ app.on("render-process-gone", (_e, wc, d) =>
 app.on("child-process-gone", (_e, d) =>
   logStuckWatchdog(`child-process-gone type=${d && d.type} reason=${d && d.reason} exitCode=${d && d.exitCode}`)
 );
+// Shared by both exit-trace handlers below so a future change to how much
+// stack (or which fields) gets logged only needs updating in one place.
+function formatErrForLog(err) {
+  return err && err.stack ? err.stack.split("\n").slice(0, 4).join(" | ") : err;
+}
 process.on("uncaughtExceptionMonitor", (err) => {  // monitor variant: logs without changing Electron's default handling
-  logStuckWatchdog(`uncaughtException: ${err && err.stack ? err.stack.split("\n").slice(0, 4).join(" | ") : err}`);
+  logStuckWatchdog(`uncaughtException: ${formatErrForLog(err)}`);
+});
+// Unlike uncaughtExceptionMonitor, an unhandled promise rejection is NOT covered by that
+// handler and (unlike a sync throw) leaves nothing in Windows' crash log or Crashpad either -
+// Node's default behavior for an unhandled rejection with no listener is to terminate the
+// process outright, invisibly to every exit-trace hook above. Registering a listener at all
+// (even one that does nothing else) suppresses that default termination, so this both closes
+// a real blind spot in the 2026-09-27 "app vanished with zero evidence anywhere" investigation
+// and, if that was the actual cause, stops it from recurring.
+process.on("unhandledRejection", (reason) => {
+  logStuckWatchdog(`unhandledRejection: ${formatErrForLog(reason)}`);
 });
 
 // ---------------------------------------------------------------- agents --
@@ -1884,6 +1899,25 @@ async function runClaudeCommand(shell, args, options, attempts = 20, delayMs = 9
 }
 
 const CLAUDE_CLI_TIMEOUT_MS = 90 * 1000; // see runClaudeCommandOnce's timeoutMs
+
+// `claude stop` is always a small, bounded operation (unlike `--version` or
+// `install -g`, which legitimately run for minutes - that's why
+// runClaudeCommandOnce's timeoutMs is opt-in in general), so every caller
+// needs the same protection. Routing all of them through one wrapper means
+// a future new `stop` call site gets timeoutMs for free instead of relying
+// on whoever adds it remembering to copy it - the exact way this gap
+// happened twice already (2026-09-24, then again 2026-09-27, both times a
+// hung `claude stop`/`--bg` left an agent unreachable with no clean
+// recovery). `opts` lets a caller override or add anything runClaudeCommand
+// accepts; timeoutMs specifically defaults but can still be overridden.
+function stopClaudeAgent(shell, agentId, spawnEnv, opts = {}) {
+  return runClaudeCommand(shell, ["stop", agentId], {
+    env: spawnEnv,
+    timeoutMs: CLAUDE_CLI_TIMEOUT_MS,
+    ...opts,
+  });
+}
+
 async function listBackgroundAgents(shell, spawnEnv) {
   try {
     const output = await runClaudeCommand(shell, ["agents", "--json", "--all"], { env: spawnEnv, timeoutMs: CLAUDE_CLI_TIMEOUT_MS });
@@ -2134,7 +2168,7 @@ async function stopEmptyDuplicateAgents(shell, spawnEnv, agentsToCheck) {
     if (!real.length) empty.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)).shift();
     for (const dup of empty) {
       try {
-        await runClaudeCommand(shell, ["stop", dup.id], { env: spawnEnv, timeoutMs: CLAUDE_CLI_TIMEOUT_MS });
+        await stopClaudeAgent(shell, dup.id, spawnEnv);
         logStuckWatchdog(`stopEmptyDuplicateAgents: ${agent.folderName} had ${live.length} live copies - stopped empty duplicate ${dup.id}`);
       } catch (e) {
         logStuckWatchdog(`stopEmptyDuplicateAgents: ${agent.folderName} stop ${dup.id} failed: ${e.message}`);
@@ -2370,7 +2404,16 @@ async function stopBackgroundAgentForCwd(sessionCwd) {
     const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
     const agent = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
     if (agent) {
-      await runClaudeCommand(shell, ["stop", agent.id], { env: spawnEnv });
+      // Callers are already protected from a hang here by this function's own
+      // outer Promise.race (5s, below) - the real point of stopClaudeAgent's
+      // built-in timeout is that WITHOUT it, a truly stuck `claude stop` keeps
+      // this abandoned attempt() running (and its underlying pty/child
+      // process alive) forever after the race gives up on it, since nothing
+      // else ever cancels it. With the timeout, the abandoned attempt settles
+      // on its own and that process actually gets cleaned up instead of
+      // leaking - same class of orphaned-process leak this file already
+      // fixes elsewhere (see the 2026-08-23 orphan-pty comment below).
+      await stopClaudeAgent(shell, agent.id, spawnEnv);
       // `claude stop` returning just means the stop request was issued, not
       // that the target background process has actually exited and released
       // its own handles yet - its cwd IS this same sessionCwd, unlike the
@@ -3225,7 +3268,25 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
         proc.kill();
       } catch (e) {}
       try {
-        await runClaudeCommand(shell, ["stop", agentId], { env: spawnEnv });
+        // A short override, not the default 90s: this runs synchronously on
+        // the interactive "open this agent's tab" path (startTerminalSession
+        // is called straight from the start-terminal IPC handler, and the
+        // renderer shows no spinner/cancel while it awaits), so the normal
+        // <2s `claude stop` case must stay fast - 5s matches the bound
+        // stopBackgroundAgentForCwd's own outer race already uses for the
+        // same command. The surrounding catch only protects against a thrown
+        // error, not a hang, so without a timeout of some kind a stuck
+        // `claude stop` would block this whole login-recovery path forever
+        // instead of falling through to the fresh dispatch below.
+        // Known tradeoff, not fully closed here: if the stop times out
+        // because it's genuinely just slow rather than hung, the dispatch
+        // below can still fire while the old process is alive, leaving two
+        // live `claude --bg` daemons for the same cwd - the same
+        // orphaned-process class this file works to prevent elsewhere.
+        // Properly closing that needs an alive-check before dispatching, not
+        // just a shorter timeout; tracked as a follow-up, not blocking this
+        // fix (the alternative - hanging forever - is strictly worse).
+        await stopClaudeAgent(shell, agentId, spawnEnv, { timeoutMs: 5000 });
       } catch (e) {}
       const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
       return startTerminalSession(agentPath, sessionCwd, cols, rows, freshAgentId, isReattachAttempt, /* isLoginRecoveryAttempt */ true);

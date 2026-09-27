@@ -1555,7 +1555,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // burst - so selecting text to copy it silently un-selected itself a few
   // seconds later (Iddo: "copy paste regressed"). The skipped render is
   // picked up by the next poll once the selection is gone.
-  const sig = activeAgentPath + "" + JSON.stringify(blocks) + "" + JSON.stringify((pendingSent || []).map((p) => p.text));
+  const sig = activeAgentPath + "" + JSON.stringify(blocks) + "" + JSON.stringify((pendingSent || []).map((p) => p.text + (p.failed ? " failed" + (p.superseded ? "S" : "") : "")));
   const sel = window.getSelection();
   const selectionInChat =
     sel && !sel.isCollapsed && scrollEl.contains(sel.anchorNode) && scrollEl.contains(sel.focusNode);
@@ -1712,7 +1712,9 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       // because resending is how duplicates happen; the standing workspace
       // rule now has agents ask before acting on a repeat, but the warning
       // should not be pushing Iddo into creating one in the first place.
-      warn.textContent = pending.waitedOnBusyAgent
+      warn.textContent = pending.superseded
+        ? "⚠ Not delivered - a later message reached the agent but this one did not"
+        : pending.waitedOnBusyAgent
         ? "⚠ Not confirmed - the agent was busy the whole time, so this may still be queued"
         : "⚠ Not confirmed - check the conversation before resending";
       const resendBtn = document.createElement("button");
@@ -1882,6 +1884,28 @@ async function rebuildChatView(agentPath, opts = {}) {
     if (stillUnmatched && pending.text.startsWith("[[HANDOFF-RESUME]]") && blocks.some((b) => b.role === "reset")) stillUnmatched = false;
     if (stillUnmatched && pending.text.trim() === "/clear" && now - pending.addedAt > 3000) stillUnmatched = false;
     if (!stillUnmatched) return false; // matched - a real transcript entry now carries it, drop the optimistic copy
+
+    // 2026-09-27: a later message that DID land proves this one was dropped.
+    // Traced live on the Software Engineering agent: "yes" was sent at 04:13:34
+    // while the agent sat idle, and the CLI never recorded it (the message sent
+    // 50 s before it was dropped the same way). Iddo then re-sent something else,
+    // which landed, and the agent worked for five more minutes. The "is the agent
+    // still writing" check below kept extending the wait for the "yes" for as long
+    // as the agent stayed busy, so it pulsed as "sending" for seven minutes and
+    // never got its Resend button - while the answer he had given was simply lost.
+    // The CLI takes input in order, so a human message stamped after this one was
+    // sent that is not this one means this one is not coming.
+    if (!pending.failed) {
+      const sentAt = pending.sentAt || pending.addedAt;
+      const supersededBy = blocks.some(
+        (b) => b.role === "user" && b.timestamp && new Date(b.timestamp).getTime() > sentAt + 2000
+      );
+      if (supersededBy) {
+        pending.failed = true;
+        pending.superseded = true;
+        window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+      }
+    }
 
     // 2026-09-20: this used to just silently vanish here once expired, on
     // the reasoning that "either it succeeded and matching missed it, or
@@ -3249,8 +3273,14 @@ function clearAttachments() {
 function submitToAgent(agentPath, text) {
   const session = terminals.get(agentPath);
   if (session) {
-    session.pendingSent.push({ text, addedAt: Date.now() });
-    session.turnStartedAt = Date.now();
+    // Single Date.now() call: addedAt and sentAt must actually be equal at
+    // creation (sentAt never moves; addedAt is pushed forward by the
+    // still-writing check in rebuildChatView()) - two separate calls could
+    // return different milliseconds on a slow tick and break that invariant
+    // from the start.
+    const now = Date.now();
+    session.pendingSent.push({ text, addedAt: now, sentAt: now });
+    session.turnStartedAt = now;
     markActivity(agentPath, session);
     if (agentPath === activeAgentPath) {
       // session.lastBlocks (cached by the last successful rebuildChatView())
