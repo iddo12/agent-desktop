@@ -66,10 +66,24 @@
     }
   }
 
+  // 2026-09-29: a "failed" flow (handoff didn't finish in 12min, or the resume
+  // never confirmed) used to sit in `flows` forever - only a human clicking
+  // "Dismiss" on that exact agent's tab removes it. Since checkAutoHandoff
+  // below used to gate on flows.size alone, one stuck failed entry on ANY
+  // agent silently disabled the automatic sweep for the ENTIRE fleet until
+  // someone happened to open that agent and dismiss it, or the app restarted.
+  // Confirmed live: Product Development sat idle at 521K tokens, well past
+  // AUTO_HANDOFF_TOKENS, and never fired - only an active (not failed) flow
+  // should serialize the fleet.
+  function fleetFlowInProgress() {
+    for (const f of flows.values()) if (f.phase !== "failed") return true;
+    return false;
+  }
+
   async function checkAutoHandoff() {
     if (!autoHandoffEnabled()) return;
     if (allRun && !allRun.finished) return;      // a manual sweep owns the fleet
-    if (flows.size) return;                       // one at a time, fleet-wide
+    if (fleetFlowInProgress()) return;             // one ACTIVE flow at a time, fleet-wide
     for (const a of agents) {
       try {
         const u = await window.api.getContextUsage(a.path);
@@ -86,6 +100,28 @@
         if (t < AUTO_HANDOFF_TOKENS) continue;
         const act = await window.api.getSessionActivity(a.path).catch(() => null);
         if (!act || act.working) continue;        // mid-turn: leave it alone
+        // 2026-09-29: an agent whose tab was never opened this Agent Desktop
+        // run has no live pty attached (terminals only gets an entry via
+        // selectAgent -> showTerminalFor, on-demand when a tab is clicked -
+        // "Handoff all" already knows this and explicitly calls selectAgent()
+        // per-agent before its own startFlow; this automatic sweep did not).
+        // Without that, queueOrSend()'s submitToAgent() falls through to
+        // sendInput() with no ptySessions entry on the main-process side,
+        // which main.js's own terminal-input handler treats as
+        // non-delivery (writes a "could not be delivered" notice nobody
+        // sees instead of ever reaching the real background agent). The
+        // flow then sits at phase:"saving" for the full 12-minute timeout,
+        // unable to progress, before failing - and until it fails it counts
+        // as the one active flow serializing the whole fleet (see
+        // fleetFlowInProgress() above). Confirmed as the live cause of
+        // Product Development never getting auto-handed-off tonight even
+        // right after a fresh restart: skip an agent with no attached,
+        // started session here rather than starting a flow that cannot
+        // possibly deliver its prompt. It will still be picked up as soon
+        // as its tab is opened (the manual banner already offers the same
+        // reset there) or by a manual "Handoff all" sweep either way.
+        const session = terminals.get(a.path);
+        if (!session || !session.started) continue;
         autoHandedOff.add(a.path);
         show(
           ctxBanner,
