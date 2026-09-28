@@ -2009,7 +2009,7 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   // Real dispatch output (confirmed byte-for-byte via a live test dispatch):
   // "backgrounded \xC2\xB7 5467abbc (idle ...)" - a single U+00B7 MIDDLE DOT,
   // not a literal "." or multiple dots.
-  const match = output.match(/backgrounded\s*Â·\s*([a-f0-9]+)/i);
+  const match = output.match(/backgrounded\s*·\s*([a-f0-9]+)/i);
   if (!match) {
     throw new Error("Could not parse background agent id from dispatch output: " + output);
   }
@@ -3176,7 +3176,7 @@ function agentDisplayName(agentPath) {
 }
 
 // When a brand-new background conversation is dispatched for an agent, give
-// it a recognizable title right away - "<Agent name> Â· <YYYY-MM-DD>" -
+// it a recognizable title right away - "<Agent name> · <YYYY-MM-DD>" -
 // instead of leaving it to Claude Code's own auto-generated (and often
 // stale) name. This is the title the Chats panel shows and, because this
 // runs immediately after registerRemoteControl() made this the live Remote
@@ -3197,7 +3197,7 @@ async function autoTitleFreshConversation(agentPath, sessionCwd) {
         // a resumed conversation that already carried one).
         if (current.titleSource === "custom") return;
         const stamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD, tz-stable enough
-        setConversationTitle(sessionCwd, current.sessionId, `${agentDisplayName(agentPath)} Â· ${stamp}`);
+        setConversationTitle(sessionCwd, current.sessionId, `${agentDisplayName(agentPath)} · ${stamp}`);
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 400));
