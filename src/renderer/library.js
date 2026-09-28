@@ -208,7 +208,13 @@
       const frame = el("div", "library-thumb");
       if (e.thumbnail) {
         const img = el("img");
-        img.loading = "lazy";
+        // Not lazy: this panel is shown/hidden via a class toggle, not real
+        // navigation, and Chromium's lazy-load intersection observer often
+        // never fires for an <img> created while its container is still
+        // display:none - every thumbnail silently never loaded (2026-09-28,
+        // caught once 11 images existed to reveal the pattern; text-only
+        // cards rendered fine since that part is synchronous). The list is
+        // at most dozens of images, so eager loading costs nothing here.
         img.alt = e.title;
         img.src = "file:///" + e.thumbnail.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/").replace(/^([A-Za-z])%3A/, "$1:");
         frame.appendChild(img);
