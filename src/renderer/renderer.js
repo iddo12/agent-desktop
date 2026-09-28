@@ -744,6 +744,13 @@ function showTerminalFor(agent) {
       // the working indicator so it doesn't flicker off during quiet stretches.
       transcriptWorking: false,
       transcriptWorkingSince: null,
+      // How long the transcript FILE itself has gone unwritten, per the same
+      // mtime check main.js's checkForStuckTurns() uses to decide whether to
+      // auto-kill+restart - see the 2026-09-28 stuck-turn-watchdog false-
+      // positive fix in updateThinkingIndicator() for why this exists
+      // alongside transcriptWorking/lastActivityAt rather than replacing them.
+      transcriptQuietMs: null,
+      transcriptQuietMsAt: null,
       // Real timestamp (Date) of this agent's last actual API response, per
       // its own JSONL transcript - see refreshCacheStatus()/PROMPT_CACHE_TTL_MS
       // below. null until getContextUsage() has resolved at least once.
@@ -1794,9 +1801,10 @@ const PENDING_SENT_BUSY_TIMEOUT_MS = 6 * 60 * 1000;
 async function rebuildChatView(agentPath, opts = {}) {
   const session = terminals.get(agentPath);
   if (!session) return;
-  const [blocks, activity] = await Promise.all([
+  const [blocks, activity, transcriptQuietMs] = await Promise.all([
     window.api.getLiveTranscript(agentPath),
     window.api.getSessionActivity(agentPath).catch(() => null),
+    window.api.getTranscriptQuietMs(agentPath).catch(() => null),
   ]);
   if (agentPath !== activeAgentPath || terminals.get(agentPath) !== session) return; // stale by the time the IPC round-trip finished
 
@@ -1808,6 +1816,11 @@ async function rebuildChatView(agentPath, opts = {}) {
     const wasWorking = session.transcriptWorking;
     session.transcriptWorking = !!activity.working;
     session.transcriptWorkingSince = activity.working ? Date.now() - (activity.sinceMs || 0) : null;
+    // Same measure main.js's own stuck-turn auto-recovery uses (transcript
+    // FILE mtime, not raw pty bytes) - see updateThinkingIndicator()'s use of
+    // this for why it's tracked separately from the pty-quiet check below.
+    session.transcriptQuietMs = transcriptQuietMs;
+    session.transcriptQuietMsAt = Date.now();
     // The turn just ended as far as the transcript is concerned - this is the
     // moment a message queued during it can safely go (2026-09-23).
     if (wasWorking && !session.transcriptWorking && !session.busy && session.sendQueue.length > 0) {
@@ -2401,6 +2414,22 @@ function refreshMonthlyUsage(monthly) {
 // a while.
 const LONG_BUSY_HINT_MS = 20000;
 
+// Same value as main.js's STUCK_TURN_THRESHOLD_MS (the transcript-file-mtime
+// staleness main.js's own checkForStuckTurns() acts on) - kept in sync by
+// hand since main and renderer are separate processes. See
+// updateThinkingIndicator()'s stuck-wording condition for why this matters:
+// confirmed live 2026-09-28 (Software Engineering agent, Pixel 8 USB wait)
+// that the banner's OLD condition - raw pty-byte silence alone - disagreed
+// with main.js's own verdict for over 5 hours. The agent's transcript file
+// was still being touched well inside this window the whole time (main.js's
+// stuck-turn-watchdog.log stayed empty, i.e. it never once considered this
+// session stuck), while the terminal simply had nothing new to draw because
+// the agent was legitimately waiting on a blocking tool call for external
+// hardware - not frozen. Gating the alarming wording on this same mtime
+// measure keeps the renderer's banner honest with the one thing (main.js's
+// auto-recovery) that would actually act on a real hang.
+const STUCK_HINT_TRANSCRIPT_QUIET_MS = 3 * 60 * 1000;
+
 function setBusy(agentPath, session, busy) {
   if (busy && !session.busy) session.busyStartedAt = Date.now();
   session.busy = busy;
@@ -2487,9 +2516,20 @@ function updateThinkingIndicator() {
   const elapsedMs = startedAt ? Date.now() - startedAt : 0;
   const elapsedSec = Math.floor(elapsedMs / 1000);
   const quietMs = Date.now() - (session.lastActivityAt || 0);
+  // Interpolate between rebuildChatView() polls so this keeps growing smoothly
+  // on this function's own 1s tick rather than jumping every 4s.
+  const transcriptQuietMs =
+    session.transcriptQuietMs != null
+      ? session.transcriptQuietMs + Math.max(0, Date.now() - (session.transcriptQuietMsAt || Date.now()))
+      : null;
+  // "or stuck" requires the TRANSCRIPT to have actually gone quiet, not just
+  // the terminal - see STUCK_HINT_TRANSCRIPT_QUIET_MS above. Falls back to
+  // the old pty-only check only when a transcript reading isn't available yet
+  // (fresh session, or the IPC call failed) so a real freeze still surfaces.
+  const looksStuck = transcriptQuietMs != null ? transcriptQuietMs > STUCK_HINT_TRANSCRIPT_QUIET_MS : quietMs > 15000;
   const secLabel = startedAt ? ` ${elapsedSec}s` : "";
   let text;
-  if (elapsedMs > LONG_BUSY_HINT_MS && quietMs > 15000) {
+  if (elapsedMs > LONG_BUSY_HINT_MS && looksStuck) {
     text = `● Working…${secLabel} — no recent output; it may be waiting on a prompt (check Raw Terminal) or stuck`;
   } else if (elapsedMs > LONG_BUSY_HINT_MS) {
     text = `● Working…${secLabel} (taking a while — still going)`;
