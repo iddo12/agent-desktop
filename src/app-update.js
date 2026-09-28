@@ -146,6 +146,32 @@ async function gitViaPty(gitPath, args) {
 
 const firstLine = (s) => String(s || "").trim().split(/\r?\n/)[0].trim();
 
+// Iddo, 2026-09-28: the "already on disk, just restart" screen showed no
+// changelog at all - only the git-pull path ever populated `commits` (raw
+// commit subjects from origin/main). CLAUDE.md's own `## vX.Y.Z - <title>`
+// headings are a better source than commit subjects (human-written summaries,
+// not tracked by git in this repo so this reads it straight off disk) and
+// work for both paths: whatever versions sit strictly between what is
+// running and what is being applied. Best-effort - a missing/unparsable
+// CLAUDE.md just yields an empty changelog, never blocks the update itself.
+function changelogFromClaudeMd(fromVersion, toVersion) {
+  try {
+    const text = fs.readFileSync(path.join(repoDir(), "CLAUDE.md"), "utf-8");
+    const out = [];
+    for (const m of text.matchAll(/^## v(\d+\.\d+\.\d+)\s*-\s*(.+)$/gm)) {
+      const version = m[1];
+      if (!deps.isVersionNewer(version, fromVersion)) continue; // version <= fromVersion
+      if (deps.isVersionNewer(version, toVersion)) continue; // version > toVersion
+      const title = m[2].replace(/\s*\(\d{4}-\d{2}-\d{2}[^)]*\)\s*/g, " ").replace(/\s*\[[^\]]*\]\s*/g, " ").trim();
+      out.push({ version, title });
+    }
+    out.sort((a, b) => (deps.isVersionNewer(a.version, b.version) ? -1 : deps.isVersionNewer(b.version, a.version) ? 1 : 0));
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
 // ------------------------------------------------------------- status ----
 
 async function unpackagedStatus({ fetch }) {
@@ -308,6 +334,7 @@ async function getStatus({ fetch = true } = {}) {
     // A disk-only update needs nothing but a restart, so blockers that are
     // about pulling do not apply to it.
     st.canApply = st.behind > 0 ? st.canApply : st.diskNewer;
+    st.changelog = st.available ? changelogFromClaudeMd(st.running, st.target) : [];
   } else if (st.mode === "release") {
     st.available = st.updateAvailable;
     st.target = st.latest;

@@ -228,7 +228,19 @@
       el("div", "app-update-sub", `v${st.running || "?"}  →  v${st.target || "?"}` + (st.fake ? "   (test mode - nothing is pulled or restarted)" : ""))
     );
 
-    if (st.needsPull && st.commits && st.commits.length) {
+    // Iddo, 2026-09-28: the disk-only path ("already on disk, just restart")
+    // showed no changelog at all - only the pull path ever had one, and even
+    // that was raw commit subjects rather than a real description. Prefer
+    // CLAUDE.md's own `## vX.Y.Z - <title>` headings (changelogFromClaudeMd()
+    // in app-update.js) in both paths; fall back to commit subjects (pull
+    // path only) or the old plain sentence (disk-only) if CLAUDE.md could not
+    // be read or had no matching entries.
+    if (st.changelog && st.changelog.length) {
+      box.appendChild(el("div", "app-update-h", "What's new"));
+      const ul = el("ul", "app-update-commits");
+      for (const c of st.changelog) ul.appendChild(el("li", "", `v${c.version} - ${c.title}`));
+      box.appendChild(ul);
+    } else if (st.needsPull && st.commits && st.commits.length) {
       box.appendChild(el("div", "app-update-h", `What's new (${st.behind} change${st.behind === 1 ? "" : "s"})`));
       const ul = el("ul", "app-update-commits");
       for (const c of st.commits) ul.appendChild(el("li", "", c));
