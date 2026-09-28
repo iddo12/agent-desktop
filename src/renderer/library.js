@@ -146,6 +146,13 @@
     return isNaN(d) ? "" : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
   }
 
+  function fmtSize(bytes) {
+    if (typeof bytes !== "number") return "";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
   function linkLabel(e) {
     if (!e.link) return "no link";
     if (e.isUrl) {
@@ -234,7 +241,14 @@
     main.appendChild(titleRow);
     if (e.description) main.appendChild(el("div", "library-card-desc", e.description));
     const meta = el("div", "library-card-meta");
-    [e.agent, e.topic, fmtDate(e.updatedAt), linkLabel(e)].filter(Boolean).forEach((m, i) => {
+    // Iddo, 2026-09-28: for images specifically, wants the filename first,
+    // then who made it, then size and where it actually lives on disk -
+    // that's what he reaches for when browsing renders, not the topic/date
+    // that matter more for documents and projects.
+    const metaParts = e.type === "image"
+      ? [linkLabel(e), e.agent, fmtSize(e.fileSize), e.folder]
+      : [e.agent, e.topic, fmtDate(e.updatedAt), linkLabel(e)];
+    metaParts.filter(Boolean).forEach((m, i) => {
       if (i) meta.appendChild(el("span", "library-dot", "·"));
       meta.appendChild(el("span", null, m));
     });
@@ -278,7 +292,12 @@
   }
 
   function visible(type) {
-    return entries.filter((e) => e.type === type && (showArchived || e.status === "active"));
+    // Iddo, 2026-09-28: images shouldn't be gated by the Archived checkbox at
+    // all - "I don't understand why you have archived images, it makes no
+    // sense." Superseded concept renders are still real work he wants to
+    // browse, unlike a finished project or an old document. Projects/
+    // documents keep the active-only default.
+    return entries.filter((e) => e.type === type && (type === "image" || showArchived || e.status === "active"));
   }
 
   function stageItems(st) {

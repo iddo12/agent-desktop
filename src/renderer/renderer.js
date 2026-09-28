@@ -2114,7 +2114,15 @@ async function refreshContextUsage(agentPath) {
   if (usage && typeof window.guardUsageIsStale === "function" && window.guardUsageIsStale(agentPath, usage)) usage = null; // pre-reset leftovers
   if (usage && typeof usage.contextTokens === "number") {
     const pct = Math.min(100, Math.round((usage.contextTokens / ASSUMED_CONTEXT_WINDOW) * 100));
-    contextUsageEl.textContent = `${pct}% context`;
+    // Iddo, 2026-09-28: wants the actual token count on screen at a glance,
+    // not just a percentage hidden behind a hover - "it will tell me ... 100,000
+    // tokens or 50,000 tokens or whatever, just a number on top." Percentage
+    // stays alongside since it's the more actionable figure for "how close to
+    // the wall," but the raw count is now always the visible text itself.
+    const kTokens = usage.contextTokens >= 1000
+      ? `${Math.round(usage.contextTokens / 1000)}K`
+      : String(usage.contextTokens);
+    contextUsageEl.textContent = `${kTokens} tokens (${pct}%)`;
     contextUsageEl.title = `~${usage.contextTokens.toLocaleString()} tokens of an assumed ${ASSUMED_CONTEXT_WINDOW.toLocaleString()}-token context window (approximate - not a confirmed figure for this model). Scoped to just this agent's own conversation - grows as this specific conversation grows, resets on /clear or a fresh session.`;
     contextUsageEl.classList.remove("hidden", "warning", "critical");
     if (pct >= 90) contextUsageEl.classList.add("critical");
