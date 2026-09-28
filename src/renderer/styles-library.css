@@ -132,6 +132,12 @@ body.library-open #xp-panel { display: none; }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   align-content: start;
+  /* Without this, grid's default align-items:stretch forces each card to the
+     row's full height, and a stretched flex-column child can't resolve
+     aspect-ratio against an indefinite stretched height - Chromium collapses
+     .library-thumb to 0px. Only visible once a row holds more than one card
+     (2026-09-28, found once 18 images existed to force multiple rows). */
+  align-items: start;
 }
 .library-empty { color: var(--text-muted); font-size: 14px; margin: 24px 0; }
 
