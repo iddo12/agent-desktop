@@ -1057,6 +1057,13 @@ if (!gotSingleInstanceLock) {
         logStuckWatchdog(`checkForAuthFailure error: ${e.message}`);
       }
     }, STUCK_CHECK_INTERVAL_MS);
+    setInterval(() => {
+      try {
+        checkForStuckPermissionPrompts();
+      } catch (e) {
+        logStuckWatchdog(`checkForStuckPermissionPrompts error: ${e.message}`);
+      }
+    }, STUCK_CHECK_INTERVAL_MS);
     // Give the app's own startup (window, statusline, reaper) a moment to
     // settle before launching a CLI process per configured agent. Respects
     // the `paused` flag (agents.js setAgentPaused) - see that function's
@@ -2652,6 +2659,103 @@ function checkForAuthFailure() {
     }
   } catch (e) {
     /* a notification failure must never break the watchdog itself */
+  }
+}
+
+// Stuck-on-a-permission-prompt watchdog (2026-09-28). Root-caused after the
+// Software Engineering agent sat for ~7.5 hours on an unattended "Merge
+// Without Review" confirmation (`claude agents --json` status "waiting",
+// waitingFor "permission prompt") - a git merge the auto-mode classifier
+// correctly gated on human review, but nobody was watching that specific
+// tab, so it just sat there. Same underlying gap as the credentials-file
+// incident above: checkForHaltedTurns() only ever sees an agent via its OWN
+// transcript and only for agents already attached in ptySessions this run,
+// so an agent whose tab was never opened this run gives zero signal. This
+// reads the same per-session state files (~/.claude/sessions/*.json) that
+// Agent Desktop's own `claude agents --json`/find_agent.py already rely on,
+// independent of ptySessions, so it fires no matter which tab (if any) is
+// open. Deliberately notify-only, unlike the stuck-TURN watchdog above: a
+// pending Yes/No/Amend menu is a real decision, not a hang to recover from -
+// there is no safe way to auto-answer it, so this never kills/redispatches.
+const PERMISSION_WAIT_THRESHOLD_MS = 3 * 60 * 1000;
+const PERMISSION_RENOTIFY_INTERVAL_MS = 15 * 60 * 1000;
+const permissionWaitNotified = new Map(); // agentPath -> { statusUpdatedAt, lastNotifiedAt }
+
+function checkForStuckPermissionPrompts() {
+  const sessionsDir = path.join(require("os").homedir(), ".claude", "sessions");
+  let files;
+  try {
+    files = fs.readdirSync(sessionsDir);
+  } catch (e) {
+    return; // no sessions directory yet - nothing to check
+  }
+  const root = path.resolve(AGENTS_ROOT);
+  const stillWaiting = new Set();
+
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), "utf-8"));
+    } catch (e) {
+      continue;
+    }
+    if (data.status !== "waiting" || !data.cwd || !isPidAlive(data.pid)) continue;
+
+    let folder;
+    try {
+      folder = path.resolve(data.cwd);
+    } catch (e) {
+      continue;
+    }
+    // Agent Desktop runs each agent in <agent folder>\.claude-session.
+    const agentDir = path.basename(folder) === ".claude-session" ? path.dirname(folder) : folder;
+    const rel = path.relative(root, agentDir);
+    if (agentDir === root || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+
+    stillWaiting.add(agentDir);
+    const statusUpdatedAt = data.statusUpdatedAt || data.updatedAt || 0;
+    const age = Date.now() - statusUpdatedAt;
+    if (age < PERMISSION_WAIT_THRESHOLD_MS) continue;
+
+    let tracking = permissionWaitNotified.get(agentDir);
+    if (!tracking || tracking.statusUpdatedAt !== statusUpdatedAt) {
+      tracking = { statusUpdatedAt, lastNotifiedAt: 0 };
+      permissionWaitNotified.set(agentDir, tracking);
+    }
+    if (Date.now() - tracking.lastNotifiedAt < PERMISSION_RENOTIFY_INTERVAL_MS) continue;
+    tracking.lastNotifiedAt = Date.now();
+
+    const agentName = agentDisplayName(agentDir);
+    const minutes = Math.round(age / 60000);
+    logStuckWatchdog(
+      `permission prompt: agentPath=${agentDir} waitingFor=${data.waitingFor || "unknown"} stuck ${minutes}min - needs a manual click in that agent's tab`
+    );
+    try {
+      if (Notification.isSupported()) {
+        const n = new Notification({
+          title: `${agentName}: waiting on a permission prompt`,
+          body: `Stuck ${minutes} min on "${data.waitingFor || "a confirmation"}" - open its tab in Agent Desktop and answer it. Nothing can safely auto-answer this.`,
+        });
+        n.on("click", () => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+          }
+        });
+        n.show();
+      }
+    } catch (e) {
+      /* a notification failure must never break the watchdog itself */
+    }
+  }
+
+  // Drop tracking for agents no longer waiting (resolved, or the pid/file is
+  // gone) so a later, genuinely new wait starts its own fresh clock instead
+  // of reading as an immediate renotify of stale state.
+  for (const agentDir of permissionWaitNotified.keys()) {
+    if (!stillWaiting.has(agentDir)) permissionWaitNotified.delete(agentDir);
   }
 }
 // How long a turn can show zero new transcript bytes, while confirmed
