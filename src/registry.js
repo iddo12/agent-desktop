@@ -16,12 +16,55 @@
 
 const fs = require("fs");
 const path = require("path");
-const { shell, clipboard } = require("electron");
+const crypto = require("crypto");
+const { shell, clipboard, nativeImage } = require("electron");
 
 const STALE_AFTER_DAYS = 90; // same as registry.py
 
 function registryDir(workspaceRoot) {
   return path.join(workspaceRoot, "shared_registry");
+}
+
+// Iddo, 2026-09-28: the Images tab was serving full-resolution originals
+// (some multi-MB 1024px renders) as thumbnails - "make sure the resolution on
+// these thumbnails is fairly low, otherwise... the database will just
+// increase significantly." Downscale once per source file and cache the
+// result; `link` (Open / Show in folder) always stays the real original, only
+// the card preview uses the small cached copy. Uses Electron's built-in
+// nativeImage instead of adding an image-processing dependency.
+const THUMB_MAX_DIM = 480;
+
+function thumbCacheDir(workspaceRoot) {
+  const dir = path.join(registryDir(workspaceRoot), ".thumb-cache");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    /* fall through - cachedThumbnail() below falls back to the original */
+  }
+  return dir;
+}
+
+function cachedThumbnail(workspaceRoot, sourcePath) {
+  try {
+    const stat = fs.statSync(sourcePath);
+    // Keyed by path + mtime + size so an edited/replaced source regenerates
+    // instead of serving a stale cached preview forever.
+    const key = crypto.createHash("sha1").update(`${sourcePath}|${stat.mtimeMs}|${stat.size}`).digest("hex");
+    // JPEG, not PNG: these are photographic renders, where lossless PNG barely
+    // shrinks past a couple hundred KB even at 480px. JPEG at this size is
+    // visually indistinguishable for a card preview and typically 5-10x smaller.
+    const outPath = path.join(thumbCacheDir(workspaceRoot), `${key}.jpg`);
+    if (fs.existsSync(outPath)) return outPath;
+    const img = nativeImage.createFromPath(sourcePath);
+    if (img.isEmpty()) return sourcePath; // unreadable/corrupt - show the original rather than nothing
+    const { width, height } = img.getSize();
+    const scale = Math.min(1, THUMB_MAX_DIM / Math.max(width, height, 1));
+    const resized = scale < 1 ? img.resize({ width: Math.round(width * scale), height: Math.round(height * scale) }) : img;
+    fs.writeFileSync(outPath, resized.toJPEG(80));
+    return outPath;
+  } catch (e) {
+    return sourcePath; // a thumbnail failure must never break the whole Library list
+  }
 }
 
 function loadEntries(workspaceRoot) {
@@ -75,7 +118,12 @@ function listRegistry(workspaceRoot) {
         // A local link that no longer exists is worth showing plainly - the
         // registry is only useful if it does not quietly point at nothing.
         missing: !!(local && !fs.existsSync(e.link)),
-        thumbnail: thumb && !isUrl(thumb) && fs.existsSync(thumb) ? thumb : null,
+        thumbnail: thumb && !isUrl(thumb) && fs.existsSync(thumb) ? cachedThumbnail(workspaceRoot, thumb) : null,
+        // Iddo, 2026-09-28: wants an image's size and folder visible on its
+        // card, not just its name. Computed here (main process) rather than
+        // the renderer so the renderer never needs raw filesystem access.
+        fileSize: local && fs.existsSync(e.link) ? fs.statSync(e.link).size : null,
+        folder: local ? path.dirname(e.link) : null,
         // What the in-app viewer can show: the entry's PDF copy if it has one,
         // else a local PDF/image/HTML link. Web links open in the browser.
         viewable: !!viewablePath(e),
