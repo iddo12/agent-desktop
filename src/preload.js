@@ -21,7 +21,9 @@ contextBridge.exposeInMainWorld("api", {
   pickAvatar: () => ipcRenderer.invoke("pick-avatar"),
 
   startTerminal: (agentPath, cols, rows, knownAgentId) => ipcRenderer.invoke("start-terminal", { agentPath, cols, rows, knownAgentId }),
-  transcribeAudio: (wavBase64) => ipcRenderer.invoke("voice-transcribe", { wavBase64 }),
+  transcribeAudio: (wavBase64, file) => ipcRenderer.invoke("voice-transcribe", { wavBase64, file }),
+  voiceEngine: () => ipcRenderer.invoke("voice-engine"),
+  voiceSave: (wavBase64) => ipcRenderer.invoke("voice-save", { wavBase64 }),
   sendInput: (agentPath, data) => ipcRenderer.send("terminal-input", { agentPath, data }),
   resizeTerminal: (agentPath, cols, rows) => ipcRenderer.send("terminal-resize", { agentPath, cols, rows }),
 

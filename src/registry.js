@@ -80,6 +80,10 @@ function listRegistry(workspaceRoot) {
         // else a local PDF/image/HTML link. Web links open in the browser.
         viewable: !!viewablePath(e),
         status: e.status || "active",
+        // v1.60.0: pipeline stage (idea | researched | active) for the Projects
+        // view. A project with no stage is active (every entry older than this).
+        // An unrecognised value (a typo) falls back to active for projects so it never vanishes.
+        stage: ["idea", "researched", "active"].includes(e.stage) ? e.stage : e.type === "project" ? "active" : "",
         updatedAt: e.updatedAt || e.createdAt || null,
         staleDays: Number.isFinite(confirmed) ? Math.floor((now - confirmed) / 86400000) : null,
       };

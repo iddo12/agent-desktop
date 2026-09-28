@@ -19,3 +19,4 @@ CLAUDE.md
 # outside the repo - but if someone points AGENT_DESKTOP_ROOT at the repo
 # itself, ignore it here so their own grouping never gets committed.
 agent_groups.json
+__pycache__/
