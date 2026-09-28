@@ -53,9 +53,18 @@
     // menu clean off the right edge - present in the DOM, unreachable on
     // screen, which is how Iddo noticed buttons were "missing". Status is the
     // right thing to sacrifice when space runs out; controls are not.
+    // 2026-09-29: order here IS clip priority - .xp-status's overflow:hidden
+    // clips from the end of this list first when the window is narrow (Iddo's
+    // normal, non-fullscreen case - see memory iddo-not-fullscreen-ui-must-be-
+    // legible-small). context-usage used to sit second-to-last, so the one
+    // reading Iddo explicitly asked to always have on screen ("just a number
+    // on top", 2026-09-28) was the very first thing this app hid from him.
+    // Reordered so the two he actually watches moment-to-moment (rate-limit
+    // %, and now token count) survive longest; the rougher monthly estimate
+    // and the cache-status debug reading are now what gets sacrificed first.
     const status = document.createElement("div");
     status.className = "xp-status";
-    ["five-hour-usage", "weekly-usage", "monthly-usage", "context-usage", "cache-status"].forEach((id) => {
+    ["five-hour-usage", "weekly-usage", "context-usage", "monthly-usage", "cache-status"].forEach((id) => {
       const el = $(id);
       if (el) status.appendChild(el);
     });
