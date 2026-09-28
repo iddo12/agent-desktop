@@ -173,11 +173,18 @@ function parseTranscriptEntries(jsonlPath) {
 // same agent). Fixed by scoping to only the single file that's actually
 // being written to right now - found by comparing each file's own latest
 // entry timestamp (not filesystem mtime, which can be touched by things
-// unrelated to real writes) and keeping only that one file's entries.
+// unrelated to real writes) and keeping only that one file's entries. That
+// scoping still stands for a plain manual reset (see computeLiveTranscriptBlocks
+// below) - a `/clear` has no marker of its own, so gluing the old file back
+// in front would reintroduce exactly this "did it even do anything" bug.
 // 1.23.0 handoff-reset support (see guards.js). The first message of a fresh
 // session after "Save handoff & reset" starts with this tag followed by the
 // absolute path of the archived handoff file; the Chat View turns it into a
-// red reset marker that lists that handoff's LESSONS section.
+// red reset marker that lists that handoff's LESSONS section. Because that
+// marker exists now, computeLiveTranscriptBlocks() below merges in one file
+// of prior history specifically when it sees this marker - see the
+// 2026-09-28 comment there for why that's safe where the general case above
+// still isn't.
 const HANDOFF_RESUME_TAG = "[[HANDOFF-RESUME]]";
 function lessonsForResume(text) {
   try {
@@ -204,8 +211,7 @@ function getLiveTranscriptBlocks(sessionCwd) {
   return memoByFiles("blocks:" + sessionCwd, findJsonlFiles(sessionCwd), () => computeLiveTranscriptBlocks(sessionCwd));
 }
 function computeLiveTranscriptBlocks(sessionCwd) {
-  let currentFileEntries = [];
-  let currentFileLatestTs = -Infinity;
+  const files = [];
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
     let raw;
     try {
@@ -228,12 +234,38 @@ function computeLiveTranscriptBlocks(sessionCwd) {
       const ts = new Date(obj.timestamp).getTime();
       if (ts > fileLatestTs) fileLatestTs = ts;
     }
-    if (fileLatestTs > currentFileLatestTs) {
-      currentFileLatestTs = fileLatestTs;
-      currentFileEntries = fileEntries;
-    }
+    files.push({ entries: fileEntries, latestTs: fileLatestTs });
   }
-  const entries = currentFileEntries;
+  // Most-recently-active file first, so files[0] is the one being written to
+  // right now and files[1] (if any) is the session immediately before it.
+  files.sort((a, b) => b.latestTs - a.latestTs);
+
+  const current = files[0];
+  let blocks = current ? blocksFromEntries(current.entries) : [];
+
+  // 2026-09-28: a handoff-driven reset (see guards.js/1.23.0) now gets one
+  // hop of merge instead of the full wipe below being final. The wipe was a
+  // deliberate fix (see the long comment above) for a real problem, but that
+  // problem was "no marker exists, so a reset looks identical to nothing
+  // happening" - and a marker exists now (the red chat-reset-marker line
+  // built from role:"reset" below). With the marker in place, showing the
+  // file immediately before the reset alongside it reads as one continuous
+  // scroll with a clear seam, not a wipe - which is what a reset the agent
+  // chose for itself (to keep working, not to start over) should look like.
+  // Capped at exactly one hop on purpose: this is about not hiding the turn
+  // that just happened, not about reconstructing full history - that's what
+  // the History view is for. A manual, no-handoff Reset Session has no
+  // role:"reset" first block and is untouched: it still wipes clean, because
+  // that one *is* meant to read as a deliberate fresh start.
+  if (blocks.length && blocks[0].role === "reset" && files.length > 1) {
+    blocks = blocksFromEntries(files[1].entries).concat(blocks);
+  }
+
+  return blocks;
+}
+
+function blocksFromEntries(fileEntries) {
+  const entries = fileEntries.slice();
   entries.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
   const blocks = [];

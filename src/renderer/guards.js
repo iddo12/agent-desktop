@@ -37,7 +37,12 @@
   //     History.
   // It is switchable from the console for a session where it would be
   // unwelcome: localStorage.setItem("autoHandoffOff","1").
-  const AUTO_HANDOFF_TOKENS = 200000;
+  // 2026-09-28: lowered from 200000. That left zero headroom for the
+  // handoff-writing turn itself on a standard 200K context window (this repo
+  // has no 1M-context beta configured anywhere) - the turn that saves lessons
+  // and writes the handoff file has to run inside whatever's left, and at
+  // 200000 there was nothing left to run it in.
+  const AUTO_HANDOFF_TOKENS = 155000;
   const AUTO_HANDOFF_CHECK_MS = 120000;
   const autoHandedOff = new Set();
 
