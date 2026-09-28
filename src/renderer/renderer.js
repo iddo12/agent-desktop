@@ -1619,8 +1619,12 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       // 4 s chat re-render because it is kept by timestamp.
       const key = block.timestamp || "reset";
       const expanded = resetMarkersExpanded.has(key);
+      // 2026-09-28: no longer claims "earlier conversation is in History" -
+      // the view above this line is now the earlier conversation itself
+      // (one hop of it, merged back in - see computeLiveTranscriptBlocks()
+      // in archive.js), not a pointer away to go find it.
       head.textContent =
-        "SESSION RESET" + (block.timestamp ? " - " + formatBlockTime(block.timestamp) : "") + " - earlier conversation is in History - " + (expanded ? "hide" : "show") + " lessons carried over";
+        "AUTOMATIC HANDOFF" + (block.timestamp ? " - " + formatBlockTime(block.timestamp) : "") + " - lessons carried over from the conversation above - " + (expanded ? "hide" : "show") + " lessons";
       head.style.cursor = "pointer";
       head.title = "Click to show or hide the lessons carried over from the previous session";
       wrap.appendChild(head);
