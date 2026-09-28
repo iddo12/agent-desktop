@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, Notification } = require("electron");
+﻿const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, Notification } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
@@ -143,7 +143,7 @@ function privateCliReady() {
   // by PowerShell Set-Content -Encoding utf8 carries a UTF-8 BOM that plain
   // JSON.parse chokes on.
   try {
-    const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf-8").replace(/^﻿/, ""));
+    const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf-8").replace(/^ï»¿/, ""));
     const marker = readJson(privateCliMarker());
     const pkg = readJson(privateCliPackageJson());
     return !!(marker && marker.version && pkg && pkg.version);
@@ -1584,7 +1584,7 @@ const CMD_NOT_RECOGNIZED_RE = /is not recognized as an internal or external comm
 // than retrying around it. The explicit "update-claude-code" IPC handler
 // above intentionally does NOT get this - that one IS the deliberate
 // update path.
-const CLAUDE_AUTOUPDATER_DISABLE_ENV = { DISABLE_AUTOUPDATER: "1" };
+const CLAUDE_AUTOUPDATER_DISABLE_ENV = { DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_AUTO_MODE_SERVER: "0" };
 
 // Diagnosed live, 2026-08-22, a second and completely separate cause of an
 // Agent Desktop session looking permanently frozen (the first being the
@@ -1593,7 +1593,7 @@ const CLAUDE_AUTOUPDATER_DISABLE_ENV = { DISABLE_AUTOUPDATER: "1" };
 // expired - Please run /login" - with no one there to complete the
 // interactive browser login a headless process can't do itself. Caught
 // live on a session that had been idle since the day before. Confirmed via
-// Raw Terminal that the CLI's own elapsed-time spinner ("Sautéed for 50s")
+// Raw Terminal that the CLI's own elapsed-time spinner ("SautÃ©ed for 50s")
 // was genuinely static, not just slow, and that a brand new message sent
 // through Agent Desktop's Chat View never even reached the underlying pty.
 // findAliveBackgroundAgent only checks that the OS process still has a pid
@@ -1653,7 +1653,7 @@ const REMOTE_CONTROL_CONFIRM_RE = /Enable Remote Control/i;
 // bg agent): selecting "1. Enable Remote Control" doesn't return straight
 // to a normal session - it shows a follow-up summary panel first ("Remote
 // Control" heading, the session's claude.ai/code URL, Disconnect/QR-code
-// options, a highlighted "❯ Continue") that itself needs one more Enter to
+// options, a highlighted "â¯ Continue") that itself needs one more Enter to
 // dismiss. Without answering this too, the session sits there permanently
 // (`claude agents --json` showed status "waiting"/waitingFor:"dialog open"
 // forever) - confirmed live that a single extra Enter is exactly what
@@ -2009,7 +2009,7 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   // Real dispatch output (confirmed byte-for-byte via a live test dispatch):
   // "backgrounded \xC2\xB7 5467abbc (idle ...)" - a single U+00B7 MIDDLE DOT,
   // not a literal "." or multiple dots.
-  const match = output.match(/backgrounded\s*·\s*([a-f0-9]+)/i);
+  const match = output.match(/backgrounded\s*Â·\s*([a-f0-9]+)/i);
   if (!match) {
     throw new Error("Could not parse background agent id from dispatch output: " + output);
   }
@@ -3176,7 +3176,7 @@ function agentDisplayName(agentPath) {
 }
 
 // When a brand-new background conversation is dispatched for an agent, give
-// it a recognizable title right away - "<Agent name> · <YYYY-MM-DD>" -
+// it a recognizable title right away - "<Agent name> Â· <YYYY-MM-DD>" -
 // instead of leaving it to Claude Code's own auto-generated (and often
 // stale) name. This is the title the Chats panel shows and, because this
 // runs immediately after registerRemoteControl() made this the live Remote
@@ -3197,7 +3197,7 @@ async function autoTitleFreshConversation(agentPath, sessionCwd) {
         // a resumed conversation that already carried one).
         if (current.titleSource === "custom") return;
         const stamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD, tz-stable enough
-        setConversationTitle(sessionCwd, current.sessionId, `${agentDisplayName(agentPath)} · ${stamp}`);
+        setConversationTitle(sessionCwd, current.sessionId, `${agentDisplayName(agentPath)} Â· ${stamp}`);
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 400));
@@ -3616,7 +3616,7 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
       const preview = (text || "").replace(/\s+/g, " ").trim().slice(0, 120);
       const n = new Notification({
         title: `${agentName}: message not confirmed`,
-        body: `It has not appeared in the agent's transcript and the agent has gone quiet - open Agent Desktop and check the conversation before resending. "${preview}${text && text.length > 120 ? "…" : ""}"`,
+        body: `It has not appeared in the agent's transcript and the agent has gone quiet - open Agent Desktop and check the conversation before resending. "${preview}${text && text.length > 120 ? "â€¦" : ""}"`,
       });
       n.on("click", () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
