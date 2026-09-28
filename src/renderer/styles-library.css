@@ -132,6 +132,16 @@ body.library-open #xp-panel { display: none; }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   align-content: start;
+  /* Default grid-auto-rows:auto miscomputes here - this element is both a
+     grid container AND a flex item with overflow-y:auto/min-height:0 on the
+     cross-fade between the two layout modes, and Chromium resolves "auto"
+     row tracks to a uniform sliver (73px regardless of content) instead of
+     each row's tallest card. Cards with different description lengths then
+     overlapped the row below by 200-300px, hiding everything but the last
+     card's text per column (2026-09-28, reproduced with the real 22-image
+     registry - confirmed live via getComputedStyle().gridTemplateRows before
+     touching this file). max-content forces the real per-row measurement. */
+  grid-auto-rows: max-content;
   /* Without this, grid's default align-items:stretch forces each card to the
      row's full height, and a stretched flex-column child can't resolve
      aspect-ratio against an indefinite stretched height - Chromium collapses

@@ -328,6 +328,10 @@
       b.textContent = `${TABS.find((t) => t.type === type).label} (${n})`;
     });
     stageBar.classList.toggle("hidden", tab !== "project");
+    // It no longer filters anything on this tab (see visible() above), so
+    // showing it here would just be a checkbox that lies about doing
+    // something - Iddo: "the archive should be removed."
+    archLabel.classList.toggle("hidden", tab === "image");
     stageBtns.forEach((b, st) => {
       b.classList.toggle("active", st === stage);
       b.textContent = `${STAGES.find((x) => x.stage === st).label} (${stageItems(st).length})`;
