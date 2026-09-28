@@ -43,7 +43,19 @@
   // and writes the handoff file has to run inside whatever's left, and at
   // 200000 there was nothing left to run it in.
   const AUTO_HANDOFF_TOKENS = 155000;
-  const AUTO_HANDOFF_CHECK_MS = 120000;
+  // 2026-09-28: was 120000. Iddo, after Product Development sat at 400K+
+  // tokens all night with auto-handoff never firing: "the agent should check
+  // itself every time it basically stops... it's super simple." It already
+  // was idle-checked every pass - the real gap was that an agent chaining
+  // straight from one backlog task to the next (the "keep working" standing
+  // order) can have an idle window only a few seconds wide, and a 120s poll
+  // almost never lands inside one. header-tasks.js's own fleet-wide "working
+  // now / open, waiting / not running" sidebar status already re-checks
+  // every agent's activity every 10s (POLL_MS there) to drive those dots -
+  // this just matches that same, already-proven cadence instead of a much
+  // slower independent timer, so a real gap is now unlikely to go unseen for
+  // more than a few seconds instead of up to two minutes.
+  const AUTO_HANDOFF_CHECK_MS = 10000;
   const autoHandedOff = new Set();
 
   function autoHandoffEnabled() {
