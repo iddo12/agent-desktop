@@ -1555,7 +1555,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // burst - so selecting text to copy it silently un-selected itself a few
   // seconds later (Iddo: "copy paste regressed"). The skipped render is
   // picked up by the next poll once the selection is gone.
-  const sig = activeAgentPath + "" + JSON.stringify(blocks) + "" + JSON.stringify((pendingSent || []).map((p) => p.text + (p.failed ? " failed" + (p.superseded ? "S" : "") : "")));
+  const sig = activeAgentPath + "" + JSON.stringify(blocks) + "" + JSON.stringify((pendingSent || []).map((p) => p.text + (p.failed ? " failed" + (p.superseded ? "S" : "") : "")));
   const sel = window.getSelection();
   const selectionInChat =
     sel && !sel.isCollapsed && scrollEl.contains(sel.anchorNode) && scrollEl.contains(sel.focusNode);
