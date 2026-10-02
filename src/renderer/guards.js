@@ -80,7 +80,38 @@
     return false;
   }
 
+  // Attach a never-opened agent's session without leaving Iddo on its tab.
+  // Skips (returns false) when he has text typed in the compose box, so a
+  // background sweep never steals focus mid-sentence; the next tick retries.
+  async function autoAttachSession(agent) {
+    const box = document.getElementById("chat-input");
+    if (box && box.value && box.value.trim()) return false;
+    const original = activeAgentPath;
+    selectAgent(agent);
+    const t0 = Date.now();
+    while (Date.now() - t0 < 20000) {
+      const s = terminals.get(agent.path);
+      if (s && s.started && Date.now() - t0 > 4000) break;
+      await sleep(500);
+    }
+    try {
+      if (original && original !== agent.path) {
+        const back = agents.find((x) => x.path === original);
+        if (back) selectAgent(back);
+      }
+    } catch (e) {}
+    console.log("[guards] auto-attached session for", agent.displayName);
+    const s = terminals.get(agent.path);
+    return !!(s && s.started);
+  }
+
+  let autoHandoffRunning = false;
   async function checkAutoHandoff() {
+    if (autoHandoffRunning) return;
+    autoHandoffRunning = true;
+    try { await checkAutoHandoffInner(); } finally { autoHandoffRunning = false; }
+  }
+  async function checkAutoHandoffInner() {
     if (!autoHandoffEnabled()) return;
     if (allRun && !allRun.finished) return;      // a manual sweep owns the fleet
     if (fleetFlowInProgress()) return;             // one ACTIVE flow at a time, fleet-wide
@@ -120,8 +151,16 @@
         // possibly deliver its prompt. It will still be picked up as soon
         // as its tab is opened (the manual banner already offers the same
         // reset there) or by a manual "Handoff all" sweep either way.
-        const session = terminals.get(a.path);
-        if (!session || !session.started) continue;
+        // 2026-10-02: skipping here meant auto-handoff only ever worked for
+        // agents whose tab Iddo had opened this run (YouTube reached 299K
+        // unattended). Attach the session ourselves, exactly as "Handoff all"
+        // does, then put the view back. The flow starts on the next tick.
+        let session = terminals.get(a.path);
+        if (!session || !session.started) {
+          await autoAttachSession(a);
+          session = terminals.get(a.path);
+          if (!session || !session.started) continue;
+        }
         autoHandedOff.add(a.path);
         show(
           ctxBanner,
