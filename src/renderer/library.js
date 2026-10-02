@@ -195,9 +195,14 @@
     if (!r.ok) { flash(r.error || "Could not open it here."); return; }
     viewing = e;
     vtitle.textContent = e.title;
-    vframe.src = r.url;
+    // 2026-10-02: reveal the viewer BEFORE loading the file. A PDF started inside a display:none
+    // iframe gets a 0x0 plugin surface and shows grey/blank until something forces a resize
+    // (Iddo: "PDF opens grey then fixes itself").
     view.classList.add("viewing");
     viewer.classList.remove("hidden");
+    // Iddo (2026-10-02): PDFs opened at 61%; ask Chromium's viewer for 100% via the standard open parameter.
+    const target = /\.pdf($|[?#])/i.test(r.url) ? r.url.replace(/#.*$/, "") + "#zoom=100" : r.url;
+    requestAnimationFrame(() => { if (viewing === e) vframe.src = target; });
   }
   function closeViewer() {
     viewing = null;
@@ -278,10 +283,26 @@
       rev.addEventListener("click", () => act(e, "reveal"));
       actions.appendChild(rev);
     }
+    if (e.hasWebCopy) {
+      const webBtn = el("button", "library-btn", "Web version");
+      webBtn.addEventListener("click", () => act(e, "openWeb"));
+      actions.appendChild(webBtn);
+    }
     const copy = el("button", "library-btn", "Copy link");
     copy.addEventListener("click", () => act(e, "copy"));
     actions.appendChild(copy);
     main.appendChild(actions);
+    // Iddo (09-23): only the latest version of a document shows; older ones sit in fine print.
+    if (e.olderVersions && e.olderVersions.length) {
+      const det = el("details", "library-older");
+      det.appendChild(el("summary", null, `Older versions (${e.olderVersions.length})`));
+      e.olderVersions.forEach((v, i) => {
+        const row = el("button", "library-older-row" + (v.exists ? "" : " library-older-gone"), `${v.name || "older version"}${v.date ? " - replaced " + fmtDate(v.date) : ""}${v.exists ? "" : " (file missing)"}`);
+        row.addEventListener("click", () => act(e, "openOlder:" + i));
+        det.appendChild(row);
+      });
+      main.appendChild(det);
+    }
     c.appendChild(main);
     return c;
   }

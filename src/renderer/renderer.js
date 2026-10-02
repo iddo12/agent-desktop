@@ -37,6 +37,7 @@ const chatAttachmentsEl = document.getElementById("chat-attachments");
 const chatQueueEl = document.getElementById("chat-queue");
 const chatThinkingIndicatorEl = document.getElementById("chat-thinking-indicator");
 const contextUsageEl = document.getElementById("context-usage");
+const modelBadgeEl = document.getElementById("model-badge");
 const cacheStatusEl = document.getElementById("cache-status");
 const fiveHourUsageEl = document.getElementById("five-hour-usage");
 const weeklyUsageEl = document.getElementById("weekly-usage");
@@ -315,7 +316,12 @@ function renderAgentItem(agent, groupId) {
   item.draggable = true;
   item.dataset.folderName = agent.folderName;
   item.dataset.groupId = groupId || "";
-  item.appendChild(renderAvatarEl(agent));
+  // The avatar sits in a positioned wrapper so header-tasks.js can pin the run-state
+  // icon and the needs-you badge to its corners (they are added there, from live data).
+  const avatarWrap = document.createElement("div");
+  avatarWrap.className = "avatar-wrap";
+  avatarWrap.appendChild(renderAvatarEl(agent));
+  item.appendChild(avatarWrap);
 
   const textWrap = document.createElement("div");
   textWrap.className = "agent-item-text";
@@ -1541,6 +1547,17 @@ async function ensureLongMessageCached(text) {
 }
 
 
+// v1.62.0: the handoff instruction (and its "not written yet" reminder) is a long block of text
+// meant for the agent, not for Iddo - drawing it made the chat need scrolling. The chat shows one
+// short, coloured "Handoff" line instead; the full text still goes to the agent and stays in the
+// transcript. Only the DRAWING changes - message matching (pendingSent) still uses the real text.
+function handoffLabelFor(text) {
+  const t = String(text || "");
+  if (t.startsWith("[Agent Desktop - planned context reset]")) return "Handoff";
+  if (t.startsWith("[Agent Desktop] Your last reply said the handoff was saved")) return "Handoff - reminder to write the file";
+  return null;
+}
+
 function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // Keep the reader where they are. This view is re-rendered from scratch on
   // every rebuild - the 4s stale poll, every burst of streaming output, etc.
@@ -1555,7 +1572,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // burst - so selecting text to copy it silently un-selected itself a few
   // seconds later (Iddo: "copy paste regressed"). The skipped render is
   // picked up by the next poll once the selection is gone.
-  const sig = activeAgentPath + "" + JSON.stringify(blocks) + "" + JSON.stringify((pendingSent || []).map((p) => p.text + (p.failed ? " failed" + (p.superseded ? "S" : "") : "")));
+  const sig = activeAgentPath + "\x01" + JSON.stringify(blocks) + "\x01" + JSON.stringify((pendingSent || []).map((p) => p.text + (p.failed ? "\x00failed" + (p.superseded ? "S" : "") : "")));
   const sel = window.getSelection();
   const selectionInChat =
     sel && !sel.isCollapsed && scrollEl.contains(sel.anchorNode) && scrollEl.contains(sel.focusNode);
@@ -1663,7 +1680,8 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       continue;
     }
     const el = document.createElement("div");
-    el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role;
+    const handoffLabel = block.role === "user" ? handoffLabelFor(text) : null;
+    el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role + (handoffLabel ? " chat-bubble-handoff" : "");
     // A message too long to paste is handed to the CLI as a file reference,
     // which is a transport detail - but the transcript then shows that
     // reference instead of what Iddo wrote, so scrolling back showed a path
@@ -1671,7 +1689,9 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     // cache, before anything is appended; if it is not cached yet (a message
     // from an earlier run of the app) fetch it, which re-renders when it
     // lands. Agent and user messages render as Markdown; status lines stay plain.
-    if (block.role === "user" && renderLongMessageInto(el, text)) {
+    if (handoffLabel) {
+      el.textContent = handoffLabel;
+    } else if (block.role === "user" && renderLongMessageInto(el, text)) {
       // drawn from the cache
     } else {
       renderRichText(el, text, { markdown: block.role !== "status" });
@@ -1703,7 +1723,11 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     // path it travelled as. This bubble is on screen from the moment Send is
     // pressed until the transcript catches up, which with a busy agent is the
     // whole time he is looking at it.
-    if (!renderLongMessageInto(el, pending.text)) renderRichText(el, pending.text, { markdown: true });
+    const pendingHandoffLabel = handoffLabelFor(pending.text);
+    if (pendingHandoffLabel) {
+      el.classList.add("chat-bubble-handoff");
+      el.textContent = pendingHandoffLabel;
+    } else if (!renderLongMessageInto(el, pending.text)) renderRichText(el, pending.text, { markdown: true });
     if (pending.failed) {
       // See rebuildChatView()'s pendingSent-filtering comment: this never
       // reached the agent's transcript at all. v1.27.1 auto-requeued it;
@@ -1717,7 +1741,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       // rule now has agents ask before acting on a repeat, but the warning
       // should not be pushing Iddo into creating one in the first place.
       warn.textContent = pending.superseded
-        ? "⚠ Not delivered - a later message reached the agent but this one did not"
+        ? "⚠ Not confirmed - a later message reached the agent but this one has not appeared in the conversation"
         : pending.waitedOnBusyAgent
         ? "⚠ Not confirmed - the agent was busy the whole time, so this may still be queued"
         : "⚠ Not confirmed - check the conversation before resending";
@@ -1767,6 +1791,8 @@ function normalizeForMatch(s) {
 // exists - a safety net against a pending bubble that never finds a
 // matching transcript entry and would otherwise pulse "sending" forever.
 const PENDING_SENT_TIMEOUT_MS = 45000;
+// How long a later message must be on record, with this one still unmatched, before 'superseded'.
+const SUPERSEDED_GRACE_MS = 20000;
 // How long an agent's transcript must go WITHOUT being written to before an
 // unmatched message is treated as lost. Long agentic runs write a tool_result
 // every few seconds; a genuinely dropped message sits there while the
@@ -1901,9 +1927,16 @@ async function rebuildChatView(agentPath, opts = {}) {
     // sent that is not this one means this one is not coming.
     if (!pending.failed) {
       const sentAt = pending.sentAt || pending.addedAt;
-      const supersededBy = blocks.some(
-        (b) => b.role === "user" && b.timestamp && new Date(b.timestamp).getTime() > sentAt + 2000
-      );
+      // 2026-10-02: a later message must have been on record for SUPERSEDED_GRACE_MS
+      // while this one still did not appear. Without the grace, two quick follow-ups
+      // whose transcript writes land out of order, or a queued message that dequeues
+      // while the first is still genuinely in flight, were declared "not delivered"
+      // within seconds - the false alarm that pushes a resend and makes a duplicate.
+      const laterTimes = blocks
+        .filter((b) => b.role === "user" && b.timestamp)
+        .map((b) => new Date(b.timestamp).getTime())
+        .filter((t) => t > sentAt + 2000);
+      const supersededBy = laterTimes.length > 0 && now - Math.min(...laterTimes) > SUPERSEDED_GRACE_MS;
       if (supersededBy) {
         pending.failed = true;
         pending.superseded = true;
@@ -2107,6 +2140,17 @@ const IDLE_TIMEOUT_MS = 900;
 // so the approximation is never silently hidden.
 const ASSUMED_CONTEXT_WINDOW = 200000;
 
+// "claude-sonnet-5-5" -> "Sonnet 5.5", "claude-haiku-4-5-20251001" -> "Haiku 4.5",
+// "claude-3-5-sonnet-20241022" -> "Sonnet 3.5". Unknown shapes fall back to the raw id.
+function prettyModelName(id) {
+  if (!id) return "";
+  const parts = String(id).replace(/\[.*\]$/, "").replace(/^claude-/, "").replace(/-\d{8}$/, "").split("-");
+  const names = parts.filter((p) => /^[a-z]+$/.test(p));
+  const nums = parts.filter((p) => /^\d{1,2}$/.test(p));
+  if (names.length !== 1 || !nums.length) return String(id);
+  return names[0][0].toUpperCase() + names[0].slice(1) + " " + nums.join(".");
+}
+
 async function refreshContextUsage(agentPath) {
   let usage = await window.api.getContextUsage(agentPath);
   if (agentPath !== activeAgentPath) return; // user may have switched agents while this was in flight
@@ -2129,6 +2173,13 @@ async function refreshContextUsage(agentPath) {
     else if (pct >= 70) contextUsageEl.classList.add("warning");
   } else {
     contextUsageEl.classList.add("hidden");
+  }
+  if (usage && usage.model) {
+    modelBadgeEl.textContent = prettyModelName(usage.model);
+    modelBadgeEl.title = "The model this agent used for its most recent reply (" + usage.model + "). Agents can switch models, so this follows the latest turn.";
+    modelBadgeEl.classList.remove("hidden");
+  } else {
+    modelBadgeEl.classList.add("hidden");
   }
 
   const session = terminals.get(agentPath);
@@ -4576,7 +4627,7 @@ resetSessionBtn.addEventListener("click", async () => {
 // Instead: stop the bg process and dispatch a fresh one (the same switch-conversation path as
 // the Chats panel's "+ New chat"): a new conversation with a clean process, old one stays in
 // History/Chats. The caller (guards.js) then delivers its first message and VERIFIES it landed.
-async function performSessionReset(agentPath) {
+async function performSessionReset(agentPath, opts = {}) {
   if (switchingConversation) throw new Error("another conversation switch is already in progress");
   switchingConversation = true;
   const isActive = activeAgentPath === agentPath;
@@ -4593,7 +4644,7 @@ async function performSessionReset(agentPath) {
       Date.now() - tickStartedAt > RESET_SESSION_SLOW_HINT_MS ? `Resetting… ${elapsedSec}s (longer than usual)` : `Resetting… ${elapsedSec}s`;
   }, 100);
   try {
-    const result = await window.api.switchConversation(agentPath, { newConversation: true });
+    const result = await window.api.switchConversation(agentPath, { newConversation: true, initialPrompt: opts.initialPrompt });
     if (result && result.agentId) pendingKnownAgentIdByPath.set(agentPath, result.agentId);
     // Same teardown the Chats panel uses: drop the cached terminal so the next
     // showTerminalFor() builds a fresh one and attaches to the new bg process.

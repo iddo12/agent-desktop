@@ -16,6 +16,7 @@ const {
   getLiveTranscriptBlocks,
   getSessionActivity,
   getLatestTranscriptMtimeMs,
+  getLatestTranscriptSizeBytes,
   getHaltInfo,
   listConversations,
   setConversationTitle,
@@ -1726,6 +1727,22 @@ async function registerRemoteControl(proc) {
 // can itself contain characters a CSI-only strip would misparse) recovers
 // clean, valid JSON every time. Centralized here (not at each call site)
 // so every caller - present and future - gets clean text automatically.
+// 2026-10-02: is a Claude Code permission dialog ("Do you want to proceed?" ... "Esc to cancel")
+// the last thing on this agent's screen? Read from the terminal data main already receives, so no
+// extra process or polling. Only known for agents with an attached session (a tab opened this run).
+// Used for the red "blocked" sidebar badge and by the forced-checkpoint guard's reasoning.
+const DIALOG_RE = /Do you want to proceed\?[\s\S]*Esc to cancel/;
+const dialogTails = new Map(); // agentPath -> last ~1500 printable chars
+function trackDialog(agentPath, data) {
+  const tail = ((dialogTails.get(agentPath) || "") + stripTerminalCodes(String(data))).slice(-1500);
+  dialogTails.set(agentPath, tail);
+}
+function dialogOpenFor(agentPath) {
+  if (!ptySessions.get(agentPath) || !ptySessions.get(agentPath).proc) return false;
+  const tail = dialogTails.get(agentPath) || "";
+  return DIALOG_RE.test(tail.slice(-900));
+}
+
 function stripTerminalCodes(s) {
   return s
     .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "") // OSC (window title, etc.)
@@ -1918,16 +1935,56 @@ function stopClaudeAgent(shell, agentId, spawnEnv, opts = {}) {
   });
 }
 
-async function listBackgroundAgents(shell, spawnEnv) {
-  try {
-    const output = await runClaudeCommand(shell, ["agents", "--json", "--all"], { env: spawnEnv, timeoutMs: CLAUDE_CLI_TIMEOUT_MS });
-    return JSON.parse(output);
-  } catch (e) {
-    // A timeout means "unknown", not "none alive": returning [] here would
-    // make callers dispatch a duplicate of an agent that may be running.
-    if (e.timedOut) throw e;
-    return [];
+// v1.61.9: read the agent list through plain pipes, NOT a pty. Root cause of
+// the 2026-09-29 dispatch storm: this used to run `claude agents --json --all`
+// inside a winpty terminal, which hands back a repainted SCREEN (cursor moves,
+// line erases, scrolled rows), not the JSON text - and the bigger the list grew
+// (110 KB by then) the more scrambled it came back. A scrambled read parsed as
+// "nobody alive", the sweep relaunched every agent, the list grew, the next read
+// was worse. Pipes give the exact bytes. Unknown (error/timeout/garbage) is
+// thrown, never returned as [] ("none alive").
+const AGENT_LIST_TTL_MS = 8 * 1000; // one sweep asks ~20 times; one real listing is enough
+let agentListCache = { at: 0, agents: null, inflight: null };
+function listBackgroundAgents(shell, spawnEnv, opts = {}) {
+  if (!opts.fresh) {
+    if (agentListCache.agents && Date.now() - agentListCache.at < AGENT_LIST_TTL_MS) return Promise.resolve(agentListCache.agents);
+    if (agentListCache.inflight) return agentListCache.inflight;
   }
+  const run = new Promise((resolve, reject) => {
+    const viaCmd = /[.](cmd|bat)$/i.test(shell);
+    const file = viaCmd ? process.env.ComSpec || "cmd.exe" : shell;
+    const args = viaCmd ? ["/d", "/s", "/c", `"${shell}" agents --json --all`] : ["agents", "--json", "--all"];
+    execFile(
+      file,
+      args,
+      { env: spawnEnv, timeout: CLAUDE_CLI_TIMEOUT_MS, windowsHide: true, maxBuffer: 256 * 1024 * 1024, windowsVerbatimArguments: viaCmd },
+      (err, stdout) => {
+        if (err) {
+          if (err.killed) err.timedOut = true;
+          return reject(err);
+        }
+        try {
+          const text = String(stdout);
+          const start = text.indexOf("[");
+          const end = text.lastIndexOf("]");
+          const parsed = JSON.parse(start >= 0 && end > start ? text.slice(start, end + 1) : text);
+          if (!Array.isArray(parsed)) throw new Error("claude agents --json did not return a list");
+          agentCacheSet(parsed);
+          resolve(parsed);
+        } catch (e) {
+          reject(e);
+        }
+      }
+    );
+  });
+  agentListCache.inflight = run;
+  const clear = () => { if (agentListCache.inflight === run) agentListCache.inflight = null; };
+  run.then(clear, clear);
+  return run;
+}
+function agentCacheSet(agents) {
+  agentListCache.at = Date.now();
+  agentListCache.agents = agents;
 }
 
 // A background agent still has a "pid" field for as long as its OS process
@@ -1935,8 +1992,8 @@ async function listBackgroundAgents(shell, spawnEnv) {
 // still-running states between turns - only stopped/failed entries drop the
 // pid field). Checking for pid presence is more robust than enumerating
 // state strings, which Anthropic could add more of later.
-async function findAliveBackgroundAgent(shell, spawnEnv, sessionCwd) {
-  const agents = await listBackgroundAgents(shell, spawnEnv);
+async function findAliveBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
+  const agents = await listBackgroundAgents(shell, spawnEnv, opts);
   const target = path.resolve(sessionCwd);
   return agents.find((a) => a.kind === "background" && a.pid && path.resolve(a.cwd || "") === target);
 }
@@ -1978,6 +2035,10 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
     args = ["--bg", "--resume", opts.resumeSessionId];
   } else if (opts.forceFresh) {
     args = ["--bg"];
+    // v1.62.0: the fresh session can be started WITH its first message (verified: `claude --bg "<prompt>"`
+    // processes the prompt as the first turn with nothing attached). Used by the handoff flow so the
+    // resume message does not wait for Iddo to open the agent's tab. Single line, no double quotes.
+    if (opts.initialPrompt) args.push(String(opts.initialPrompt).replace(/\s*[\r\n]+\s*/g, " ").replace(/"/g, "'"));
   } else {
     args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
   }
@@ -2181,6 +2242,19 @@ async function stopEmptyDuplicateAgents(shell, spawnEnv, agentsToCheck) {
 }
 
 const ENSURE_AGENTS_ALIVE_INTERVAL_MS = 15 * 60 * 1000;
+const SWEEP_MAX_DISPATCHES = 4; // a healthy sweep relaunches 0-2 agents; more means the liveness read is wrong
+// OS-level count of Claude Code CLI processes (excludes the Claude Desktop app,
+// which is also named Claude.exe). null = could not measure: fail-open, the per-sweep dispatch cap still applies.
+function countCliClaudeProcesses() {
+  return new Promise((resolve) => {
+    if (process.platform !== "win32") return resolve(null);
+    const ps = "@(Get-CimInstance Win32_Process | Where-Object { $_.Name -ieq 'claude.exe' -and $_.ExecutablePath -notmatch 'WindowsApps' }).Count";
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true, timeout: 20000 }, (err, out) => {
+      const n = parseInt(String(out || "").trim(), 10);
+      resolve(err || Number.isNaN(n) ? null : n);
+    });
+  });
+}
 const ENSURE_AGENTS_ALIVE_STAGGER_MS = 2000; // don't launch every configured agent's CLI process in the same instant
 // `progress` (optional) is the startup countdown's hook - see startupProgress.
 // Returns { measured: true } only when it actually walked the agent list, so
@@ -2210,12 +2284,28 @@ async function ensureAllAgentsBackgrounded(progress) {
     logStuckWatchdog(`stopEmptyDuplicateAgents failed: ${e.message}`)
   );
   if (progress) progress.begin(toCheck.length);
+  // v1.61.9 circuit-breaker: never pile more sessions onto a machine that
+  // already has far too many, and never let one sweep launch more than a few.
+  const osCliCount = await countCliClaudeProcesses();
+  // Healthy fleet measured at ~1 CLI process per agent (~18-20 for ~20 agents);
+  // the storm was 200+. 4x + 10 leaves room for helper/pty-host processes.
+  const osCeiling = toCheck.length * 4 + 10;
+  // The first sweep after app start (has `progress`) may bring up every agent that is down.
+  let dispatchBudget = progress ? toCheck.length : SWEEP_MAX_DISPATCHES;
+  const breakerOpen = osCliCount !== null && osCliCount > osCeiling;
+  if (breakerOpen) {
+    logStuckWatchdog(`ensureAllAgentsBackgrounded: CIRCUIT BREAKER OPEN - ${osCliCount} claude CLI processes running for ${toCheck.length} configured agents (ceiling ${osCeiling}); no dispatching this sweep`);
+    try { fs.appendFileSync(path.join(app.getPath("userData"), "dispatch-breaker.flag"), `${new Date().toISOString()} ${osCliCount}/${osCeiling}
+`); } catch (_) { /* best effort */ }
+  }
   for (let i = 0; i < toCheck.length; i++) {
     const agent = toCheck[i];
     try {
       const sessionCwd = sessionCwdFor(agent.path);
       let alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
-      if (!alive && dispatchedRecently(sessionCwd)) {
+      if (!alive && (breakerOpen || dispatchBudget <= 0)) {
+        logStuckWatchdog(`ensureAllAgentsBackgrounded: ${agent.folderName} looks not running but ${breakerOpen ? "breaker is open" : "this sweep's dispatch cap (" + SWEEP_MAX_DISPATCHES + ") is used up"} - NOT dispatching`);
+      } else if (!alive && dispatchedRecently(sessionCwd)) {
         // v1.54.4: something else (a reset, a chat open, a resume) launched
         // this agent moments ago and `claude agents` doesn't list it yet.
         // Launching again here is exactly how the 09-25 duplicate happened.
@@ -2224,9 +2314,10 @@ async function ensureAllAgentsBackgrounded(progress) {
         // An untrusted folder rejects here within a second or two (the trust
         // prompt is caught as it is drawn), is logged by the catch below and
         // still counts as processed for the startup countdown.
+        dispatchBudget--;
         const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
         logStuckWatchdog(`ensureAllAgentsBackgrounded: dispatched ${agent.folderName} -> ${id}`);
-        alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd); // re-fetch for its full sessionId, below
+        alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd, { fresh: true }); // re-fetch for its full sessionId, below
       } else {
         clearAgentUntrusted(sessionCwd); // running now, e.g. Iddo started it by hand
       }
@@ -2798,8 +2889,15 @@ async function checkForStuckTurns() {
       continue;
     }
 
+    // 2026-10-02: a huge session needs longer to answer after a (re)start - loading a 16 MB /
+    // 700K-token conversation and making the first API call can itself take minutes with no
+    // transcript growth. At a flat 3 min the watchdog killed Trade Show every ~4-6 min
+    // (05:54-06:19 UTC, recoveries #2-#4 repeating), each restart re-reading the whole session,
+    // so the wedge it was curing could be the loop it created. +1 min per 4 MB, capped at 10 min.
+    const sizeBytes = getLatestTranscriptSizeBytes(session.sessionCwd) || 0;
+    const thresholdMs = Math.min(10 * 60 * 1000, STUCK_TURN_THRESHOLD_MS + Math.floor(sizeBytes / (4 * 1024 * 1024)) * 60 * 1000);
     const stuckForMs = Date.now() - session.stuckWatch.sinceTs;
-    if (stuckForMs < STUCK_TURN_THRESHOLD_MS) continue;
+    if (stuckForMs < thresholdMs) continue;
 
     const now = Date.now();
     let tracking = autoRecoveryTracking.get(agentPath);
@@ -3414,6 +3512,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("terminal-data", { agentPath, data });
     }
+    try { trackDialog(agentPath, data); } catch (e) { /* best effort */ }
     if (pendingInput && pendingInput.length) {
       clearTimeout(flushIdleTimer);
       flushIdleTimer = setTimeout(flushPendingInput, FLUSH_IDLE_MS);
@@ -3526,7 +3625,7 @@ ipcMain.handle("get-transcript-quiet-ms", (event, { agentPath }) => {
   }
 });
 // Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
-ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor));
+ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor, dialogOpenFor));
 // ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
 // AGENTS_ROOT: in the sandbox the agents are fixtures but the report files are
 // real, and they are only ever read here.
@@ -3690,7 +3789,7 @@ ipcMain.handle("rename-conversation", (event, { agentPath, sessionId, title }) =
 // dispatch (`--bg --resume <id>` or `--bg` with no --continue) can change
 // that. Tear down the attach pty, stop the bg daemon, dispatch a new one;
 // the renderer then re-attaches through its normal start-terminal path.
-ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId, newConversation }) => {
+ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId, newConversation, initialPrompt }) => {
   const sessionCwd = sessionCwdFor(agentPath);
   // Drop the ptySessions entry BEFORE killing the pty: proc.onExit ->
   // handlePtyExit checks `if (!session) return` first, so removing it now
@@ -3712,7 +3811,7 @@ ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId
   await stopBackgroundAgentForCwd(sessionCwd);
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
-  const opts = newConversation ? { forceFresh: true } : { resumeSessionId };
+  const opts = newConversation ? { forceFresh: true, initialPrompt } : { resumeSessionId };
   const newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
   return { ok: true, agentId: newId };
 });

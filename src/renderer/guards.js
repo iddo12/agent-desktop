@@ -58,6 +58,75 @@
   const AUTO_HANDOFF_CHECK_MS = 10000;
   const autoHandedOff = new Set();
 
+  // 2026-10-02: FORCED CHECKPOINT - the second half of Iddo's design (09-29: "if it doesn't stop
+  // for a long time and keeps working... you do need some way of stopping it"). The idle-only
+  // check above can never fire for an agent whose work is one long linear turn: the Video
+  // Editing Agent went 68K -> 249K tokens in 21 minutes, mid-turn the whole way, and was never
+  // idle once. So: over AUTO_HANDOFF_TOKENS and working continuously for FORCE_AFTER_MS, press
+  // Esc (interrupt) when - and only when - the transcript shows it is actively writing, then the
+  // normal idle path hands it off and resumes it from the handoff file.
+  //   - NEVER interrupts a quiet transcript: a turn that has gone quiet is usually sitting on a
+  //     permission prompt, and Esc there would answer "No" on Iddo's behalf. It shows a banner
+  //     instead.
+  //   - Same fleet-wide and once-per-agent guards as the idle path (it only interrupts; the
+  //     handoff itself still goes through checkAutoHandoff's normal conditions).
+  //   - ON by default since 2026-10-02 (Iddo said yes); the four review findings are fixed below. Off switch: localStorage.setItem("forcedCheckpointOff","1").
+  const FORCE_AFTER_MS = 10 * 60 * 1000;     // continuous working time before a forced checkpoint
+  const FORCE_ACTIVE_QUIET_MS = 15000;       // transcript must have grown within this to count as "actively writing"
+  const FORCE_BLOCKED_QUIET_MS = 90000;      // quiet this long while "working" = waiting on something, tell Iddo
+  const forcedInterrupts = new Map();        // agentPath -> time of the Esc we sent
+  const blockedNoticeAt = new Map();         // agentPath -> last time we showed the waiting banner
+
+  // 2026-10-02: ON by default (Iddo said yes after Software Engineering sat at 683K tokens, never idle,
+  // so the idle-only path never fired). The four review findings are fixed in maybeForceCheckpoint.
+  // Kill switch: localStorage.setItem("forcedCheckpointOff","1").
+  function forcedCheckpointEnabled() {
+    try { return localStorage.getItem("forcedCheckpointOff") !== "1"; } catch (e) { return true; }
+  }
+  const forcePolls = new Map();               // agentPath -> timestamps of qualifying polls
+  const FORCE_CONFIRM_POLLS = 2;              // qualifying polls needed ...
+  const FORCE_CONFIRM_WINDOW_MS = 60 * 1000;  // ... within this window
+  const FORCE_REPEAT_GUARD_MS = 20 * 60 * 1000; // never Esc the same agent again within this long
+
+  async function maybeForceCheckpoint(a, act, t) {
+    if (!forcedCheckpointEnabled()) return false;
+    if (!act || !act.working || act.sinceMs < FORCE_AFTER_MS) { forcePolls.delete(a.path); return false; }
+    // Finding 2: one Esc per agent per FORCE_REPEAT_GUARD_MS (it could repeat every tick).
+    const prev = forcedInterrupts.get(a.path);
+    if (prev && Date.now() - prev < FORCE_REPEAT_GUARD_MS) return false;
+    const session = terminals.get(a.path);
+    if (!session || !session.started) return false;
+    const quiet = await window.api.getTranscriptQuietMs(a.path).catch(() => null);
+    if (quiet == null) return false;
+    if (quiet >= FORCE_BLOCKED_QUIET_MS) {
+      forcePolls.delete(a.path);
+      const last = blockedNoticeAt.get(a.path) || 0;
+      if (Date.now() - last > 30 * 60 * 1000) {
+        blockedNoticeAt.set(a.path, Date.now());
+        show(ctxBanner, "guard-amber",
+          a.displayName + " is at " + Math.round(t / 1000) + "K tokens and has been silent for " + Math.round(quiet / 60000) +
+          " min mid-turn - it is probably waiting on a permission prompt, so it was NOT interrupted. Open its tab and answer the prompt.",
+          [{ label: "Dismiss", onClick: () => render() }]);
+      }
+      return false;
+    }
+    if (quiet > FORCE_ACTIVE_QUIET_MS) { forcePolls.delete(a.path); return false; }   // not clearly active, not clearly stuck - wait
+    // Finding 1: a fresh transcript right after an assistant tool_use can be a permission prompt that just
+    // appeared (Esc would answer "No" for Iddo). Only count a poll when the newest entry is NOT a pending
+    // tool_use (model generating, or a tool result just came back), and require two such polls close together.
+    if (act.pendingToolUse) return false;
+    const now = Date.now();
+    const polls = (forcePolls.get(a.path) || []).filter((x) => now - x < FORCE_CONFIRM_WINDOW_MS);
+    polls.push(now);
+    forcePolls.set(a.path, polls);
+    if (polls.length < FORCE_CONFIRM_POLLS) return false;
+    forcePolls.delete(a.path);
+    forcedInterrupts.set(a.path, now);
+    window.api.sendInput(a.path, "");              // Esc: interrupt the running turn
+    console.log("[guards] forced checkpoint: interrupted", a.displayName, "at", t, "tokens after", Math.round(act.sinceMs / 60000), "min of continuous work");
+    return true;
+  }
+
   function autoHandoffEnabled() {
     try {
       return localStorage.getItem("autoHandoffOff") !== "1";
@@ -95,11 +164,16 @@
         // until Agent Desktop restarted. That is why some agents handed off on
         // their own and others sat at 200K+. A handoff that failed leaves
         // the context high, so this cannot loop.
-        if (t && t < CONTEXT_WARN_TOKENS) autoHandedOff.delete(a.path);
+        if (t && t < CONTEXT_WARN_TOKENS) { autoHandedOff.delete(a.path); forcedInterrupts.delete(a.path); }
         if (autoHandedOff.has(a.path)) continue;
         if (t < AUTO_HANDOFF_TOKENS) continue;
         const act = await window.api.getSessionActivity(a.path).catch(() => null);
-        if (!act || act.working) continue;        // mid-turn: leave it alone
+        if (act && act.working) {
+          // mid-turn: leave it alone, unless it has been working non-stop long enough to need a forced checkpoint
+          await maybeForceCheckpoint(a, act, t);   // finding 4: an Esc for one agent must not starve the others' checks
+          continue;
+        }
+        if (!act) continue;
         // 2026-09-29: an agent whose tab was never opened this Agent Desktop
         // run has no live pty attached (terminals only gets an entry via
         // selectAgent -> showTerminalFor, on-demand when a tab is clicked -
@@ -190,6 +264,9 @@
     const file = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";
     return (
       "[Agent Desktop - planned context reset] Iddo approved resetting this session to cut usage. " +
+      (forcedInterrupts.has(agentPath)
+        ? "Your running turn was interrupted on purpose because the context passed 155K while you were mid-task. In the STATE section say exactly what was in flight and what to verify first (real state of any app or file you were changing: it may be half-applied), then continue it after the reset. "
+        : "") +
       "Before it happens, please do ALL of this now, without starting any new work:\n" +
       "1. Compile a 'lessons for the future' list from this session (gotchas + fixes, preferences/decisions Iddo stated, environment quirks) and save each durable one into your memory files per your memory rules.\n" +
       "2. Update your open-items file (OPEN NOW) so it reflects what is still outstanding.\n" +
@@ -296,8 +373,12 @@
     const arch = await window.api.archiveHandoff(agentPath);
     if (!arch || !arch.ok) throw new Error((arch && arch.error) || "could not archive handoff");
     resetAt.set(agentPath, Date.now());
-    await performSessionReset(agentPath);
-    pendingResume.set(agentPath, { text: resumePrompt(arch.path), path: arch.path, readySince: null, sentAt: null, tries: 0 });
+    // v1.62.0: the resume message rides along as the fresh session's FIRST prompt, so it is delivered
+    // even if Iddo has moved to another agent (before, it waited for the agent's tab to be opened).
+    // tickResume then only VERIFIES it; if it never lands it falls back to the old attach-and-send.
+    const resumeText = resumePrompt(arch.path);
+    await performSessionReset(agentPath, { initialPrompt: resumeText });
+    pendingResume.set(agentPath, { text: resumeText, path: arch.path, readySince: null, sentAt: Date.now(), viaDispatch: true, tries: 1 });
     flow.phase = "resuming";
     render();
   }
@@ -310,7 +391,7 @@
       try {
         const flow = flows.get(ap);
         const s = terminals.get(ap);
-        if (!s || !s.started) {
+        if (!r.viaDispatch && (!s || !s.started)) {
           r.readySince = null;
           continue;
         }
@@ -343,8 +424,9 @@
           } catch (e) {}
           if (working && Date.now() - r.sentAt < RESUME_MAX_WAIT_MS) continue;
           if (r.tries < 3) {
-            r.sentAt = null; // not received - send it again
+            r.sentAt = null; // not received - send it again (by typing, once the tab is attached)
             r.readySince = Date.now();
+            r.viaDispatch = false;
           } else {
             pendingResume.delete(ap);
             if (flow) {

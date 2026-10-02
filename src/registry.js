@@ -99,7 +99,7 @@ function viewablePath(e) {
   return null;
 }
 
-function listRegistry(workspaceRoot) {
+function listRegistryRaw(workspaceRoot) {
   const now = Date.now();
   return loadEntries(workspaceRoot)
     .map((e) => {
@@ -134,11 +134,37 @@ function listRegistry(workspaceRoot) {
         stage: ["idea", "researched", "active"].includes(e.stage) ? e.stage : e.type === "project" ? "active" : "",
         updatedAt: e.updatedAt || e.createdAt || null,
         staleDays: Number.isFinite(confirmed) ? Math.floor((now - confirmed) / 86400000) : null,
+        // Previous versions of this document (registry.py --update --link keeps them).
+        // Only the display bits go to the renderer; opening is by index through main.
+        olderVersions: (Array.isArray(e.olderVersions) ? e.olderVersions : []).map((v) => ({
+          name: path.basename(String(v.link || "")), date: v.replacedAt || null, exists: !!(v.link && (isUrl(v.link) || fs.existsSync(v.link))),
+        })),
+        _pdf: e.pdf || null,
       };
     })
     .map((e) => ({ ...e, stale: e.staleDays != null && e.staleDays > STALE_AFTER_DAYS }))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 }
+
+// A document's web copy (a web link whose `pdf` is another entry's file) is one document,
+// not two: fold it into the file's card as a "Web version" button.
+function normLink(p) { return String(p || "").replace(/\\/g, "/").toLowerCase(); }
+function mergeWebCopies(list) {
+  const byLink = new Map(list.filter((e) => !e.isUrl && e.link).map((e) => [normLink(e.link), e]));
+  const out = [];
+  for (const e of list) {
+    const host = e.isUrl && e._pdf ? byLink.get(normLink(e._pdf)) : null;
+    if (host && host.type === e.type) { host.hasWebCopy = true; continue; }
+    out.push(e);
+  }
+  return out.map(({ _pdf, ...rest }) => rest);
+}
+function webCopyOf(workspaceRoot, host) {
+  const key = normLink(host.link);
+  return loadEntries(workspaceRoot).find((x) => x.id !== host.id && isUrl(x.link) && x.pdf && normLink(x.pdf) === key) || null;
+}
+
+function listRegistry(workspaceRoot) { return mergeWebCopies(listRegistryRaw(workspaceRoot)); }
 
 function findEntry(workspaceRoot, id) {
   return loadEntries(workspaceRoot).find((e) => e.id === id) || null;
@@ -150,6 +176,21 @@ async function registryAction(workspaceRoot, id, action) {
   if (action === "copy") {
     clipboard.writeText(e.link);
     return { ok: true };
+  }
+  if (action === "openWeb") {
+    const w = webCopyOf(workspaceRoot, e);
+    if (!w) return { ok: false, error: "No web version registered for this document." };
+    await shell.openExternal(w.link);
+    return { ok: true };
+  }
+  const olderIdx = /^openOlder:(\d+)$/.exec(String(action));
+  if (olderIdx) {
+    const v = (Array.isArray(e.olderVersions) ? e.olderVersions : [])[Number(olderIdx[1])];
+    if (!v || !v.link) return { ok: false, error: "No such older version." };
+    if (isUrl(v.link)) { await shell.openExternal(v.link); return { ok: true }; }
+    if (!fs.existsSync(v.link)) return { ok: false, error: "That older file is no longer at " + v.link };
+    const err = await shell.openPath(v.link);
+    return err ? { ok: false, error: err } : { ok: true };
   }
   if (action === "view") {
     // In-app viewer: returns a file:// URL for the renderer's viewer frame.

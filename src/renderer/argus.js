@@ -457,6 +457,7 @@
         dLine(host, "Now", a.score.value + (a.score.label ? " · " + a.score.label : ""));
         dLine(host, "Previously", a.score.prev == null ? "no earlier figure"
           : a.score.prev + (a.score.prevDate ? " (" + a.score.prevDate + ")" : ""));
+        if (a.score.note) dText(host, a.score.note);
       }
       if ((a.metrics || []).length) {
         dSection(host, "Every measurement");
@@ -1135,10 +1136,13 @@
       () => openDetail("Security score", agentDetail(sec)));
     if (opt && opt.score) kpi("Maintenance score", opt.score.value, opt.score.prev, "up", opt.score.value < 75, "",
       () => openDetail("Maintenance score", agentDetail(opt)));
-    kpi("Needs you", D.length, null, "none", D.length > 0, "", () => document.getElementById("argus-decisions")?.scrollIntoView({ block: "start" }));
+    const seo = data.agents.find((a) => a.agent === "SEO Agent");
+    if (seo && seo.score) kpi("SEO score", seo.score.value, seo.score.prev, "up", seo.score.value < 75, "",
+      () => openDetail("SEO score", agentDetail(seo)));
+    kpi("Needs you", D.length, data.fleet && data.fleet.needsYouPrev, "none", D.length > 0, "", () => document.getElementById("argus-decisions")?.scrollIntoView({ block: "start" }));
     const u = (data.fleet && data.fleet.usage) || {};
-    kpi("Claude - this week", u.weekPct, null, "none", u.weekPct > 70, "%", () => openDetail("Claude usage", usageDetail(u)));
-    kpi("Claude - 5 hours", u.fiveHourPct, null, "none", u.fiveHourPct > 70, "%", () => openDetail("Claude usage", usageDetail(u)));
+    kpi("Claude - this week", u.weekPct, data.fleet && data.fleet.usagePrev && data.fleet.usagePrev.weekPct, "none", u.weekPct > 70, "%", () => openDetail("Claude usage", usageDetail(u)));
+    kpi("Claude - 5 hours", u.fiveHourPct, data.fleet && data.fleet.usagePrev && data.fleet.usagePrev.fiveHourPct, "none", u.fiveHourPct > 70, "%", () => openDetail("Claude usage", usageDetail(u)));
     const j = (data.fleet && data.fleet.jobs) || {};
     if (j.tasksChecked != null) kpi("Scheduled jobs OK", (j.tasksChecked - j.tasksFailing) + "/" + j.tasksChecked, null, "none", j.tasksFailing > 0, "",
       () => openDetail("Scheduled jobs", jobsDetail(j)));

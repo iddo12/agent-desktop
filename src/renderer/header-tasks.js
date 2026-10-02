@@ -64,7 +64,7 @@
     // and the cache-status debug reading are now what gets sacrificed first.
     const status = document.createElement("div");
     status.className = "xp-status";
-    ["five-hour-usage", "weekly-usage", "context-usage", "monthly-usage", "cache-status"].forEach((id) => {
+    ["five-hour-usage", "weekly-usage", "context-usage", "model-badge", "monthly-usage", "cache-status"].forEach((id) => {
       const el = $(id);
       if (el) status.appendChild(el);
     });
@@ -347,16 +347,48 @@
   // Deliberately NOT by recolouring the existing sidebar dot: that dot means
   // HEALTH (from each agent's own state file), a different question from "is
   // it running right now". Session state gets the avatar ring instead.
+  // 2026-10-02 (UI-UX design v4, Iddo): one bold run-state icon on the avatar
+  // (play = working, pause = open/waiting, stop = not running) plus a needs-you
+  // badge in two severities. RED "!" = blocked: the session is halted and cannot
+  // progress until Iddo acts. ORANGE "..." = pending: a decision is queued but the
+  // agent keeps working. Red wins if both are true. A blocked session never shows
+  // the working icon (it is halted by definition).
+  function needsOf(a) {
+    if (!a) return { kind: null, why: "" };
+    if (a.dialogOpen) return { kind: "blocked", why: "Blocked: waiting on a permission prompt - open its tab and answer it" };
+    const halt = (a.attention || []).find((t) => /^halted/.test(t));
+    if (halt) return { kind: "blocked", why: "Blocked: " + halt };
+    const pend = (a.telegram || []).filter((t) => t.status === "pending");
+    if (pend.length) return { kind: "pending", why: "Pending: " + pend.length + " decision" + (pend.length > 1 ? "s" : "") + " queued - the agent keeps working" };
+    return { kind: null, why: "" };
+  }
+
   function applyAgentStates() {
     if (!overview) return;
     const byFolder = new Map(overview.agents.map((a) => [a.folderName, a]));
     document.querySelectorAll("#agent-list .agent-item").forEach((row) => {
       const a = byFolder.get(row.dataset.folderName);
-      const state = a ? a.state : "idle";
-      if (row.dataset.xpState === state) return;
-      row.dataset.xpState = state;
-      row.classList.remove("xp-working", "xp-ready", "xp-idle");
+      const needs = needsOf(a);
+      let state = a ? a.state : "idle";
+      if (needs.kind === "blocked" && state === "working") state = "ready";
+      const key = state + "|" + needs.kind + "|" + needs.why;
+      if (row.dataset.xpState === key) return;
+      row.dataset.xpState = key;
+      row.classList.remove("xp-working", "xp-ready", "xp-idle", "xp-needs-blocked", "xp-needs-pending");
       row.classList.add("xp-" + state);
+      if (needs.kind) row.classList.add("xp-needs-" + needs.kind);
+      const wrap = row.querySelector(".avatar-wrap");
+      if (!wrap) return;
+      let icon = wrap.querySelector(".xp-state-icon");
+      if (!icon) { icon = document.createElement("span"); wrap.appendChild(icon); }
+      icon.className = "xp-state-icon " + (state === "working" ? "working" : state === "ready" ? "ready" : "off");
+      icon.title = state === "working" ? "Working now" : state === "ready" ? "Open, waiting" : "Not running";
+      let badge = wrap.querySelector(".xp-needs-badge");
+      if (!needs.kind) { if (badge) badge.remove(); return; }
+      if (!badge) { badge = document.createElement("span"); wrap.appendChild(badge); }
+      badge.className = "xp-needs-badge " + needs.kind;
+      badge.textContent = needs.kind === "blocked" ? "!" : "\u2026";
+      badge.title = needs.why;
     });
   }
 
@@ -365,15 +397,21 @@
     if (!list || document.querySelector(".xp-legend")) return;
     const legend = document.createElement("div");
     legend.className = "xp-legend";
-    legend.title = "Avatar ring = session state. The small dot is the agent's own health reading, a separate thing.";
-    [["working", "working now"], ["ready", "open, waiting"], ["idle", "not running"]].forEach(([k, label]) => {
+    legend.title = "Icon on the avatar = session state. The small dot at the right is the agent's own health reading, a separate thing.";
+    const add = (cls, glyph, label) => {
       const item = document.createElement("span");
       const sw = document.createElement("i");
-      sw.className = "xp-sw xp-sw-" + k;
+      sw.className = cls;
+      if (glyph) sw.textContent = glyph;
       item.appendChild(sw);
       item.append(label);
       legend.appendChild(item);
-    });
+    };
+    add("xp-lg xp-lg-off", "", "not running");
+    add("xp-lg xp-lg-ready", "", "open, waiting");
+    add("xp-lg xp-lg-working", "", "working now");
+    add("xp-lg-need blocked", "!", "blocked: can't progress, act now");
+    add("xp-lg-need pending", "\u2026", "pending: queued, still working");
     list.parentNode.insertBefore(legend, list.nextSibling);
   }
 

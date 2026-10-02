@@ -248,3 +248,10 @@ body.library-open #xp-panel { display: none; }
 }
 .library-stage:hover { background: var(--bg-hover); }
 .library-stage.active { background: var(--bg-active); border-color: var(--accent); font-weight: 600; }
+
+/* Older versions of a document: fine print under the card actions */
+.library-older { margin-top: 4px; font-size: 0.7rem; color: var(--text-muted); }
+.library-older summary { cursor: pointer; width: fit-content; }
+.library-older-row { display: block; background: none; border: 0; padding: 2px 0 2px 10px; font-size: 0.7rem; color: var(--text-muted); cursor: pointer; text-align: left; text-decoration: underline dotted; }
+.library-older-row:hover { color: var(--text); }
+.library-older-gone { text-decoration: line-through; cursor: default; }

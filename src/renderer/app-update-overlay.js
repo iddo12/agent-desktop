@@ -249,6 +249,11 @@
     } else if (!st.needsPull) {
       box.appendChild(el("div", "app-update-p", "The new version is already on disk. Only a restart is needed."));
     }
+    // v1.62.0: a version with no "## vX.Y.Z - title" heading in CLAUDE.md used to show nothing at all,
+    // so a missing entry went unnoticed. Say so out loud (tools/check-changelog.js + the pre-commit hook prevent it).
+    if (!(st.changelog && st.changelog.length) && st.available) {
+      box.appendChild(el("div", "app-update-p", "(No release notes were written for this version.)"));
+    }
 
     if (blocked) {
       box.appendChild(el("div", "app-update-h app-update-bad", "Can't update yet"));

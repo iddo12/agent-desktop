@@ -1095,6 +1095,16 @@ html, body {
   padding: 10px 14px;
   border-radius: 14px 14px 4px 14px;
 }
+
+/* v1.62.0: the handoff instruction is drawn as one short coloured label, not the long text */
+.chat-bubble-handoff {
+  background: #d9c8f0;
+  color: #2a1a4a;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 999px;
+  max-width: none;
+}
 /* A pasted image is rendered as an actual inline image rather than the raw
    quoted file path Claude Code's own transcript embeds it as (see
    renderTextWithImages() in renderer.js) - sized to be genuinely visible,
