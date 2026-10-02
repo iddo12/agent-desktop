@@ -388,13 +388,14 @@
   function deliverHandoffPrompt(agentPath, text, flow) {
     let ptyTries = 0;
     const nm = agentName(agentPath);
+    if (flow) flow.deliveryPending = (flow.deliveryPending || 0) + 1; // nudges wait for this (see advanceFlow)
     return window.HandoffDelivery.deliver(text, {
       channelSend: (t) => window.api.channelSend(agentPath, t),
       // first pty attempt respects the busy-queue; a retry must type directly or it would queue behind itself
       ptySend: (t) => { if (ptyTries++ === 0) queueOrSend(agentPath, t); else submitToAgent(agentPath, t); },
       transcriptHas: (m) => window.api.transcriptHas(agentPath, m),
       log: (line) => window.autoHandoffLog(nm + ": " + line),
-    }).then((r) => {
+    }).finally(() => { if (flow) flow.deliveryPending = Math.max(0, (flow.deliveryPending || 1) - 1); }).then((r) => {
       if (flow) flow.delivery = r;
       if (!r.delivered) window.autoHandoffLog("handoff prompt for " + nm + " NOT confirmed in transcript after " + r.attempts + " attempts");
       return r;
@@ -462,7 +463,7 @@
       // flow sat until the 12-minute timeout). If it has been idle and the file is still not fresh,
       // tell it plainly, at most twice, instead of waiting out the clock.
       flow.idleStalePolls = idle && !fresh ? (flow.idleStalePolls || 0) + 1 : 0;
-      if (flow.idleStalePolls >= 3 && (flow.nudges || 0) < 2) {
+      if (flow.idleStalePolls >= 3 && (flow.nudges || 0) < 2 && !flow.deliveryPending) {
         flow.nudges = (flow.nudges || 0) + 1;
         flow.idleStalePolls = 0;
         const fileP = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";
