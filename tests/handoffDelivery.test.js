@@ -57,10 +57,48 @@ test("agentChannel.resolveAddress picks the live session for the agent folder", 
   fs.writeFileSync(path.join(d, "3.key"), "secret");
   assert.strictEqual(channel.resolveAddress(agent, d).socketPath, "PIPE-X");
   assert.strictEqual(channel.resolveAddress(path.join(d, "other"), d), null);
+  channel.setTransport(null);
   assert.strictEqual((await channel.send(agent, "t", d)).ok, false); // no transport registered
   channel.setTransport(async (sp, text) => ({ ok: sp === "PIPE-X" && text === "t" }));
   assert.strictEqual((await channel.send(agent, "t", d)).ok, true);
   channel.setTransport(null);
+});
+
+const MULTI = "hello" + String.fromCharCode(10) + "world";
+test("file-drop transport: exact shape, atomic (no partial/tmp left), env override, default dir", async () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "relay-"));
+  const dir = path.join(d, "nested", "requests"); // created if missing
+  const old = process.env.AGENT_DESKTOP_RELAY_DIR;
+  process.env.AGENT_DESKTOP_RELAY_DIR = dir;
+  try {
+    assert.strictEqual(channel.relayDir(), dir);
+    const r = channel.fileDropTransport("PIPE-Z", MULTI, { agent: "SEO Agent" });
+    assert.strictEqual(r.ok, true); assert.strictEqual(r.queued, true);
+    const files = fs.readdirSync(dir);
+    assert.deepStrictEqual(files, [r.id + ".json"]); // renamed into place, no .tmp left
+    const j = JSON.parse(fs.readFileSync(path.join(dir, files[0]), "utf-8"));
+    assert.deepStrictEqual(Object.keys(j).sort(), ["agent", "createdAt", "id", "text", "to"]);
+    assert.strictEqual(j.id, r.id); assert.strictEqual(j.agent, "SEO Agent");
+    assert.strictEqual(j.to, "uds:PIPE-Z"); assert.strictEqual(j.text, MULTI);
+    assert.ok(!isNaN(Date.parse(j.createdAt)));
+    const r2 = channel.fileDropTransport("PIPE-Z", "again", {});
+    assert.notStrictEqual(r2.id, r.id); assert.strictEqual(fs.readdirSync(dir).length, 2);
+    // the reader's glob (*.json) must never match an in-progress temp name
+    assert.ok(fs.readdirSync(dir).every((f) => f.endsWith(".json") && !f.startsWith(".")));
+    // through send(): default transport, agent name = folder basename
+    const sd = fs.mkdtempSync(path.join(os.tmpdir(), "sess-"));
+    const agent = path.join(sd, "Agent Q");
+    fs.writeFileSync(path.join(sd, "1.json"), JSON.stringify({ pid: process.pid, cwd: agent, messagingSocketPath: "PIPE-Q", updatedAt: 1 }));
+    channel.setTransport(channel.fileDropTransport);
+    const s = await channel.send(agent, "via send", sd);
+    assert.deepStrictEqual([s.ok, s.queued], [true, true]);
+    const got = fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"))).find((x) => x.text === "via send");
+    assert.deepStrictEqual([got.agent, got.to], ["Agent Q", "uds:PIPE-Q"]);
+  } finally {
+    if (old === undefined) delete process.env.AGENT_DESKTOP_RELAY_DIR; else process.env.AGENT_DESKTOP_RELAY_DIR = old;
+    channel.setTransport(channel.fileDropTransport);
+  }
+  assert.strictEqual(channel.relayDir(), "E:/Claude work/Security/handoff_relay/requests");
 });
 
 (async () => {

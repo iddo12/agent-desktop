@@ -37,7 +37,28 @@ function resolveAddress(agentPath, sessionsDir) {
 // authenticated (per-session peer token). It is intentionally NOT reimplemented here from guesswork:
 // a transport is injected with setTransport(fn(socketPath, text) -> Promise<{ok, reason?}>).
 // Until one is registered, send() reports unavailable and callers fall back to pty typing.
-let transport = null;
+// v1.63.5: the default transport is a file drop. It never talks to the pipe; it writes one JSON
+// request per file into the relay directory, and a separate Claude session (the "relay") delivers it
+// with SendMessage and moves it to ..\done\ or ..ailed\. Delivery is still judged by the
+// marker-in-transcript check in handoffDelivery.js, so {ok:true, queued:true} only means "written".
+const DEFAULT_RELAY_DIR = "E:/Claude work/Security/handoff_relay/requests";
+function relayDir() { return process.env.AGENT_DESKTOP_RELAY_DIR || DEFAULT_RELAY_DIR; }
+
+let seq = 0;
+function fileDropTransport(socketPath, text, meta) {
+  const dir = relayDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const createdAt = new Date().toISOString();
+  const id = createdAt.replace(/[-:.TZ]/g, "") + "-" + process.pid + "-" + (++seq) + "-" + Math.random().toString(36).slice(2, 8);
+  const agent = (meta && meta.agent) || "";
+  const req = { id, agent, to: "uds:" + socketPath, text: String(text), createdAt };
+  const tmp = path.join(dir, "." + id + ".tmp");   // not *.json, so the reader never sees a partial file
+  fs.writeFileSync(tmp, JSON.stringify(req), "utf-8");
+  fs.renameSync(tmp, path.join(dir, id + ".json"));
+  return { ok: true, queued: true, id };
+}
+
+let transport = fileDropTransport;
 function setTransport(fn) { transport = typeof fn === "function" ? fn : null; }
 
 async function send(agentPath, text, sessionsDir) {
@@ -45,11 +66,11 @@ async function send(agentPath, text, sessionsDir) {
   if (!addr) return { ok: false, reason: "no live session address" };
   if (!transport) return { ok: false, reason: "no channel transport registered" };
   try {
-    const r = await transport(addr.socketPath, text);
-    return r && r.ok ? { ok: true } : { ok: false, reason: (r && r.reason) || "transport rejected" };
+    const r = await transport(addr.socketPath, text, { agent: path.basename(path.resolve(agentPath)) });
+    return r && r.ok ? { ok: true, queued: !!r.queued } : { ok: false, reason: (r && r.reason) || "transport rejected" };
   } catch (e) {
     return { ok: false, reason: e && e.message };
   }
 }
 
-module.exports = { resolveAddress, setTransport, send };
+module.exports = { resolveAddress, setTransport, send, fileDropTransport, relayDir };
