@@ -888,6 +888,9 @@ ipcMain.on("startup-dismiss", () => {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
+    // v1.63.8 (test mode only): the sandbox window must never take focus from the program Iddo is using.
+    // Created hidden and shown with showInactive() on ready-to-show. The live window is unchanged.
+    ...(testMode.TEST_MODE ? { show: false } : {}),
     width: 1280,
     height: 820,
     minWidth: 900,
@@ -919,6 +922,7 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  if (testMode.TEST_MODE) mainWindow.once("ready-to-show", () => { try { mainWindow.showInactive(); } catch (e) {} });
   // index.html carries its own <title>, and Electron lets a page's title win
   // over the BrowserWindow `title` option - which is why the first sandbox
   // launch still read "Agent Desktop" despite setting it above. Refusing the
@@ -1034,6 +1038,7 @@ if (!gotSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
+    if (testMode.TEST_MODE) return; // sandbox: a second launch must not pull its window to the front (v1.63.8)
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
