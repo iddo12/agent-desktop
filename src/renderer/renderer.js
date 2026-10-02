@@ -695,11 +695,11 @@ function sendResizeIfChanged(session, agentPath, cols, rows) {
   window.api.resizeTerminal(agentPath, cols, rows);
 }
 
-function showTerminalFor(agent) {
-  terminalContainerEl.innerHTML = "";
-
+// Creates (once) the renderer-side session object + xterm for an agent without showing it.
+function getOrCreateSession(agent) {
   let session = terminals.get(agent.path);
-  if (!session) {
+  if (session) return session;
+  {
     const term = new Terminal({
       // The terminal stays DARK even though the rest of the app is light -
       // same as VS Code and every other IDE. Claude Code's CLI draws its
@@ -775,17 +775,12 @@ function showTerminalFor(agent) {
       window.api.sendInput(agent.path, data);
     });
   }
+  return session;
+}
 
-  session.term.open(terminalContainerEl);
-
-  // Fitting immediately after open() can measure a zero-size container if the
-  // parent was just unhidden this same tick (display:none -> flex hasn't been
-  // painted yet) - defer to the next animation frame so layout has settled.
-  requestAnimationFrame(() => {
-    session.fitAddon.fit();
-    const { cols, rows } = session.term;
-
-    if (!session.started) {
+// Starts the agent's pty once. Shared by showTerminalFor (tab opened) and attachSessionInBackground.
+function startSessionPty(agent, session, cols, rows) {
+  if (session.started) return;
       session.started = true;
       session.lastSentCols = cols;
       session.lastSentRows = rows;
@@ -807,6 +802,24 @@ function showTerminalFor(agent) {
           session.term.writeln(`\r\n[failed to start session: ${err.message}]`);
           session.started = false;
         });
+}
+
+function showTerminalFor(agent) {
+  terminalContainerEl.innerHTML = "";
+
+  const session = getOrCreateSession(agent);
+
+  session.term.open(terminalContainerEl);
+
+  // Fitting immediately after open() can measure a zero-size container if the
+  // parent was just unhidden this same tick (display:none -> flex hasn't been
+  // painted yet) - defer to the next animation frame so layout has settled.
+  requestAnimationFrame(() => {
+    session.fitAddon.fit();
+    const { cols, rows } = session.term;
+
+    if (!session.started) {
+      startSessionPty(agent, session, cols, rows);
     } else {
       sendResizeIfChanged(session, agent.path, cols, rows);
     }
@@ -822,6 +835,21 @@ function showTerminalFor(agent) {
     // menu/keystroke interactions like the theme picker or y/n prompts).
     chatInputEl.focus();
   });
+}
+
+// 2026-10-03: attach + start an agent's pty WITHOUT touching the visible tab, focus or compose
+// box (auto-handoff used to selectAgent() and flick back, so it had to wait for Iddo to stop
+// typing). Never calls term.open(), so there is no DOM work; the first real tab click opens the
+// xterm and sends the true cols/rows via sendResizeIfChanged. Resolves true once started.
+async function attachSessionInBackground(agent) {
+  const session = getOrCreateSession(agent);
+  if (!session.started) startSessionPty(agent, session, 120, 30);
+  const t0 = Date.now();
+  while (Date.now() - t0 < 20000) {
+    if (session.started && Date.now() - t0 > 4000) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return !!session.started;
 }
 
 function refitActiveTerminal() {

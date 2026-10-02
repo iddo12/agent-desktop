@@ -56,7 +56,40 @@
   // slower independent timer, so a real gap is now unlikely to go unseen for
   // more than a few seconds instead of up to two minutes.
   const AUTO_HANDOFF_CHECK_MS = 10000;
-  const autoHandedOff = new Set();
+  // 2026-10-03: was a once-per-run Set, so a failed/stuck flow was NEVER retried (UI-UX sat at 488K).
+  // Now agentPath -> { at, count }: a retry is allowed after a cool-down (10 min, doubling per
+  // attempt, capped at 1 h) and only if the agent is idle, still over the line and has no live flow.
+  const autoHandedOff = new Map();
+  const RETRY_BASE_MS = 10 * 60 * 1000;
+  const RETRY_MAX_MS = 60 * 60 * 1000;
+  const STALE_FLOW_MS = 45 * 60 * 1000;          // a non-failed flow older than this is wedged (timer lost)
+  const ATTACH_RETRY_MS = 2 * 60 * 1000;
+  const attachFailedAt = new Map();
+  // Test aid only: localStorage.setItem("autoHandoffCooldownMs","20000") shortens the cool-down.
+  function retryCooldownMs(count) {
+    let base = RETRY_BASE_MS, cap = RETRY_MAX_MS;
+    try {
+      const o = parseInt(localStorage.getItem("autoHandoffCooldownMs") || "", 10);
+      if (o > 0) { base = o; cap = o * 6; }
+    } catch (e) {}
+    return Math.min(base * Math.pow(2, Math.max(0, count - 1)), cap);
+  }
+  // Every skip / start / failure of the sweep goes to stuck-turn-watchdog.log (main process), at most
+  // once per agent+reason per 5 min, so "why did X never hand off" is answerable afterwards.
+  const GLOG_EVERY_MS = 5 * 60 * 1000;
+  const glogAt = new Map();
+  function glog(agentName, reason, line) {
+    const key = agentName + "|" + reason;
+    const now = Date.now();
+    if (now - (glogAt.get(key) || 0) < GLOG_EVERY_MS) return;
+    glogAt.set(key, now);
+    window.autoHandoffLog(line);
+  }
+  window.autoHandoffLog = (line) => {              // flow events (start/fail/finish) are not rate-limited
+    try { window.api.logGuard(line); } catch (e) {}
+    console.log("[guards] auto-handoff:", line);
+  };
+  let lastEligibleSig = null;
 
   // 2026-10-02: FORCED CHECKPOINT - the second half of Iddo's design (09-29: "if it doesn't stop
   // for a long time and keeps working... you do need some way of stopping it"). The idle-only
@@ -149,43 +182,39 @@
     return false;
   }
 
-  // Attach a never-opened agent's session without leaving Iddo on its tab.
-  // Skips (returns false) when he has text typed in the compose box, so a
-  // background sweep never steals focus mid-sentence; the next tick retries.
-  // Also skips while the tab he is looking at is mid-turn (he is probably
-  // reading it stream) or he used the keyboard/mouse in the last 30 s with the
-  // window focused (COO review of v1.61.9: the flick must not fire unattended
-  // mid-read). The next tick retries.
-  let lastUserInputAt = 0;
-  for (const ev of ["keydown", "mousedown", "wheel"]) {
-    document.addEventListener(ev, () => { lastUserInputAt = Date.now(); }, { capture: true, passive: true });
-  }
+  // 2026-10-03: attach is done by attachSessionInBackground() (renderer.js): it creates the session and
+  // starts the pty without selectAgent(), so the visible tab, focus and compose box are never touched
+  // and no Iddo-activity gate is needed any more.
   async function autoAttachSession(agent) {
-    const box = document.getElementById("chat-input");
-    if (box && box.value && box.value.trim()) return false;
-    if (document.hasFocus() && Date.now() - lastUserInputAt < 30000) return false;
-    if (activeAgentPath) {
-      const viewing = await window.api.getSessionActivity(activeAgentPath).catch(() => null);
-      if (viewing && viewing.working) return false;
-    }
-    const original = activeAgentPath;
-    selectAgent(agent);
-    const t0 = Date.now();
-    while (Date.now() - t0 < 20000) {
-      const s = terminals.get(agent.path);
-      if (s && s.started && Date.now() - t0 > 4000) break;
-      await sleep(500);
-    }
-    try {
-      if (original && original !== agent.path) {
-        const back = agents.find((x) => x.path === original);
-        if (back) selectAgent(back);
-      }
-    } catch (e) {}
-    console.log("[guards] auto-attached session for", agent.displayName);
-    const s = terminals.get(agent.path);
-    return !!(s && s.started);
+    return await attachSessionInBackground(agent);
   }
+
+  // A failed or wedged flow must neither block its own agent's retry nor sit there forever.
+  function agentName(ap) {
+    const a = agents.find((x) => x.path === ap);
+    return a ? a.displayName : ap;
+  }
+  function clearFlow(ap, why) {
+    const f = flows.get(ap);
+    if (f) { try { clearInterval(f.timer); } catch (e) {} flows.delete(ap); }
+    pendingResume.delete(ap);
+    window.autoHandoffLog("flow cleared for " + agentName(ap) + ": " + why);
+    render();
+  }
+  function reapStaleFlows() {
+    const now = Date.now();
+    for (const [ap, f] of [...flows.entries()]) {
+      if (f.phase === "done" || f.phase === "failed") continue;
+      if (now - f.startedAt - (f.pausedMs || 0) > STALE_FLOW_MS) {
+        window.autoHandoffLog("flow for " + agentName(ap) + " wedged in phase " + f.phase + " for 45+ min - marked failed");
+        f.phase = "failed"; f.error = "Flow wedged for over 45 minutes - cleared automatically.";
+        try { clearInterval(f.timer); } catch (e) {}
+      }
+    }
+  }
+
+  // Read-only debug handle (sandbox tests force a failed flow through it).
+  window.autoHandoffDebug = () => ({ flows, autoHandedOff, attachFailedAt });
 
   let autoHandoffRunning = false;
   async function checkAutoHandoff() {
@@ -196,70 +225,79 @@
   async function checkAutoHandoffInner() {
     if (!autoHandoffEnabled()) return;
     if (allRun && !allRun.finished) return;      // a manual sweep owns the fleet
-    if (fleetFlowInProgress()) return;             // one ACTIVE flow at a time, fleet-wide
+    reapStaleFlows();
+    let activeFlow = null;
+    for (const [ap, f] of flows) if (f.phase !== "failed") { activeFlow = ap; break; }
+    // Pass 1: who is eligible (>= AUTO_HANDOFF_TOKENS)? Logged whenever the set changes.
+    const eligible = [];
     for (const a of agents) {
       try {
         const u = await window.api.getContextUsage(a.path);
         let t = u && typeof u.contextTokens === "number" ? u.contextTokens : 0;
+        const raw = t;
         if (t && window.guardUsageIsStale(a.path, u)) t = 0;
-        // v1.54.3: re-arm once the agent is back under the warning line (a
-        // real, finished reset). Before, the once-per-app-run lock never
-        // cleared, so an agent auto-handed-off once was never handed off again
-        // until Agent Desktop restarted. That is why some agents handed off on
-        // their own and others sat at 200K+. A handoff that failed leaves
-        // the context high, so this cannot loop.
-        if (t && t < CONTEXT_WARN_TOKENS) { autoHandedOff.delete(a.path); forcedInterrupts.delete(a.path); }
-        if (autoHandedOff.has(a.path)) continue;
-        if (t < AUTO_HANDOFF_TOKENS) continue;
+        // v1.54.3: re-arm once the agent is back under the warning line (a real, finished reset).
+        if (t && t < CONTEXT_WARN_TOKENS) { autoHandedOff.delete(a.path); forcedInterrupts.delete(a.path); attachFailedAt.delete(a.path); }
+        if (t >= AUTO_HANDOFF_TOKENS) eligible.push({ a, t });
+        else if (raw >= AUTO_HANDOFF_TOKENS) glog(a.displayName, "stale", a.displayName + " " + Math.round(raw / 1000) + "K: skipped, usage predates our last reset (stale)");
+      } catch (e) { /* one agent's hiccup must not stop the sweep */ }
+    }
+    const sig = eligible.map((x) => x.a.displayName).sort().join(",");
+    if (sig !== lastEligibleSig) {
+      lastEligibleSig = sig;
+      window.autoHandoffLog("eligible (>=" + Math.round(AUTO_HANDOFF_TOKENS / 1000) + "K): " + eligible.length + (sig ? " [" + eligible.map((x) => x.a.displayName + " " + Math.round(x.t / 1000) + "K").join(", ") + "]" : ""));
+    }
+    for (const { a, t } of eligible) {
+      const nm = a.displayName, k = Math.round(t / 1000) + "K";
+      try {
         const act = await window.api.getSessionActivity(a.path).catch(() => null);
         if (act && act.working) {
           // mid-turn: leave it alone, unless it has been working non-stop long enough to need a forced checkpoint
+          glog(nm, "working", nm + " " + k + ": skipped, mid-turn (working " + Math.round((act.sinceMs || 0) / 60000) + " min)");
           await maybeForceCheckpoint(a, act, t);   // finding 4: an Esc for one agent must not starve the others' checks
           continue;
         }
-        if (!act) continue;
-        // 2026-09-29: an agent whose tab was never opened this Agent Desktop
-        // run has no live pty attached (terminals only gets an entry via
-        // selectAgent -> showTerminalFor, on-demand when a tab is clicked -
-        // "Handoff all" already knows this and explicitly calls selectAgent()
-        // per-agent before its own startFlow; this automatic sweep did not).
-        // Without that, queueOrSend()'s submitToAgent() falls through to
-        // sendInput() with no ptySessions entry on the main-process side,
-        // which main.js's own terminal-input handler treats as
-        // non-delivery (writes a "could not be delivered" notice nobody
-        // sees instead of ever reaching the real background agent). The
-        // flow then sits at phase:"saving" for the full 12-minute timeout,
-        // unable to progress, before failing - and until it fails it counts
-        // as the one active flow serializing the whole fleet (see
-        // fleetFlowInProgress() above). Confirmed as the live cause of
-        // Product Development never getting auto-handed-off tonight even
-        // right after a fresh restart: skip an agent with no attached,
-        // started session here rather than starting a flow that cannot
-        // possibly deliver its prompt. It will still be picked up as soon
-        // as its tab is opened (the manual banner already offers the same
-        // reset there) or by a manual "Handoff all" sweep either way.
-        // 2026-10-02: skipping here meant auto-handoff only ever worked for
-        // agents whose tab Iddo had opened this run (YouTube reached 299K
-        // unattended). Attach the session ourselves, exactly as "Handoff all"
-        // does, then put the view back. The flow starts on the next tick.
+        if (!act) { glog(nm, "noact", nm + " " + k + ": skipped, no activity data"); continue; }
+        const prior = autoHandedOff.get(a.path);
+        if (prior) {
+          const fl = flows.get(a.path);
+          if (fl && fl.phase !== "failed") { glog(nm, "inflow", nm + " " + k + ": skipped, its own flow is still running (" + fl.phase + ")"); continue; }
+          const wait = retryCooldownMs(prior.count) - (Date.now() - prior.at);
+          if (wait > 0) { glog(nm, "cool", nm + " " + k + ": skipped, cooling down after attempt #" + prior.count + ", retry in " + Math.ceil(wait / 1000) + " s"); continue; }
+          // cool-down over, agent idle and still over the line: drop the dead flow and try again
+          if (fl) clearFlow(a.path, "failed flow, retrying after cool-down");
+          window.autoHandoffLog("retry #" + (prior.count + 1) + " for " + nm + " at " + k);
+        }
+        if (activeFlow && activeFlow !== a.path) { glog(nm, "fleet", nm + " " + k + ": skipped, another handoff is running (" + agentName(activeFlow) + ")"); continue; }
+        // An agent whose tab was never opened this run has no pty attached (terminals only gets an
+        // entry via showTerminalFor), and a prompt typed into it is silently dropped. Attach it in the
+        // background (no tab switch, no focus, no Iddo-activity gate).
         let session = terminals.get(a.path);
         if (!session || !session.started) {
-          await autoAttachSession(a);
+          if (Date.now() - (attachFailedAt.get(a.path) || 0) < ATTACH_RETRY_MS) { glog(nm, "attachwait", nm + " " + k + ": skipped, attach failed recently, waiting"); continue; }
+          const ok = await autoAttachSession(a);
           session = terminals.get(a.path);
-          if (!session || !session.started) continue;
+          if (!ok || !session || !session.started) {
+            attachFailedAt.set(a.path, Date.now());
+            glog(nm, "attachfail", nm + " " + k + ": skipped, could not attach/start its session");
+            continue;
+          }
+          window.autoHandoffLog("attached session in background for " + nm + " (tab not switched)");
         }
-        autoHandedOff.add(a.path);
+        const count = (prior ? prior.count : 0) + 1;
+        autoHandedOff.set(a.path, { at: Date.now(), count });
+        window.autoHandoffLog("flow START for " + nm + " at " + k + " (attempt #" + count + ")");
         show(
           ctxBanner,
           "guard-amber",
-          a.displayName + " reached " + Math.round(t / 1000) + "K tokens and was handed off automatically " +
+          nm + " reached " + k + " tokens and was handed off automatically " +
             "(lessons saved to memory first, old conversation kept in History).",
           [{ label: "Dismiss", onClick: () => render() }]
         );
         startFlow(a.path, false);
         return;                                   // only ever one per pass
       } catch (e) {
-        /* one agent's hiccup must not stop the sweep */
+        window.autoHandoffLog("sweep error for " + nm + ": " + (e && e.message));
       }
     }
   }
@@ -369,6 +407,7 @@
         const ex = await window.api.getHandoffInfo(agentPath);
         flow.canUseExisting = !!(ex && ex.exists);
         flow.phase = "failed";
+        window.autoHandoffLog("flow FAILED for " + agentName(agentPath));
         flow.error =
           "The agent did not finish the handoff within 12 minutes - nothing was reset." +
           (flow.canUseExisting ? " A handoff_latest.md already exists; if it is the one you want, use the button to reset with it." : "");
@@ -409,6 +448,7 @@
       await runReset(agentPath, flow);
     } catch (e) {
       flow.phase = "failed";
+      window.autoHandoffLog("flow FAILED for " + agentName(agentPath));
       flow.error = "Handoff/reset stopped: " + e.message;
       clearInterval(flow.timer);
       render();
@@ -459,6 +499,7 @@
           pendingResume.delete(ap);
           if (flow) {
             flow.phase = "done";
+            window.autoHandoffLog("flow finished OK for " + agentName(ap));
             render();
             setTimeout(() => {
               flows.delete(ap);
@@ -483,6 +524,7 @@
             pendingResume.delete(ap);
             if (flow) {
               flow.phase = "failed";
+              window.autoHandoffLog("flow FAILED for " + agentName(ap));
               flow.error = "The fresh session did not confirm the resume message after " + r.tries +
               " attempts. It may still have arrived - check the conversation before resending. If not: Read " +
               r.path + " and continue from there.";
@@ -779,6 +821,7 @@
                   await runReset(ap, flow);
                 } catch (e) {
                   flow.phase = "failed";
+                  window.autoHandoffLog("flow FAILED for " + agentName(ap));
                   flow.error = "Handoff/reset stopped: " + e.message;
                   render();
                 }

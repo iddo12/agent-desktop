@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld("api", {
   transcribeAudio: (wavBase64, file) => ipcRenderer.invoke("voice-transcribe", { wavBase64, file }),
   voiceEngine: () => ipcRenderer.invoke("voice-engine"),
   voiceSave: (wavBase64) => ipcRenderer.invoke("voice-save", { wavBase64 }),
+  logGuard: (line) => ipcRenderer.send("guard-log", { line }),
   sendInput: (agentPath, data) => ipcRenderer.send("terminal-input", { agentPath, data }),
   resizeTerminal: (agentPath, cols, rows) => ipcRenderer.send("terminal-resize", { agentPath, cols, rows }),
 

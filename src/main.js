@@ -2827,6 +2827,12 @@ function logStuckWatchdog(line) {
   }
 }
 
+// 2026-10-03: the renderer's auto-handoff sweep writes its skip/start/fail reasons here (it has no
+// file access of its own). Rate-limiting is done in the renderer; this just appends one line.
+ipcMain.on("guard-log", (event, { line }) => {
+  logStuckWatchdog("[autohandoff] " + String(line || "").replace(/\s+/g, " ").slice(0, 400));
+});
+
 async function recoverStuckSession(agentPath, session, recoveryCount) {
   const { sessionCwd, cols, rows } = session;
   logStuckWatchdog(
