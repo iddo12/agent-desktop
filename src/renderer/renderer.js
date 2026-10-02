@@ -4738,6 +4738,7 @@ function restartAllUpdateCount() {
   for (const { checkbox } of restartAllRows.values()) if (checkbox.checked) checked++;
   restartAllCountEl.textContent = checked + " selected";
   confirmRestartAllBtn.disabled = restartAllInProgress || checked === 0;
+  confirmRestartAllBtn.textContent = checked > 0 ? `Restart ${checked} agent${checked === 1 ? "" : "s"}` : "Restart agents";
   restartAllSelectAllCb.checked = checked > 0 && checked === restartAllRows.size;
 }
 
@@ -4746,8 +4747,11 @@ function openRestartAllModal() {
   restartAllRows = new Map();
   restartAllSummaryEl.classList.add("hidden");
   restartAllInProgress = false;
+  restartAllLastSkippedNames = [];
   cancelRestartAllBtn.disabled = false;
   cancelRestartAllBtn.textContent = "Cancel";
+  retrySkippedRestartAllBtn.classList.add("hidden");
+  retrySkippedRestartAllBtn.disabled = false;
 
   const sorted = [...agents].sort((a, b) => (a.displayName || "").localeCompare(b.displayName || ""));
   for (const agent of sorted) {
@@ -4797,29 +4801,37 @@ cancelRestartAllBtn.addEventListener("click", () => {
   restartAllModalEl.classList.add("hidden");
 });
 
-confirmRestartAllBtn.addEventListener("click", async () => {
-  if (restartAllInProgress) return;
-  const selected = [...restartAllRows.entries()].filter(([, row]) => row.checkbox.checked).map(([path]) => path);
-  if (selected.length === 0) return;
+const retrySkippedRestartAllBtn = document.getElementById("retry-skipped-restart-all-btn");
+let restartAllLastSkippedNames = []; // [{ path, name }] - busy OR unknown-state skips, for the summary + Retry
 
-  restartAllInProgress = true;
-  confirmRestartAllBtn.disabled = true;
-  restartAllSelectAllCb.disabled = true;
-  cancelRestartAllBtn.disabled = true;
-  for (const { checkbox } of restartAllRows.values()) checkbox.disabled = true;
-
+// Shared by the initial run and "Retry skipped" - runs the given agent paths
+// sequentially through check-then-restart and returns the per-reason counts
+// plus which ones were skipped (by path+displayName, for the summary text
+// and so Retry skipped can target exactly those next).
+async function restartAllRunBatch(paths) {
   let restarted = 0, skipped = 0, failed = 0;
-  for (const agentPath of selected) {
+  const skippedEntries = [];
+  for (const agentPath of paths) {
     restartAllSetRowStatus(agentPath, "status-active", "Checking…");
-    let activity = null;
+    let activity;
+    let checkFailed = false;
     try {
       activity = await window.api.getSessionActivity(agentPath);
     } catch (e) {
-      activity = null; // unknown - treat as not-busy rather than block the whole batch on one read failure
+      checkFailed = true; // unknown MUST mean skip here - a false "not busy" would kill a mid-turn agent
+    }
+    if (checkFailed) {
+      restartAllSetRowStatus(agentPath, "status-skip", "Skipped (couldn't check)");
+      skipped++;
+      const agentObj = agents.find((a) => a.path === agentPath);
+      skippedEntries.push({ path: agentPath, name: (agentObj && agentObj.displayName) || agentPath });
+      continue;
     }
     if (activity && activity.working) {
       restartAllSetRowStatus(agentPath, "status-skip", "Skipped (busy)");
       skipped++;
+      const agentObj = agents.find((a) => a.path === agentPath);
+      skippedEntries.push({ path: agentPath, name: (agentObj && agentObj.displayName) || agentPath });
       continue;
     }
 
@@ -4849,18 +4861,58 @@ confirmRestartAllBtn.addEventListener("click", async () => {
       failed++;
     }
   }
+  return { restarted, skipped, failed, skippedEntries };
+}
 
-  restartAllSummaryEl.textContent =
-    `Done - ${restarted} restarted, ${skipped} skipped (busy), ${failed} failed` +
-    (selected.length < restartAllRows.size ? `, ${restartAllRows.size - selected.length} not selected` : "") + ".";
+function restartAllShowSummary(prefix, result, notSelectedCount) {
+  restartAllLastSkippedNames = result.skippedEntries;
+  let text = `${prefix} - ${result.restarted} restarted, ${result.skipped} skipped, ${result.failed} failed`;
+  if (notSelectedCount > 0) text += `, ${notSelectedCount} not selected`;
+  text += ".";
+  if (result.skippedEntries.length > 0) {
+    text += ` Skipped: ${result.skippedEntries.map((e) => e.name).join(", ")}.`;
+  }
+  restartAllSummaryEl.textContent = text;
   restartAllSummaryEl.classList.remove("hidden");
+  retrySkippedRestartAllBtn.classList.toggle("hidden", result.skippedEntries.length === 0);
+}
 
-  restartAllInProgress = false;
-  cancelRestartAllBtn.disabled = false;
-  cancelRestartAllBtn.textContent = "Close";
-  // Leave checkboxes/Restart Selected disabled - reopening the picker
-  // (closing and clicking Restart All again) gives a clean fresh run rather
-  // than letting a second pass silently re-use stale row state.
+function restartAllSetBatchUi(running) {
+  restartAllInProgress = running;
+  // "Restart Selected" and the checkboxes stay disabled for the rest of this
+  // picker's lifetime once a batch has started, even after it finishes -
+  // reopening the picker (close + click Restart All again) is the way to get
+  // a fresh run, rather than letting a second pass silently reuse stale row
+  // state. Retry skipped is the one control meant to re-enable after a run.
+  confirmRestartAllBtn.disabled = true;
+  restartAllSelectAllCb.disabled = true;
+  for (const { checkbox } of restartAllRows.values()) checkbox.disabled = true;
+  cancelRestartAllBtn.disabled = running;
+  retrySkippedRestartAllBtn.disabled = running;
+  cancelRestartAllBtn.textContent = running ? "Cancel" : "Close";
+}
+
+confirmRestartAllBtn.addEventListener("click", async () => {
+  if (restartAllInProgress) return;
+  const selected = [...restartAllRows.entries()].filter(([, row]) => row.checkbox.checked).map(([path]) => path);
+  if (selected.length === 0) return;
+
+  restartAllSetBatchUi(true);
+  const result = await restartAllRunBatch(selected);
+  restartAllSetBatchUi(false);
+  restartAllShowSummary("Done", result, restartAllRows.size - selected.length);
+});
+
+retrySkippedRestartAllBtn.addEventListener("click", async () => {
+  if (restartAllInProgress || restartAllLastSkippedNames.length === 0) return;
+  const paths = restartAllLastSkippedNames.map((e) => e.path);
+  for (const path of paths) restartAllSetRowStatus(path, "status-pending", "");
+  retrySkippedRestartAllBtn.classList.add("hidden");
+
+  restartAllSetBatchUi(true);
+  const result = await restartAllRunBatch(paths);
+  restartAllSetBatchUi(false);
+  restartAllShowSummary("Retry done", result, 0);
 });
 
 loadAgents();

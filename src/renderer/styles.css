@@ -90,6 +90,34 @@ html, body {
 }
 #new-agent-btn:hover { filter: brightness(1.1); }
 
+/* Its own row below +Group/+Agent (not sharing #sidebar-header-actions) -
+   at a narrow sidebar width that row has no slack left, and an unstyled
+   button there either wrapped or pushed +Agent half off-screen (UI-UX
+   mockup 2026-10-02: agent_desktop_restart_all/restart_all_v1.pdf). Styled
+   as an outline in --health-warning rather than the accent gradient used
+   for +Agent - this is a "handle with care" fleet-wide action, not a
+   routine one, and shouldn't read with the same visual weight. */
+#restart-all-btn {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: calc(100% - 32px);
+  margin: 0 16px 12px;
+  padding: 7px 10px;
+  background: transparent;
+  border: 1px solid var(--health-warning);
+  color: var(--health-warning);
+  font-weight: 600;
+  font-size: 0.82rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+#restart-all-btn:hover { background: rgba(180, 83, 9, 0.08); }
+#restart-all-btn:disabled { opacity: 0.5; cursor: default; background: transparent; }
+#restart-all-btn-icon { font-size: 0.95em; line-height: 1; }
+
 #update-available-btn {
   margin: 0 16px 12px;
   background: var(--bg-hover);

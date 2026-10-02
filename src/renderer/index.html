@@ -18,11 +18,11 @@
       <div id="sidebar-header">
         <span id="app-title">Agents</span>
         <div id="sidebar-header-actions">
-          <button id="restart-all-btn" title="Restart every agent's background process (or a chosen subset) - keeps each conversation, re-reads its settings and CLAUDE.md. Agents that are busy or paused are skipped automatically.">Restart All</button>
           <button id="new-group-btn" title="Create a group to organize agents in the sidebar">+ Group</button>
           <button id="new-agent-btn" title="Create new agent">+ Agent</button>
         </div>
       </div>
+      <button id="restart-all-btn" title="Restart every agent's background process (or a chosen subset) - keeps each conversation, re-reads its settings and CLAUDE.md. Agents that are busy or paused are skipped automatically."><span id="restart-all-btn-icon">&#8635;</span> Restart agents&hellip;</button>
       <button id="app-update-btn" class="hidden"></button>
       <button id="update-available-btn" class="hidden"></button>
       <div id="interfering-service-warning" class="hidden"></div>
@@ -229,7 +229,8 @@
       <p id="restart-all-summary" class="modal-hint hidden"></p>
       <div class="modal-actions">
         <button id="cancel-restart-all-btn" class="secondary">Cancel</button>
-        <button id="confirm-restart-all-btn" class="primary" disabled>Restart Selected</button>
+        <button id="retry-skipped-restart-all-btn" class="secondary hidden">Retry skipped</button>
+        <button id="confirm-restart-all-btn" class="primary" disabled>Restart agents</button>
       </div>
     </div>
   </div>
