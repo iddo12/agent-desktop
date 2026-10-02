@@ -57,6 +57,10 @@ function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, lo
     }
   });
 
+  ipcMain.handle("guard-channel-cancel", (event, { id }) => {
+    try { return require("./agentChannel").cancel(id); } catch (e) { return { ok: false, reason: e.message }; }
+  });
+
   ipcMain.handle("guard-handoff-info", (event, { agentPath }) => {
     try {
       const p = path.join(agentPath, "handoff_latest.md");

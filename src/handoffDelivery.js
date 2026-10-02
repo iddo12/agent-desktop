@@ -36,7 +36,7 @@
     const marker = o.marker || makeMarker(now());
     const body = marker + " " + text;
     let channelUsable = !!deps.channelSend;
-    let via = null, ptySent = false;
+    let via = null, ptySent = false, channelId = null;
     for (let attempt = 1; attempt <= o.maxAttempts; attempt++) {
       if (aborted()) { log("handoff-delivery: stopped (flow no longer active)"); return { delivered: false, via, attempts: attempt - 1, marker, aborted: true }; }
       let sentVia = null, skipped = false;
@@ -46,6 +46,7 @@
         try { r = await deps.channelSend(body, { ttlSec: o.ttlSec || 120 }); } catch (e) { r = { ok: false, reason: e && e.message }; }
         if (r && r.ok) {
           sentVia = "channel";
+          channelId = r.id || null;
           log("handoff-delivery attempt " + attempt + ": sent via message channel (acked)");
         } else {
           log("handoff-delivery attempt " + attempt + ": message channel unavailable (" + ((r && r.reason) || "no reason") + ") - falling back to pty typing");
@@ -58,6 +59,12 @@
           skipped = true;
           log("handoff-delivery attempt " + attempt + ": previous prompt still queued for a busy agent - not typing a duplicate, waiting");
         } else {
+          // v1.63.8: the acked channel send did not land; withdraw its still-queued request file so a
+          // late relay cannot deliver it a second time next to this pty prompt.
+          if (channelId && deps.channelCancel) {
+            try { await deps.channelCancel(channelId); log("handoff-delivery attempt " + attempt + ": withdrew the unlanded channel request " + channelId); } catch (e) {}
+            channelId = null;
+          }
           try { deps.ptySend(body); ptySent = true; sentVia = "pty"; log("handoff-delivery attempt " + attempt + ": typed into pty"); }
           catch (e) { log("handoff-delivery attempt " + attempt + ": pty send FAILED: " + (e && e.message)); }
         }
@@ -84,6 +91,16 @@
     return { delivered: false, via, attempts: o.maxAttempts, marker };
   }
 
+  // v1.63.8: remove every queued prompt that contains `text` (the busy-agent send queue); returns the count.
+  function purgeQueue(queue, text) {
+    let n = 0;
+    if (!Array.isArray(queue) || !text) return 0;
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (typeof queue[i] === "string" && queue[i].indexOf(text) !== -1) { queue.splice(i, 1); n++; }
+    }
+    return n;
+  }
+
   // Banner warning: is the handoff file older than the request this flow made?
   function staleInfo(info, flowStartedAt) {
     if (!info || !info.exists || !flowStartedAt) return { stale: false };
@@ -91,7 +108,7 @@
     return { stale, ageMs: stale ? flowStartedAt - info.mtimeMs : 0 };
   }
 
-  const api = { deliver, makeMarker, staleInfo, DEFAULTS };
+  const api = { deliver, purgeQueue, makeMarker, staleInfo, DEFAULTS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HandoffDelivery = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

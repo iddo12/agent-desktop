@@ -101,7 +101,53 @@ test("file-drop transport: exact shape, atomic (no partial/tmp left), env overri
     if (old === undefined) delete process.env.AGENT_DESKTOP_RELAY_DIR; else process.env.AGENT_DESKTOP_RELAY_DIR = old;
     channel.setTransport(channel.fileDropTransport);
   }
-  assert.ok(/handoff_relay.requests$/.test(channel.relayDir()));
+  // v1.63.8: default is under HOME (not AppData/userData, which MSIX virtualizes for the relay)
+  assert.strictEqual(channel.relayDir(), path.join(os.homedir(), ".agent-desktop-relay", "requests"));
+  assert.strictEqual(channel.heartbeatPath(), path.join(os.homedir(), ".agent-desktop-relay", "relay-alive"));
+});
+
+test("test mode never shares the live relay dir", () => {
+  const oldE = process.env.AGENT_DESKTOP_RELAY_DIR, oldT = process.env.AGENT_DESKTOP_TEST_MODE;
+  delete process.env.AGENT_DESKTOP_RELAY_DIR; process.env.AGENT_DESKTOP_TEST_MODE = "1";
+  try {
+    const d = channel.relayDir();
+    assert.ok(/handoff_relay.requests$/.test(d));
+    assert.ok(!d.startsWith(path.join(os.homedir(), ".agent-desktop-relay")));
+  } finally {
+    if (oldE !== undefined) process.env.AGENT_DESKTOP_RELAY_DIR = oldE;
+    if (oldT === undefined) delete process.env.AGENT_DESKTOP_TEST_MODE; else process.env.AGENT_DESKTOP_TEST_MODE = oldT;
+  }
+});
+
+test("cancel removes a still-queued request file; deliver withdraws it on pty fallback", async () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "relaycx-"));
+  const old = process.env.AGENT_DESKTOP_RELAY_DIR;
+  process.env.AGENT_DESKTOP_RELAY_DIR = path.join(d, "requests");
+  try {
+    fs.writeFileSync(path.join(d, "relay-alive"), "x");
+    const sd = fs.mkdtempSync(path.join(os.tmpdir(), "sess-")); const agent = path.join(sd, "A");
+    fs.writeFileSync(path.join(sd, "1.json"), JSON.stringify({ pid: process.pid, cwd: agent, messagingSocketPath: "PIPE", updatedAt: 1 }));
+    channel.setTransport(channel.fileDropTransport);
+    const s = await channel.send(agent, "t", sd);
+    assert.ok(s.ok && s.id);
+    assert.deepStrictEqual(channel.cancel(s.id), { ok: true, removed: true });
+    assert.deepStrictEqual(channel.cancel(s.id), { ok: true, removed: false });
+    assert.strictEqual(channel.cancel("../evil").removed, false);
+    t = 0; let pty = 0, left = null;
+    const r = await deliver("hi", { ...base(), channelSend: (x, o) => channel.send(agent, x, sd, o),
+      channelCancel: (id) => channel.cancel(id), ptySend: () => { pty++; left = fs.readdirSync(path.join(d, "requests")).filter((f) => f.endsWith(".json")); }, transcriptHas: async () => pty >= 1 });
+    assert.deepStrictEqual([r.delivered, r.via, pty, left.length], [true, "pty", 1, 0]);
+  } finally {
+    if (old === undefined) delete process.env.AGENT_DESKTOP_RELAY_DIR; else process.env.AGENT_DESKTOP_RELAY_DIR = old;
+  }
+});
+
+test("purgeQueue removes only matching queued prompts", () => {
+  const { purgeQueue } = require("../src/handoffDelivery");
+  const q = ["[hid:1] save it", "other", "[hid:2] save it", "keep"];
+  assert.strictEqual(purgeQueue(q, "save it"), 2);
+  assert.deepStrictEqual(q, ["other", "keep"]);
+  assert.strictEqual(purgeQueue(null, "x"), 0);
 });
 
 test("relay heartbeat absent or stale: transport unavailable, delivery uses pty on attempt 1", async () => {

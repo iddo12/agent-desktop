@@ -397,6 +397,7 @@
     try {
       p = window.HandoffDelivery.deliver(text, {
         channelSend: (t, o) => window.api.channelSend(agentPath, t, o),
+        channelCancel: (id) => window.api.channelCancel(id),
         // first pty attempt respects the busy-queue; a retry must type directly or it would queue behind itself
         ptySend: (t) => { if (ptyTries++ === 0) queueOrSend(agentPath, t); else submitToAgent(agentPath, t); },
         // never type a duplicate while the first prompt still waits in the busy agent's queue
@@ -413,6 +414,11 @@
     }
     return p.then((r) => {
       if (flow) flow.delivery = r;
+      if (r && r.aborted) {
+        // v1.63.8: the flow ended while the prompt still waits for a busy agent - drop it so it is not typed later
+        const se = terminals.get(agentPath);
+        if (se && window.HandoffDelivery.purgeQueue(se.sendQueue, text) && typeof renderQueue === "function") renderQueue(agentPath);
+      }
       if (!r.delivered && !r.aborted) window.autoHandoffLog("handoff prompt for " + nm + " NOT confirmed in transcript after " + r.attempts + " attempts");
       return r;
     }).catch((e) => { window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message)); }).finally(settle);

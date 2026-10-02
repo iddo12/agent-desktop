@@ -45,8 +45,14 @@ const HEARTBEAT_MAX_AGE_MS = 60 * 1000; // the relay touches <relayDir>/../relay
 function userDataDir() {
   try { return require("electron").app.getPath("userData"); } catch (e) { return path.join(os.tmpdir(), "agent-desktop"); }
 }
+// v1.63.8: the default lives under the user's HOME, not userData. The relay is a Claude Desktop (MSIX)
+// process, and MSIX redirects its writes under %APPDATA% to a private package copy, so a dir under
+// AppData never showed the relay's heartbeat to Agent Desktop. Test mode (sandbox) must never share
+// the live relay dir, so it stays under the sandbox's own userData.
 function relayDir() {
-  return process.env.AGENT_DESKTOP_RELAY_DIR || path.join(userDataDir(), "handoff_relay", "requests");
+  if (process.env.AGENT_DESKTOP_RELAY_DIR) return process.env.AGENT_DESKTOP_RELAY_DIR;
+  if (process.env.AGENT_DESKTOP_TEST_MODE === "1") return path.join(userDataDir(), "handoff_relay", "requests");
+  return path.join(os.homedir(), ".agent-desktop-relay", "requests");
 }
 function heartbeatPath() { return path.join(relayDir(), "..", "relay-alive"); }
 function relayAlive() {
@@ -71,6 +77,13 @@ function fileDropTransport(socketPath, text, meta) {
   return { ok: true, queued: true, id };
 }
 
+// v1.63.8: withdraw a request that is still waiting (a late relay must not deliver it after the pty fallback).
+function cancel(id) {
+  if (!id || !/^[0-9A-Za-z-]+$/.test(String(id))) return { ok: false, removed: false };
+  try { fs.unlinkSync(path.join(relayDir(), id + ".json")); return { ok: true, removed: true }; }
+  catch (e) { return { ok: true, removed: false }; }
+}
+
 let transport = fileDropTransport;
 function setTransport(fn) { transport = typeof fn === "function" ? fn : null; }
 
@@ -80,10 +93,10 @@ async function send(agentPath, text, sessionsDir, opts) {
   if (!transport) return { ok: false, reason: "no channel transport registered" };
   try {
     const r = await transport(addr.socketPath, text, { agent: path.basename(path.resolve(agentPath)), ttlSec: (opts && opts.ttlSec) || 120 });
-    return r && r.ok ? { ok: true, queued: !!r.queued } : { ok: false, reason: (r && r.reason) || "transport rejected" };
+    return r && r.ok ? { ok: true, queued: !!r.queued, id: r.id } : { ok: false, reason: (r && r.reason) || "transport rejected" };
   } catch (e) {
     return { ok: false, reason: e && e.message };
   }
 }
 
-module.exports = { resolveAddress, setTransport, send, fileDropTransport, relayDir, heartbeatPath, relayAlive };
+module.exports = { resolveAddress, setTransport, send, fileDropTransport, cancel, relayDir, heartbeatPath, relayAlive };
