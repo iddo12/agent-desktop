@@ -1140,7 +1140,9 @@
     kpi("Claude - this week", u.weekPct, null, "none", u.weekPct > 70, "%", () => openDetail("Claude usage", usageDetail(u)));
     kpi("Claude - 5 hours", u.fiveHourPct, null, "none", u.fiveHourPct > 70, "%", () => openDetail("Claude usage", usageDetail(u)));
     const j = (data.fleet && data.fleet.jobs) || {};
-    if (j.tasksChecked != null) kpi("Scheduled jobs OK", (j.tasksChecked - j.tasksFailing) + "/" + j.tasksChecked, null, "none", j.tasksFailing > 0, "",
+    const jp = data.fleet && data.fleet.jobsPrev;
+    if (j.tasksChecked != null) kpi("Scheduled jobs OK", (j.tasksChecked - j.tasksFailing) + "/" + j.tasksChecked,
+      jp ? jp.ok + "/" + jp.checked : null, "none", j.tasksFailing > 0, "",
       () => openDetail("Scheduled jobs", jobsDetail(j)));
     if (agentStates.length) {
       const running = agentStates.filter((r) => r.state === "running").length;
