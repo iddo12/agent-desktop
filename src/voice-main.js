@@ -56,9 +56,128 @@ function run(exe, args) {
   });
 }
 
+// v1.63.2: WARM SERVER. Every recording used to spawn whisper-cli, which reloads the 1.6 GB model
+// into the GPU each time (and a second time for the Hebrew language check). When the GPU is busy
+// (Premiere) that cold start is what made dictation slow. Now a long-lived whisper-server.exe
+// (same folder as whisper-cli.exe) keeps the model loaded: it is started the moment the mic
+// button is pressed (so loading overlaps the speaking), answers over 127.0.0.1, and is stopped
+// after IDLE_UNLOAD_MS of no use so it does not hold VRAM for good. Any failure falls back to
+// the per-run whisper-cli path below, then to Cloudflare, so this can only make things faster.
+const http = require("http");
+const net = require("net");
+const { spawn } = require("child_process");
+const IDLE_UNLOAD_MS = 10 * 60 * 1000;
+const SERVER_START_MS = 60 * 1000;
+const servers = new Map(); // model path -> { proc, port, ready: Promise<boolean>, idle: Timer, model }
+
+function serverExe(eng) {
+  const exe = path.join(path.dirname(eng.exe), "whisper-server.exe");
+  return fs.existsSync(exe) ? exe : "";
+}
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once("error", reject);
+    s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)); });
+  });
+}
+function httpReq(port, method, urlPath, body, headers) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: urlPath, method, headers, timeout: LOCAL_TIMEOUT_MS }, (res) => {
+      const parts = [];
+      res.on("data", (d) => parts.push(d));
+      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(parts).toString("utf-8") }));
+    });
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("server timed out")));
+    if (body) req.write(body);
+    req.end();
+  });
+}
+function stopServer(model) {
+  const s = servers.get(model);
+  if (!s) return;
+  servers.delete(model);
+  clearTimeout(s.idle);
+  try { if (s.proc) s.proc.kill(); } catch (e) {}
+}
+function stopAllServers() { for (const m of [...servers.keys()]) stopServer(m); }
+function touchIdle(model) {
+  const s = servers.get(model);
+  if (!s) return;
+  clearTimeout(s.idle);
+  s.idle = setTimeout(() => stopServer(model), IDLE_UNLOAD_MS);
+  if (s.idle.unref) s.idle.unref();
+}
+// Starts (or reuses) the server for one model; resolves to its entry, or null if it can't run.
+function ensureServer(eng, model, say) {
+  const existing = servers.get(model);
+  if (existing) return existing.ready.then((ok) => (ok ? existing : null));
+  const exe = serverExe(eng);
+  if (!exe) return Promise.resolve(null);
+  const entry = { proc: null, port: 0, ready: null, idle: null, model };
+  servers.set(model, entry);
+  entry.ready = (async () => {
+    try {
+      entry.port = await freePort();
+      const t0 = Date.now();
+      entry.proc = spawn(exe, ["-m", model, "--host", "127.0.0.1", "--port", String(entry.port), "-l", "auto", "-mc", "0", "-nt", "-sns"], { windowsHide: true, stdio: "ignore" });
+      let dead = false;
+      entry.proc.on("exit", () => { dead = true; if (servers.get(model) === entry) { servers.delete(model); clearTimeout(entry.idle); } });
+      entry.proc.on("error", () => { dead = true; });
+      while (!dead && Date.now() - t0 < SERVER_START_MS) {
+        try {
+          const r = await httpReq(entry.port, "GET", "/", null, {});
+          if (r.status) { say(`voice-server: ${path.basename(model)} ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`); touchIdle(model); return true; }
+        } catch (e) {}
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      stopServer(model);
+      return false;
+    } catch (e) {
+      stopServer(model);
+      return false;
+    }
+  })();
+  return entry.ready.then((ok) => (ok ? entry : null));
+}
+// One inference on a warm server. Returns { text, lang } or throws.
+async function serverInfer(entry, wavPath) {
+  const boundary = "----adv" + Date.now().toString(16);
+  const field = (n, v) => `--${boundary}\r\nContent-Disposition: form-data; name="${n}"\r\n\r\n${v}\r\n`;
+  const head = field("response_format", "verbose_json") + field("language", "auto") + field("temperature", "0.0") +
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
+  const body = Buffer.concat([Buffer.from(head), fs.readFileSync(wavPath), Buffer.from(`\r\n--${boundary}--\r\n`)]);
+  const r = await httpReq(entry.port, "POST", "/inference", body, { "Content-Type": "multipart/form-data; boundary=" + boundary, "Content-Length": body.length });
+  if (r.status !== 200) throw new Error("server HTTP " + r.status);
+  const j = JSON.parse(r.body);
+  if (j.error) throw new Error(String(j.error));
+  touchIdle(entry.model);
+  return { text: String(j.text || ""), lang: String(j.detected_language || j.language || "") };
+}
+async function transcribeViaServer(eng, wavPath, say) {
+  const t0 = Date.now();
+  const main = await ensureServer(eng, eng.model, say);
+  if (!main) return null;
+  let r = await serverInfer(main, wavPath);
+  let lang = r.lang || "auto";
+  if (eng.modelHe && /^(he|iw|hebrew)$/i.test(lang)) {
+    const he = await ensureServer(eng, eng.modelHe, say);
+    if (he) { r = await serverInfer(he, wavPath); lang = "he"; }
+  }
+  say(`voice-transcribe: warm server, language ${lang}, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  return r.text.replace(/\s*\n\s*/g, " ").trim();
+}
+
 // -mc 0: don't carry the previous window's text as context. Tested 2026-09-25 on a 134 s clip:
 // with context the model repeated sentences (19 where 12 were spoken); without, 12.
 async function transcribeLocal(eng, wavPath, say) {
+  try {
+    const warm = await transcribeViaServer(eng, wavPath, say);
+    if (warm !== null) return warm;
+  } catch (e) {
+    say("voice-transcribe: warm server failed (" + e.message + "), using whisper-cli");
+  }
   let model = eng.model;
   let lang = "auto";
   if (eng.modelHe) {
@@ -108,6 +227,16 @@ function init({ ipcMain, log, app }) {
   // Lets the renderer skip the 50 s chunking (a Cloudflare request-size workaround) when the
   // engine is local: one pass over the whole recording has no join points to mangle words.
   ipcMain.handle("voice-engine", async () => ({ local: localEngine().ok }));
+
+  // Called when the mic button starts recording: load the model while the user speaks.
+  ipcMain.handle("voice-warm", async () => {
+    try {
+      const eng = localEngine();
+      if (eng.ok) { const e = await ensureServer(eng, eng.model, say); return { ok: !!e }; }
+    } catch (err) {}
+    return { ok: false };
+  });
+  if (app && app.on) app.on("will-quit", stopAllServers);
 
   // Save a recording to disk; returns its path. Keeps the newest KEEP_RECORDINGS.
   ipcMain.handle("voice-save", async (event, { wavBase64 }) => {

@@ -3910,6 +3910,7 @@ function pcmToWavChunks(pcm) {
 
 async function startVoiceRecording() {
   try {
+    try { if (window.api.voiceWarm) window.api.voiceWarm(); } catch (e) {} // load the model while speaking
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const recorder = new MediaRecorder(stream);
     const rec = { stream, recorder, chunks: [], timer: null };

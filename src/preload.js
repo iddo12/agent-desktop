@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("api", {
   startTerminal: (agentPath, cols, rows, knownAgentId) => ipcRenderer.invoke("start-terminal", { agentPath, cols, rows, knownAgentId }),
   transcribeAudio: (wavBase64, file) => ipcRenderer.invoke("voice-transcribe", { wavBase64, file }),
   voiceEngine: () => ipcRenderer.invoke("voice-engine"),
+  voiceWarm: () => ipcRenderer.invoke("voice-warm"),
   voiceSave: (wavBase64) => ipcRenderer.invoke("voice-save", { wavBase64 }),
   logGuard: (line) => ipcRenderer.send("guard-log", { line }),
   sendInput: (agentPath, data) => ipcRenderer.send("terminal-input", { agentPath, data }),
