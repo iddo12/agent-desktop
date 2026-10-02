@@ -1792,6 +1792,39 @@ button.danger:not(:disabled):hover { filter: brightness(1.1); }
   line-height: 1.5;
   margin: 4px 0 14px;
 }
+
+/* ---------------- Restart All modal ---------------- */
+#restart-all-select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 4px 0 8px;
+}
+#restart-all-list {
+  max-height: 42vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.restart-all-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+.restart-all-row:last-child { border-bottom: none; }
+.restart-all-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.restart-all-row-note { font-size: 0.72rem; color: var(--text-muted); }
+.restart-all-row-status { font-size: 0.78rem; min-width: 110px; text-align: right; }
+.restart-all-row-status.status-pending { color: var(--text-muted); }
+.restart-all-row-status.status-active { color: var(--accent); }
+.restart-all-row-status.status-success { color: var(--health-healthy); }
+.restart-all-row-status.status-skip { color: var(--text-muted); font-style: italic; }
+.restart-all-row-status.status-error { color: var(--health-critical); }
 #pick-avatar-btn {
   background: var(--bg-panel);
   border: 1px solid var(--border);

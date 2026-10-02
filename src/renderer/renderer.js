@@ -4693,6 +4693,176 @@ restartSessionBtn.addEventListener("click", async () => {
   }
 });
 
+// Restart All: the same per-agent restart (kill + re-dispatch `claude --bg
+// --resume <id>`, conversation kept) run across the whole fleet, or a chosen
+// subset. Iddo's ask (2026-10-02) - after changing an autoMode/settings
+// change that applies fleet-wide, clicking Restart Session on 8 agents by
+// hand was the actual friction.
+//
+// Busy/paused handling deliberately does NOT reuse the single-agent button's
+// `session.busy` (renderer-side, pty-silence-derived, and only populated for
+// an agent whose chat has been opened this launch - see showTerminalFor()).
+// That would silently skip the busy check entirely for any agent never
+// clicked into yet. Instead this calls getSessionActivity() (the same
+// transcript+pid-liveness check the main process already uses - see
+// archive.js finishSessionActivity) fresh, right before each agent's own
+// restart, since that is backed by the live session cwd on disk and works
+// identically whether or not that agent's terminal has ever been attached.
+// Paused agents (agent.paused) are left unchecked by default in the picker
+// rather than silently included - a fleet restart that quietly un-pauses
+// something a human paused on purpose would be a surprising side effect.
+//
+// Restarts run sequentially, not in parallel: it keeps the per-row progress
+// readable, and avoids N `claude --bg` processes all starting at once.
+const restartAllBtn = document.getElementById("restart-all-btn");
+const restartAllModalEl = document.getElementById("restart-all-modal");
+const restartAllListEl = document.getElementById("restart-all-list");
+const restartAllSelectAllCb = document.getElementById("restart-all-select-all-cb");
+const restartAllCountEl = document.getElementById("restart-all-count");
+const restartAllSummaryEl = document.getElementById("restart-all-summary");
+const cancelRestartAllBtn = document.getElementById("cancel-restart-all-btn");
+const confirmRestartAllBtn = document.getElementById("confirm-restart-all-btn");
+
+let restartAllInProgress = false;
+let restartAllRows = new Map(); // agentPath -> { checkbox, statusEl }
+
+function restartAllSetRowStatus(agentPath, cls, text) {
+  const row = restartAllRows.get(agentPath);
+  if (!row) return;
+  row.statusEl.className = "restart-all-row-status " + cls;
+  row.statusEl.textContent = text;
+}
+
+function restartAllUpdateCount() {
+  let checked = 0;
+  for (const { checkbox } of restartAllRows.values()) if (checkbox.checked) checked++;
+  restartAllCountEl.textContent = checked + " selected";
+  confirmRestartAllBtn.disabled = restartAllInProgress || checked === 0;
+  restartAllSelectAllCb.checked = checked > 0 && checked === restartAllRows.size;
+}
+
+function openRestartAllModal() {
+  restartAllListEl.innerHTML = "";
+  restartAllRows = new Map();
+  restartAllSummaryEl.classList.add("hidden");
+  restartAllInProgress = false;
+  cancelRestartAllBtn.disabled = false;
+  cancelRestartAllBtn.textContent = "Cancel";
+
+  const sorted = [...agents].sort((a, b) => (a.displayName || "").localeCompare(b.displayName || ""));
+  for (const agent of sorted) {
+    const row = document.createElement("div");
+    row.className = "restart-all-row";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !agent.paused;
+    checkbox.addEventListener("change", restartAllUpdateCount);
+
+    const name = document.createElement("span");
+    name.className = "restart-all-row-name";
+    name.textContent = agent.displayName || agent.folderName || agent.path;
+    if (agent.paused) {
+      const note = document.createElement("span");
+      note.className = "restart-all-row-note";
+      note.textContent = " (paused - unchecked by default)";
+      name.appendChild(note);
+    }
+
+    const status = document.createElement("span");
+    status.className = "restart-all-row-status status-pending";
+    status.textContent = "";
+
+    row.appendChild(checkbox);
+    row.appendChild(name);
+    row.appendChild(status);
+    restartAllListEl.appendChild(row);
+    restartAllRows.set(agent.path, { checkbox, statusEl: status });
+  }
+
+  restartAllUpdateCount();
+  restartAllModalEl.classList.remove("hidden");
+}
+
+restartAllBtn.addEventListener("click", openRestartAllModal);
+
+restartAllSelectAllCb.addEventListener("click", () => {
+  const checkAll = restartAllSelectAllCb.checked;
+  for (const { checkbox } of restartAllRows.values()) checkbox.checked = checkAll;
+  restartAllUpdateCount();
+});
+
+cancelRestartAllBtn.addEventListener("click", () => {
+  if (restartAllInProgress) return; // disabled while running - see below
+  restartAllModalEl.classList.add("hidden");
+});
+
+confirmRestartAllBtn.addEventListener("click", async () => {
+  if (restartAllInProgress) return;
+  const selected = [...restartAllRows.entries()].filter(([, row]) => row.checkbox.checked).map(([path]) => path);
+  if (selected.length === 0) return;
+
+  restartAllInProgress = true;
+  confirmRestartAllBtn.disabled = true;
+  restartAllSelectAllCb.disabled = true;
+  cancelRestartAllBtn.disabled = true;
+  for (const { checkbox } of restartAllRows.values()) checkbox.disabled = true;
+
+  let restarted = 0, skipped = 0, failed = 0;
+  for (const agentPath of selected) {
+    restartAllSetRowStatus(agentPath, "status-active", "Checking…");
+    let activity = null;
+    try {
+      activity = await window.api.getSessionActivity(agentPath);
+    } catch (e) {
+      activity = null; // unknown - treat as not-busy rather than block the whole batch on one read failure
+    }
+    if (activity && activity.working) {
+      restartAllSetRowStatus(agentPath, "status-skip", "Skipped (busy)");
+      skipped++;
+      continue;
+    }
+
+    restartAllSetRowStatus(agentPath, "status-active", "Restarting…");
+    try {
+      const convos = await window.api.listConversations(agentPath);
+      const cur = (convos || []).find((c) => c.isCurrent) || (convos || [])[0];
+      const sessionId = cur && cur.sessionId;
+      if (!sessionId) {
+        restartAllSetRowStatus(agentPath, "status-error", "No conversation yet");
+        failed++;
+        continue;
+      }
+      await window.api.switchConversation(agentPath, { resumeSessionId: sessionId });
+      // Same as the single-agent Restart Session handler: if this is the
+      // currently open chat, refresh its view so it re-attaches immediately
+      // instead of showing a stale terminal until next clicked.
+      if (activeAgentPath === agentPath) {
+        reloadAgentSessionView(agentPath);
+        const agentObj = agents.find((a) => a.path === agentPath);
+        if (agentObj) selectAgent(agentObj);
+      }
+      restartAllSetRowStatus(agentPath, "status-success", "✓ Restarted");
+      restarted++;
+    } catch (e) {
+      restartAllSetRowStatus(agentPath, "status-error", "✗ " + (e.message || String(e)));
+      failed++;
+    }
+  }
+
+  restartAllSummaryEl.textContent =
+    `Done - ${restarted} restarted, ${skipped} skipped (busy), ${failed} failed` +
+    (selected.length < restartAllRows.size ? `, ${restartAllRows.size - selected.length} not selected` : "") + ".";
+  restartAllSummaryEl.classList.remove("hidden");
+
+  restartAllInProgress = false;
+  cancelRestartAllBtn.disabled = false;
+  cancelRestartAllBtn.textContent = "Close";
+  // Leave checkboxes/Restart Selected disabled - reopening the picker
+  // (closing and clicking Restart All again) gives a clean fresh run rather
+  // than letting a second pass silently re-use stale row state.
+});
+
 loadAgents();
 
 window.api.getAppVersion().then((v) => {
