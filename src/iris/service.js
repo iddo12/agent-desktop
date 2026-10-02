@@ -461,7 +461,7 @@ class IrisService {
   }
 
   // ---------- messages ----------
-  send({ peerId, text, type = "info", replyTo = null, fromAgent = null, lifetimeMs }) {
+  send({ peerId, text, type = "info", replyTo = null, fromAgent = null, lifetimeMs, viaAgent = false }) {
     const key = String(peerId || "");
     let peer = this._peer(key);
     if (!peer) {
@@ -503,8 +503,12 @@ class IrisService {
     // to the LAN - it only leaves after a human clicks approve in the Links
     // tab (security review 2026-10-02, finding 1). A fresh info/request made
     // through the Links tab's own send box is the human acting directly, so
-    // it still queues immediately.
-    if (replyTo) {
+    // it still queues immediately. The gate is keyed on the sender (viaAgent,
+    // hard-coded true only by the agent pipe handler), not on whether the
+    // caller happened to set replyTo - an agent send with no replyTo must not
+    // be able to skip the human click (security review 2026-10-02, follow-up
+    // on finding 1).
+    if (replyTo || viaAgent) {
       this.pendingSends.push({ peerId: peer.id, env, queuedAt: new Date(now).toISOString() });
       this._save();
       this._audit({ event: "send-pending-approval", peer: peer.id, id: env.id, type, hop, text });

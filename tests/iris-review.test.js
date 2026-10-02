@@ -242,6 +242,26 @@ test("#12 only private/LAN addresses are accepted as a source or a join target",
   }
 });
 
+test("#13 the approval gate is keyed on the sender (viaAgent), not on whether replyTo happens to be set", async () => {
+  const { A, B } = await pair();
+  try {
+    // an agent send with no replyTo and type info must still be held
+    const a = A.send({ peerId: B.me.id, text: "agent says hi", type: "info", viaAgent: true });
+    assert.equal(a.ok, true);
+    assert.equal(a.pending, true);
+    assert.equal(A.outbox.some((o) => o.env.id === a.id), false);
+    assert.equal(A.pendingSends.some((p) => p.env.id === a.id), true);
+    assert.equal(A.approveSend(a.id).ok, true);
+    assert.equal(A.outbox.some((o) => o.env.id === a.id), true);
+    // a Links-tab send of the same text (no viaAgent) still goes straight out
+    const human = A.send({ peerId: B.me.id, text: "agent says hi", type: "info" });
+    assert.equal(human.ok, true);
+    assert.equal(human.pending, undefined);
+    assert.equal(A.outbox.some((o) => o.env.id === human.id), true);
+    assert.equal(A.pendingSends.some((p) => p.env.id === human.id), false);
+  } finally { await A.stop(); await B.stop(); }
+});
+
 test("#9 no prototype pollution through peer ids", async () => {
   const { A, B, pa } = await pair();
   try {

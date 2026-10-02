@@ -161,7 +161,11 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
       let res;
       try {
         if (req.cmd === "send") {
-          res = svc.send({ peerId: req.to, text: req.text, type: req.type || "info", replyTo: req.replyTo || null, fromAgent: req.fromAgent || "local tool" });
+          // viaAgent is hard-coded true here, never read from req - the pipe is
+          // the agent/CLI path, so every send through it must hold for human
+          // approval regardless of whether the agent bothered to set replyTo
+          // (security review 2026-10-02, follow-up on finding 1).
+          res = svc.send({ peerId: req.to, text: req.text, type: req.type || "info", replyTo: req.replyTo || null, fromAgent: req.fromAgent || "local tool", viaAgent: true });
           if (res.ok) await svc.flushOutbox();
           const item = svc.outbox.find((o) => o.env.id === res.id);
           if (item) res.status = item.status;
