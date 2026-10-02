@@ -47,6 +47,16 @@ function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, lo
     }
   });
 
+  // v1.63.4: deliver a prompt over the agent's message channel (see agentChannel.js). Returns
+  // {ok:false, reason} when the channel is unavailable so the renderer falls back to pty typing.
+  ipcMain.handle("guard-channel-send", async (event, { agentPath, text }) => {
+    try {
+      return await require("./agentChannel").send(agentPath, String(text || ""));
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  });
+
   ipcMain.handle("guard-handoff-info", (event, { agentPath }) => {
     try {
       const p = path.join(agentPath, "handoff_latest.md");

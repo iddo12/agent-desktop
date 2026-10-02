@@ -382,13 +382,41 @@
     }
   }
 
+  // v1.63.4: handoff prompts go over the message channel with an acknowledgement, typed into the pty
+  // only if the channel is unavailable, and are then VERIFIED in the transcript (retry with backoff,
+  // every attempt logged to stuck-turn-watchdog.log). The pty is what silently lost them on 2026-10-03.
+  function deliverHandoffPrompt(agentPath, text, flow) {
+    let ptyTries = 0;
+    const nm = agentName(agentPath);
+    return window.HandoffDelivery.deliver(text, {
+      channelSend: (t) => window.api.channelSend(agentPath, t),
+      // first pty attempt respects the busy-queue; a retry must type directly or it would queue behind itself
+      ptySend: (t) => { if (ptyTries++ === 0) queueOrSend(agentPath, t); else submitToAgent(agentPath, t); },
+      transcriptHas: (m) => window.api.transcriptHas(agentPath, m),
+      log: (line) => window.autoHandoffLog(nm + ": " + line),
+    }).then((r) => {
+      if (flow) flow.delivery = r;
+      if (!r.delivered) window.autoHandoffLog("handoff prompt for " + nm + " NOT confirmed in transcript after " + r.attempts + " attempts");
+      return r;
+    }).catch((e) => { window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message)); });
+  }
+
+  // v1.63.4: the existing handoff_latest.md may predate this request entirely (the agent never saw it).
+  function staleWarning(flow) {
+    const s = window.HandoffDelivery.staleInfo({ exists: !!flow.existingMtimeMs, mtimeMs: flow.existingMtimeMs }, flow.startedAt);
+    if (!s.stale) return "";
+    const mins = Math.round(s.ageMs / 60000);
+    return " WARNING: that file is STALE - it was last written " + (mins >= 60 ? Math.round(mins / 60) + " h" : mins + " min") +
+      " before this handoff request, so it does not contain this session's lessons.";
+  }
+
   async function startFlow(agentPath, confirmFirst) {
     try {
       if (!agentPath || flows.has(agentPath)) return;
       if (confirmFirst && !confirm("Ask this agent to save its lessons + a handoff file, then reset the session and resume from the handoff?")) return;
       const flow = { phase: "saving", startedAt: Date.now(), error: null, quietPolls: 0 };
       flows.set(agentPath, flow);
-      queueOrSend(agentPath, handoffPrompt(agentPath));
+      deliverHandoffPrompt(agentPath, handoffPrompt(agentPath), flow);
       render();
       flow.timer = setInterval(() => advanceFlow(agentPath), FLOW_POLL_MS);
     } catch (e) {
@@ -406,11 +434,13 @@
       if (Date.now() - flow.startedAt - (flow.pausedMs || 0) > HANDOFF_TIMEOUT_MS) {
         const ex = await window.api.getHandoffInfo(agentPath);
         flow.canUseExisting = !!(ex && ex.exists);
+        flow.existingMtimeMs = ex && ex.exists ? ex.mtimeMs : 0;
         flow.phase = "failed";
         window.autoHandoffLog("flow FAILED for " + agentName(agentPath));
         flow.error =
           "The agent did not finish the handoff within 12 minutes - nothing was reset." +
-          (flow.canUseExisting ? " A handoff_latest.md already exists; if it is the one you want, use the button to reset with it." : "");
+          (flow.canUseExisting ? " A handoff_latest.md already exists; if it is the one you want, use the button to reset with it." +
+            staleWarning(flow) : "");
         clearInterval(flow.timer);
         render();
         return;
@@ -437,10 +467,11 @@
         flow.idleStalePolls = 0;
         const fileP = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";
         const last = info && info.exists ? new Date(info.mtimeMs).toLocaleTimeString() : "never";
-        submitToAgent(
+        deliverHandoffPrompt(
           agentPath,
           "[Agent Desktop] Your last reply said the handoff was saved, but " + fileP + " has NOT been rewritten since this request (file last modified: " + last + "). " +
-            "Do not answer from memory. Use a tool to write that exact file now with the sections requested (# Handoff, ## LESSONS, ## OPEN NOW, ## STATE, ## KEY FACTS); if the Write tool fails, write it with a Bash heredoc or a Python script. Then reply with only 'Handoff saved'."
+            "Do not answer from memory. Use a tool to write that exact file now with the sections requested (# Handoff, ## LESSONS, ## OPEN NOW, ## STATE, ## KEY FACTS); if the Write tool fails, write it with a Bash heredoc or a Python script. Then reply with only 'Handoff saved'.",
+          flow
         );
         return;
       }
@@ -814,9 +845,10 @@
           // let the user reset using it instead of making the agent write it again.
           if (flow.canUseExisting) {
             btns.unshift({
-              label: "Reset using the existing handoff",
+              label: staleWarning(flow) ? "Reset using the existing handoff (STALE)" : "Reset using the existing handoff",
               onClick: async () => {
                 try {
+                  if (staleWarning(flow) && !confirm("handoff_latest.md is older than this handoff request - it will NOT contain this session's lessons. Reset with it anyway?")) return;
                   flow.canUseExisting = false;
                   await runReset(ap, flow);
                 } catch (e) {
