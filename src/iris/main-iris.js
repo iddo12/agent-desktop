@@ -52,7 +52,6 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
     protect,
     unprotect,
     log: (l) => say(l),
-    sendHint: `node "${toolPath}"${isTest ? " --test" : ""}`,
     deliver: (peer, env, framed, inboxFile) => {
       pending.push({ id: env.id, peer: peer.name, peerId: peer.id, type: env.type, inboxFile, at: new Date().toISOString() });
       savePending();
@@ -70,7 +69,17 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
   }
   if (!canProtect) say("iris: safeStorage unavailable - keys stored unencrypted in userData");
 
-  svc.onChange(() => push("iris-changed", {}));
+  svc.onChange((what) => {
+    push("iris-changed", {});
+    if (what === "pending-sends") {
+      try {
+        const n = svc.status().pendingSends.length;
+        if (n && Notification && Notification.isSupported()) {
+          new Notification({ title: "IRIS: a reply needs your approval", body: `${n} reply${n === 1 ? "" : "ies"} waiting in the Links tab before ${n === 1 ? "it" : "they"} can send.` }).show();
+        }
+      } catch (e) {}
+    }
+  });
   if (svc.state.enabled) svc.start().catch((e) => say(`iris start failed: ${e.message}`));
 
   const h = (name, fn) => ipcMain.handle(name, async (event, arg) => {
@@ -85,6 +94,8 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
   h("iris-set-peer", ({ peerId, patch }) => svc.setPeer(peerId, patch || {}));
   h("iris-unpair", ({ peerId }) => svc.unpair(peerId));
   h("iris-send", ({ peerId, text, type, replyTo }) => svc.send({ peerId, text, type, replyTo, fromAgent: "user (Links tab)" }));
+  h("iris-approve-send", ({ id }) => svc.approveSend(id));
+  h("iris-reject-send", ({ id }) => svc.rejectSend(id));
   h("iris-log", ({ limit }) => svc.readLog(limit || 200));
   h("iris-pending", () => pending.map((p) => {
     let text = "";

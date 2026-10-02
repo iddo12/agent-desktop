@@ -68,7 +68,11 @@ sock.on("end", () => {
   try { res = JSON.parse(buf.trim()); } catch (e) { fail("bad reply from Agent Desktop"); }
   if (!res.ok) fail(res.reason || "failed");
   if (cmd === "send") {
-    console.log(`sent to ${res.peer} - id ${res.id} - ${res.status === "delivered" ? "delivered" : "queued (will retry until it expires)"}`);
+    if (res.pending) {
+      console.log(`queued to ${res.peer} - id ${res.id} - a reply only leaves this machine after a human approves it in the Links tab`);
+    } else {
+      console.log(`sent to ${res.peer} - id ${res.id} - ${res.status === "delivered" ? "delivered" : "queued (will retry until it expires)"}`);
+    }
   } else {
     console.log(JSON.stringify(res, null, 2));
   }

@@ -78,9 +78,13 @@ function exchange(host, port, obj) {
 }
 
 // Peer names are chosen by the other side and later shown to our COO inside
-// the fixed frame - keep them to plain, short, single-line text.
+// the fixed frame - keep them to plain, short, single-line text. Allowlist,
+// not a denylist (security review 2026-10-02, finding 3): a denylist of a
+// handful of punctuation characters let ESC, DEL and other control bytes
+// through untouched.
+const NAME_CHAR_RE = /[^A-Za-z0-9 .()_-]/g;
 function cleanName(n) {
-  return gw.stripInvisible(String(n || "Agent Desktop")).replace(/[\r\n\t"`<>\[\]{}]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || "Agent Desktop";
+  return gw.stripInvisible(String(n || "Agent Desktop")).replace(NAME_CHAR_RE, " ").replace(/\s+/g, " ").trim().slice(0, 60) || "Agent Desktop";
 }
 
 function lanAddresses() {
@@ -97,8 +101,31 @@ function lanAddresses() {
   return home.length ? home : out;
 }
 
+// The listener binds 0.0.0.0 so any device on the LAN (a phone running an
+// invite scanner, say) can reach it, but that means it would otherwise also
+// accept a connection routed in from the internet. Security review
+// 2026-10-02, finding 4: only accept traffic to/from a private/LAN address.
+// `host` must already be a bare IPv4 literal or loopback name - IRIS invites
+// only ever carry an IP (see lanAddresses()/join() below), never a hostname,
+// so anything else is refused rather than guessed at.
+function isPrivateHost(host) {
+  const h = String(host || "").replace(/^::ffff:/i, "");
+  if (h === "127.0.0.1" || h === "::1" || h === "localhost") return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!m) return false;
+  const a = Number(m[1]), b = Number(m[2]);
+  if ([a, b, Number(m[3]), Number(m[4])].some((n) => n > 255)) return false;
+  if (a === 10) return true;                          // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true;    // 172.16.0.0/12
+  if (a === 192 && b === 168) return true;             // 192.168.0.0/16
+  if (a === 127) return true;                          // 127.0.0.0/8 loopback
+  if (a === 169 && b === 254) return true;             // 169.254.0.0/16 link-local
+  if (a === 100 && b >= 64 && b <= 127) return true;    // 100.64.0.0/10 (Tailscale CGNAT)
+  return false;
+}
+
 class IrisService {
-  // opts: { dir, name, port, bindHost, protect, unprotect, deliver(peer, env, framed, inboxFile), log(line), now(), sendHint }
+  // opts: { dir, name, port, bindHost, protect, unprotect, deliver(peer, env, framed, inboxFile), log(line), now() }
   constructor(opts) {
     this.dir = opts.dir;
     this.opts = opts;
@@ -124,6 +151,9 @@ class IrisService {
     this.state.receivedHops = nullProto(this.state.receivedHops);
     if (opts.port) this.state.port = opts.port;
     this.outbox = readJson(this._p("outbox.json"), []);
+    // Replies an agent composed on its own initiative, held for a human click
+    // before they leave the machine (security review 2026-10-02, finding 1).
+    this.pendingSends = readJson(this._p("pending-sends.json"), []);
   }
 
   _p(f) { return path.join(this.dir, f); }
@@ -150,6 +180,7 @@ class IrisService {
     atomicWrite(this._p("peers.json"), JSON.stringify(this.peers, null, 2));
     atomicWrite(this._p("state.json"), JSON.stringify(this.state));
     atomicWrite(this._p("outbox.json"), JSON.stringify(this.outbox, null, 2));
+    atomicWrite(this._p("pending-sends.json"), JSON.stringify(this.pendingSends, null, 2));
   }
 
   _audit(entry) {
@@ -192,6 +223,10 @@ class IrisService {
         pairedAt: p.pairedAt, fingerprint: ic.fingerprint(this.me, p), lastSeen: p.lastSeen || null,
       })),
       outbox: this.outbox.map((o) => ({ id: o.env.id, peer: o.peerId, status: o.status, tries: o.tries, lastError: o.lastError || null })),
+      pendingSends: this.pendingSends.map((p) => ({
+        id: p.env.id, peer: p.peerId, peerName: (this._peer(p.peerId) || {}).name || p.peerId,
+        type: p.env.type, text: p.env.text, replyTo: p.env.replyTo || null, queuedAt: p.queuedAt,
+      })),
     };
   }
 
@@ -299,6 +334,10 @@ class IrisService {
 
   _onConnection(sock) {
     const ip = (sock.remoteAddress || "").replace(/^::ffff:/, "");
+    if (!isPrivateHost(ip)) {
+      this._auditLimited(`${ip}|non-private-source`, { event: "frame-dropped", ip, reason: "non-private-source" });
+      return sock.destroy();
+    }
     if (this._rateLimited(ip)) return sock.destroy();
     this.openConns.set(ip, (this.openConns.get(ip) || 0) + 1);
     let released = false;
@@ -391,6 +430,7 @@ class IrisService {
     const m = /^IRIS1:([^:]+):(\d{1,5}):([0-9A-Za-z-]+)$/.exec(String(inviteString || "").trim());
     if (!m) return { ok: false, reason: "bad-invite-format" };
     const [, host, portStr, code] = m;
+    if (!isPrivateHost(host)) return { ok: false, reason: "non-private-host" };
     const port = Number(portStr);
     const mine = Object.assign(ic.publicPart(this.me), { port: this.state.port });
     let reply;
@@ -459,11 +499,47 @@ class IrisService {
     if (fromAgent) env.fromAgent = String(fromAgent).slice(0, 80);
     const bad = gw.validateEnvelope(env);
     if (bad) return { ok: false, reason: bad };
+    // A reply is a message an agent composed on its own initiative, addressed
+    // to the LAN - it only leaves after a human clicks approve in the Links
+    // tab (security review 2026-10-02, finding 1). A fresh info/request made
+    // through the Links tab's own send box is the human acting directly, so
+    // it still queues immediately.
+    if (replyTo) {
+      this.pendingSends.push({ peerId: peer.id, env, queuedAt: new Date(now).toISOString() });
+      this._save();
+      this._audit({ event: "send-pending-approval", peer: peer.id, id: env.id, type, hop, text });
+      this._changed("pending-sends");
+      return { ok: true, pending: true, id: env.id, peer: peer.name, reason: "awaiting-approval" };
+    }
     this.outbox.push({ peerId: peer.id, env, status: "pending", tries: 0 });
     this._save();
     this._audit({ event: "queued", dir: "out", peer: peer.id, id: env.id, type, hop, text });
     this.flushOutbox().catch(() => {});
     return { ok: true, id: env.id, peer: peer.name };
+  }
+
+  // A human in the Links tab reviewed a pending reply and let it go.
+  approveSend(id) {
+    const idx = this.pendingSends.findIndex((p) => p.env.id === id);
+    if (idx < 0) return { ok: false, reason: "unknown-id" };
+    const [item] = this.pendingSends.splice(idx, 1);
+    this.outbox.push({ peerId: item.peerId, env: item.env, status: "pending", tries: 0 });
+    this._save();
+    this._audit({ event: "send-approved", dir: "out", peer: item.peerId, id: item.env.id, type: item.env.type, hop: item.env.hop, text: item.env.text });
+    this._changed("pending-sends");
+    this.flushOutbox().catch(() => {});
+    return { ok: true, id: item.env.id };
+  }
+
+  // A human in the Links tab discarded a pending reply - it never leaves.
+  rejectSend(id) {
+    const idx = this.pendingSends.findIndex((p) => p.env.id === id);
+    if (idx < 0) return { ok: false, reason: "unknown-id" };
+    const [item] = this.pendingSends.splice(idx, 1);
+    this._save();
+    this._audit({ event: "send-rejected", peer: item.peerId, id: item.env.id });
+    this._changed("pending-sends");
+    return { ok: true };
   }
 
   // Callers always get a promise that settles after a pass which started
@@ -533,7 +609,7 @@ class IrisService {
     if (Number.isInteger(payload.port) && payload.port > 0 && payload.port < 65536 && ip) peer.addr = { host: ip, port: payload.port };
     peer.lastSeen = new Date(this.now()).toISOString();
     this.state.receivedHops[`${peer.id}:${env.id}`] = { hop: env.hop, at: this.now() };
-    const framed = gw.frameForCoo(peer, env, this.opts.sendHint);
+    const framed = gw.frameForCoo(peer, env);
     // File name from OUR clock and the (pattern-checked) id - never peer text.
     const stamp = new Date(this.now()).toISOString().replace(/[:.]/g, "-");
     const inboxFile = path.join(this.dir, "inbox", `${stamp}_${env.id}.md`);
@@ -567,4 +643,4 @@ class IrisService {
   }
 }
 
-module.exports = { IrisService, DEFAULT_PORT, exchange, lanAddresses, cleanName };
+module.exports = { IrisService, DEFAULT_PORT, exchange, lanAddresses, cleanName, isPrivateHost };

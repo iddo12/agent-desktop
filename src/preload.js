@@ -105,6 +105,8 @@ contextBridge.exposeInMainWorld("api", {
     setPeer: (peerId, patch) => ipcRenderer.invoke("iris-set-peer", { peerId, patch }),
     unpair: (peerId) => ipcRenderer.invoke("iris-unpair", { peerId }),
     send: (peerId, text, type, replyTo) => ipcRenderer.invoke("iris-send", { peerId, text, type, replyTo }),
+    approveSend: (id) => ipcRenderer.invoke("iris-approve-send", { id }),
+    rejectSend: (id) => ipcRenderer.invoke("iris-reject-send", { id }),
     log: (limit) => ipcRenderer.invoke("iris-log", { limit }),
     pending: () => ipcRenderer.invoke("iris-pending"),
     prepareDelivery: (id, agentPath) => ipcRenderer.invoke("iris-prepare-delivery", { id, agentPath }),
