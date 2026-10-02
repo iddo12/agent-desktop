@@ -20,46 +20,60 @@
 
   const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // deps: { channelSend(text) -> {ok, reason?}, ptySend(text) -> void, transcriptHas(marker) -> bool,
+  // deps: { channelSend(text, {ttlSec}) -> {ok, reason?}, ptySend(text) -> void, transcriptHas(marker) -> bool,
+  //         ptyQueued() -> bool (the prompt is still in the busy-agent send queue), aborted() -> bool,
   //         log(line), sleep(ms), now() }
-  // Returns { delivered, via, attempts }.
+  // Rules (v1.63.7): the channel is tried AT MOST ONCE per delivery (an acked send that does not land
+  // is never re-dropped; later attempts use the pty); a pty retry is skipped while the previous pty
+  // prompt is still queued (it would type a duplicate); everything stops once aborted() is true.
+  // Returns { delivered, via, attempts, aborted? }.
   async function deliver(text, deps, opts) {
     const o = Object.assign({}, DEFAULTS, opts || {});
     const sleep = deps.sleep || defaultSleep;
     const now = deps.now || Date.now;
     const log = deps.log || (() => {});
+    const aborted = () => { try { return !!(deps.aborted && deps.aborted()); } catch (e) { return false; } };
     const marker = o.marker || makeMarker(now());
     const body = marker + " " + text;
     let channelUsable = !!deps.channelSend;
-    let via = null;
+    let via = null, ptySent = false;
     for (let attempt = 1; attempt <= o.maxAttempts; attempt++) {
-      let sentVia = null;
+      if (aborted()) { log("handoff-delivery: stopped (flow no longer active)"); return { delivered: false, via, attempts: attempt - 1, marker, aborted: true }; }
+      let sentVia = null, skipped = false;
       if (channelUsable) {
+        channelUsable = false; // one channel attempt per delivery, whatever the outcome
         let r = null;
-        try { r = await deps.channelSend(body); } catch (e) { r = { ok: false, reason: e && e.message }; }
+        try { r = await deps.channelSend(body, { ttlSec: o.ttlSec || 120 }); } catch (e) { r = { ok: false, reason: e && e.message }; }
         if (r && r.ok) {
           sentVia = "channel";
           log("handoff-delivery attempt " + attempt + ": sent via message channel (acked)");
         } else {
-          channelUsable = false; // pipe unavailable or rejected: type into the pty from now on
           log("handoff-delivery attempt " + attempt + ": message channel unavailable (" + ((r && r.reason) || "no reason") + ") - falling back to pty typing");
         }
       }
       if (!sentVia) {
-        try { deps.ptySend(body); sentVia = "pty"; log("handoff-delivery attempt " + attempt + ": typed into pty"); }
-        catch (e) { log("handoff-delivery attempt " + attempt + ": pty send FAILED: " + (e && e.message)); }
+        let queued = false;
+        try { queued = ptySent && !!(deps.ptyQueued && deps.ptyQueued()); } catch (e) {}
+        if (queued) {
+          skipped = true;
+          log("handoff-delivery attempt " + attempt + ": previous prompt still queued for a busy agent - not typing a duplicate, waiting");
+        } else {
+          try { deps.ptySend(body); ptySent = true; sentVia = "pty"; log("handoff-delivery attempt " + attempt + ": typed into pty"); }
+          catch (e) { log("handoff-delivery attempt " + attempt + ": pty send FAILED: " + (e && e.message)); }
+        }
       }
-      if (sentVia) {
-        via = sentVia;
+      if (sentVia || skipped) {
+        if (sentVia) via = sentVia;
         const waitMs = o.verifyWaitMs[Math.min(attempt - 1, o.verifyWaitMs.length - 1)];
         const t0 = now();
         for (;;) {
           let has = false;
           try { has = await deps.transcriptHas(marker); } catch (e) {}
           if (has) {
-            log("handoff-delivery attempt " + attempt + ": landed in transcript via " + sentVia);
-            return { delivered: true, via: sentVia, attempts: attempt, marker };
+            log("handoff-delivery attempt " + attempt + ": landed in transcript via " + (sentVia || via));
+            return { delivered: true, via: sentVia || via, attempts: attempt, marker };
           }
+          if (aborted()) { log("handoff-delivery: stopped (flow no longer active)"); return { delivered: false, via, attempts: attempt, marker, aborted: true }; }
           if (now() - t0 >= waitMs) break;
           await sleep(Math.min(o.pollMs, Math.max(0, waitMs - (now() - t0))) || 1);
         }

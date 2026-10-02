@@ -60,6 +60,7 @@
   // Now agentPath -> { at, count }: a retry is allowed after a cool-down (10 min, doubling per
   // attempt, capped at 1 h) and only if the agent is idle, still over the line and has no live flow.
   const autoHandedOff = new Map();
+  const MAX_AUTO_ATTEMPTS = 3;                   // loop safeguard: at most 3 automatic handoff attempts per agent per run
   const RETRY_BASE_MS = 10 * 60 * 1000;
   const RETRY_MAX_MS = 60 * 60 * 1000;
   const STALE_FLOW_MS = 45 * 60 * 1000;          // a non-failed flow older than this is wedged (timer lost)
@@ -262,6 +263,8 @@
         if (prior) {
           const fl = flows.get(a.path);
           if (fl && fl.phase !== "failed") { glog(nm, "inflow", nm + " " + k + ": skipped, its own flow is still running (" + fl.phase + ")"); continue; }
+          if (!fl || fl.phase !== "failed") { glog(nm, "notfailed", nm + " " + k + ": skipped, previous flow did not end failed - not re-running"); continue; }
+          if (prior.count >= MAX_AUTO_ATTEMPTS) { glog(nm, "cap", nm + " " + k + ": skipped, already tried " + prior.count + " times this run - giving up until it drops under the line"); continue; }
           const wait = retryCooldownMs(prior.count) - (Date.now() - prior.at);
           if (wait > 0) { glog(nm, "cool", nm + " " + k + ": skipped, cooling down after attempt #" + prior.count + ", retry in " + Math.ceil(wait / 1000) + " s"); continue; }
           // cool-down over, agent idle and still over the line: drop the dead flow and try again
@@ -389,17 +392,30 @@
     let ptyTries = 0;
     const nm = agentName(agentPath);
     if (flow) flow.deliveryPending = (flow.deliveryPending || 0) + 1; // nudges wait for this (see advanceFlow)
-    return window.HandoffDelivery.deliver(text, {
-      channelSend: (t) => window.api.channelSend(agentPath, t),
-      // first pty attempt respects the busy-queue; a retry must type directly or it would queue behind itself
-      ptySend: (t) => { if (ptyTries++ === 0) queueOrSend(agentPath, t); else submitToAgent(agentPath, t); },
-      transcriptHas: (m) => window.api.transcriptHas(agentPath, m),
-      log: (line) => window.autoHandoffLog(nm + ": " + line),
-    }).finally(() => { if (flow) flow.deliveryPending = Math.max(0, (flow.deliveryPending || 1) - 1); }).then((r) => {
+    const settle = () => { if (flow) flow.deliveryPending = Math.max(0, (flow.deliveryPending || 1) - 1); };
+    let p;
+    try {
+      p = window.HandoffDelivery.deliver(text, {
+        channelSend: (t, o) => window.api.channelSend(agentPath, t, o),
+        // first pty attempt respects the busy-queue; a retry must type directly or it would queue behind itself
+        ptySend: (t) => { if (ptyTries++ === 0) queueOrSend(agentPath, t); else submitToAgent(agentPath, t); },
+        // never type a duplicate while the first prompt still waits in the busy agent's queue
+        ptyQueued: () => { const se = terminals.get(agentPath); return !!(se && se.sendQueue && se.sendQueue.some((q) => typeof q === "string" && q.indexOf(text) !== -1)); },
+        // stop as soon as the flow is cleared, replaced, failed, reaped or past the saving phase
+        aborted: () => !flow || flows.get(agentPath) !== flow || flow.phase !== "saving",
+        transcriptHas: (m) => window.api.transcriptHas(agentPath, m),
+        log: (line) => window.autoHandoffLog(nm + ": " + line),
+      });
+    } catch (e) {
+      settle();
+      window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message));
+      return Promise.resolve(null);
+    }
+    return p.then((r) => {
       if (flow) flow.delivery = r;
-      if (!r.delivered) window.autoHandoffLog("handoff prompt for " + nm + " NOT confirmed in transcript after " + r.attempts + " attempts");
+      if (!r.delivered && !r.aborted) window.autoHandoffLog("handoff prompt for " + nm + " NOT confirmed in transcript after " + r.attempts + " attempts");
       return r;
-    }).catch((e) => { window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message)); });
+    }).catch((e) => { window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message)); }).finally(settle);
   }
 
   // v1.63.4: the existing handoff_latest.md may predate this request entirely (the agent never saw it).

@@ -39,19 +39,32 @@ function resolveAddress(agentPath, sessionsDir) {
 // Until one is registered, send() reports unavailable and callers fall back to pty typing.
 // v1.63.5: the default transport is a file drop. It never talks to the pipe; it writes one JSON
 // request per file into the relay directory, and a separate Claude session (the "relay") delivers it
-// with SendMessage and moves it to ..\done\ or ..ailed\. Delivery is still judged by the
+// with SendMessage and moves it to done/ or failed/ (siblings of requests/). Delivery is still judged by the
 // marker-in-transcript check in handoffDelivery.js, so {ok:true, queued:true} only means "written".
-const DEFAULT_RELAY_DIR = "E:/Claude work/Security/handoff_relay/requests";
-function relayDir() { return process.env.AGENT_DESKTOP_RELAY_DIR || DEFAULT_RELAY_DIR; }
+const HEARTBEAT_MAX_AGE_MS = 60 * 1000; // the relay touches <relayDir>/../relay-alive every ~20 s
+function userDataDir() {
+  try { return require("electron").app.getPath("userData"); } catch (e) { return path.join(os.tmpdir(), "agent-desktop"); }
+}
+function relayDir() {
+  return process.env.AGENT_DESKTOP_RELAY_DIR || path.join(userDataDir(), "handoff_relay", "requests");
+}
+function heartbeatPath() { return path.join(relayDir(), "..", "relay-alive"); }
+function relayAlive() {
+  try { return Date.now() - fs.statSync(heartbeatPath()).mtimeMs < HEARTBEAT_MAX_AGE_MS; } catch (e) { return false; }
+}
 
 let seq = 0;
 function fileDropTransport(socketPath, text, meta) {
+  // No fresh heartbeat = nobody is delivering these files: report unavailable so the caller types into the pty.
+  if (!relayAlive()) return { ok: false, reason: "no relay" };
   const dir = relayDir();
   fs.mkdirSync(dir, { recursive: true });
-  const createdAt = new Date().toISOString();
+  const nowMs = Date.now();
+  const createdAt = new Date(nowMs).toISOString();
+  const ttlSec = (meta && meta.ttlSec) || 120;
   const id = createdAt.replace(/[-:.TZ]/g, "") + "-" + process.pid + "-" + (++seq) + "-" + Math.random().toString(36).slice(2, 8);
   const agent = (meta && meta.agent) || "";
-  const req = { id, agent, to: "uds:" + socketPath, text: String(text), createdAt };
+  const req = { id, agent, to: "uds:" + socketPath, text: String(text), createdAt, ttlSec, expiresAt: new Date(nowMs + ttlSec * 1000).toISOString() };
   const tmp = path.join(dir, "." + id + ".tmp");   // not *.json, so the reader never sees a partial file
   fs.writeFileSync(tmp, JSON.stringify(req), "utf-8");
   fs.renameSync(tmp, path.join(dir, id + ".json"));
@@ -61,16 +74,16 @@ function fileDropTransport(socketPath, text, meta) {
 let transport = fileDropTransport;
 function setTransport(fn) { transport = typeof fn === "function" ? fn : null; }
 
-async function send(agentPath, text, sessionsDir) {
+async function send(agentPath, text, sessionsDir, opts) {
   const addr = resolveAddress(agentPath, sessionsDir);
   if (!addr) return { ok: false, reason: "no live session address" };
   if (!transport) return { ok: false, reason: "no channel transport registered" };
   try {
-    const r = await transport(addr.socketPath, text, { agent: path.basename(path.resolve(agentPath)) });
+    const r = await transport(addr.socketPath, text, { agent: path.basename(path.resolve(agentPath)), ttlSec: (opts && opts.ttlSec) || 120 });
     return r && r.ok ? { ok: true, queued: !!r.queued } : { ok: false, reason: (r && r.reason) || "transport rejected" };
   } catch (e) {
     return { ok: false, reason: e && e.message };
   }
 }
 
-module.exports = { resolveAddress, setTransport, send, fileDropTransport, relayDir };
+module.exports = { resolveAddress, setTransport, send, fileDropTransport, relayDir, heartbeatPath, relayAlive };

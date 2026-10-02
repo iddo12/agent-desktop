@@ -70,6 +70,8 @@ test("file-drop transport: exact shape, atomic (no partial/tmp left), env overri
   const dir = path.join(d, "nested", "requests"); // created if missing
   const old = process.env.AGENT_DESKTOP_RELAY_DIR;
   process.env.AGENT_DESKTOP_RELAY_DIR = dir;
+  const hb = path.join(d, "nested", "relay-alive");
+  fs.mkdirSync(path.dirname(hb), { recursive: true }); fs.writeFileSync(hb, "x"); // fresh heartbeat
   try {
     assert.strictEqual(channel.relayDir(), dir);
     const r = channel.fileDropTransport("PIPE-Z", MULTI, { agent: "SEO Agent" });
@@ -77,7 +79,8 @@ test("file-drop transport: exact shape, atomic (no partial/tmp left), env overri
     const files = fs.readdirSync(dir);
     assert.deepStrictEqual(files, [r.id + ".json"]); // renamed into place, no .tmp left
     const j = JSON.parse(fs.readFileSync(path.join(dir, files[0]), "utf-8"));
-    assert.deepStrictEqual(Object.keys(j).sort(), ["agent", "createdAt", "id", "text", "to"]);
+    assert.deepStrictEqual(Object.keys(j).sort(), ["agent", "createdAt", "expiresAt", "id", "text", "to", "ttlSec"]);
+    assert.strictEqual(j.ttlSec, 120); assert.strictEqual(Date.parse(j.expiresAt) - Date.parse(j.createdAt), 120000);
     assert.strictEqual(j.id, r.id); assert.strictEqual(j.agent, "SEO Agent");
     assert.strictEqual(j.to, "uds:PIPE-Z"); assert.strictEqual(j.text, MULTI);
     assert.ok(!isNaN(Date.parse(j.createdAt)));
@@ -98,7 +101,49 @@ test("file-drop transport: exact shape, atomic (no partial/tmp left), env overri
     if (old === undefined) delete process.env.AGENT_DESKTOP_RELAY_DIR; else process.env.AGENT_DESKTOP_RELAY_DIR = old;
     channel.setTransport(channel.fileDropTransport);
   }
-  assert.strictEqual(channel.relayDir(), "E:/Claude work/Security/handoff_relay/requests");
+  assert.ok(/handoff_relay.requests$/.test(channel.relayDir()));
+});
+
+test("relay heartbeat absent or stale: transport unavailable, delivery uses pty on attempt 1", async () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "relayhb-"));
+  const old = process.env.AGENT_DESKTOP_RELAY_DIR;
+  process.env.AGENT_DESKTOP_RELAY_DIR = path.join(d, "requests");
+  try {
+    assert.deepStrictEqual(channel.fileDropTransport("P", "x", {}), { ok: false, reason: "no relay" });
+    assert.ok(!fs.existsSync(path.join(d, "requests"))); // nothing written
+    const hb = path.join(d, "relay-alive"); fs.writeFileSync(hb, "x");
+    const old2 = new Date(Date.now() - 90000); fs.utimesSync(hb, old2, old2);
+    assert.strictEqual(channel.relayAlive(), false);
+    const sd = fs.mkdtempSync(path.join(os.tmpdir(), "sess-")); const agent = path.join(sd, "A");
+    fs.writeFileSync(path.join(sd, "1.json"), JSON.stringify({ pid: process.pid, cwd: agent, messagingSocketPath: "PIPE", updatedAt: 1 }));
+    channel.setTransport(channel.fileDropTransport);
+    assert.deepStrictEqual(await channel.send(agent, "t", sd), { ok: false, reason: "no relay" });
+    t = 0; let pty = 0;
+    const r = await deliver("hi", { ...base(), channelSend: (x, o) => channel.send(agent, x, sd, o), ptySend: () => pty++, transcriptHas: async () => pty >= 1 });
+    assert.deepStrictEqual([r.delivered, r.via, r.attempts, pty], [true, "pty", 1, 1]);
+    fs.utimesSync(hb, new Date(), new Date());
+    assert.strictEqual(channel.relayAlive(), true);
+    assert.strictEqual((await channel.send(agent, "t", sd)).ok, true);
+  } finally { if (old === undefined) delete process.env.AGENT_DESKTOP_RELAY_DIR; else process.env.AGENT_DESKTOP_RELAY_DIR = old; }
+});
+test("acked channel that never lands: channel used once, attempt 2 is pty", async () => {
+  t = 0; let ch = 0, pty = 0;
+  const r = await deliver("hi", { ...base(), channelSend: async () => { ch++; return { ok: true }; }, ptySend: () => pty++, transcriptHas: async () => pty >= 1 });
+  assert.deepStrictEqual([r.delivered, r.via, r.attempts, ch, pty], [true, "pty", 2, 1, 1]);
+});
+test("never retypes while the first pty prompt is still queued", async () => {
+  t = 0; let pty = 0, queued = true;
+  const r = await deliver("hi", { ...base(), ptySend: () => pty++, ptyQueued: () => queued, transcriptHas: async () => { if (t > 9000) queued = false; return pty >= 2; } });
+  assert.strictEqual(r.delivered, true);
+  assert.ok(pty === 2 && r.attempts >= 2);
+  t = 0; pty = 0; queued = true;
+  await deliver("hi", { ...base(), ptySend: () => pty++, ptyQueued: () => true, transcriptHas: async () => false });
+  assert.strictEqual(pty, 1);
+});
+test("abort stops sending and typing", async () => {
+  t = 0; let pty = 0, ab = false;
+  const r = await deliver("hi", { ...base(), ptySend: () => { pty++; ab = true; }, aborted: () => ab, transcriptHas: async () => false });
+  assert.deepStrictEqual([r.delivered, r.aborted, pty], [false, true, 1]);
 });
 
 (async () => {
