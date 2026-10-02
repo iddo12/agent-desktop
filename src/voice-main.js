@@ -56,7 +56,7 @@ function run(exe, args) {
   });
 }
 
-// v1.63.2: WARM SERVER. Every recording used to spawn whisper-cli, which reloads the 1.6 GB model
+// v1.63.9: WARM SERVER. Every recording used to spawn whisper-cli, which reloads the 1.6 GB model
 // into the GPU each time (and a second time for the Hebrew language check). When the GPU is busy
 // (Premiere) that cold start is what made dictation slow. Now a long-lived whisper-server.exe
 // (same folder as whisper-cli.exe) keeps the model loaded: it is started the moment the mic
@@ -68,6 +68,7 @@ const net = require("net");
 const { spawn } = require("child_process");
 const IDLE_UNLOAD_MS = 10 * 60 * 1000;
 const SERVER_START_MS = 60 * 1000;
+let failedAt = 0; // a failed start is not retried for a minute (each try can cost up to SERVER_START_MS)
 const servers = new Map(); // model path -> { proc, port, ready: Promise<boolean>, idle: Timer, model }
 
 function serverExe(eng) {
@@ -111,6 +112,7 @@ function touchIdle(model) {
 }
 // Starts (or reuses) the server for one model; resolves to its entry, or null if it can't run.
 function ensureServer(eng, model, say) {
+  if (Date.now() - failedAt < 60 * 1000) return Promise.resolve(null);
   const existing = servers.get(model);
   if (existing) return existing.ready.then((ok) => (ok ? existing : null));
   const exe = serverExe(eng);
@@ -132,9 +134,11 @@ function ensureServer(eng, model, say) {
         } catch (e) {}
         await new Promise((r) => setTimeout(r, 150));
       }
+      failedAt = Date.now();
       stopServer(model);
       return false;
     } catch (e) {
+      failedAt = Date.now();
       stopServer(model);
       return false;
     }
@@ -236,7 +240,8 @@ function init({ ipcMain, log, app }) {
     } catch (err) {}
     return { ok: false };
   });
-  if (app && app.on) app.on("will-quit", stopAllServers);
+  if (app && app.on) { app.on("will-quit", stopAllServers); app.on("before-quit", stopAllServers); }
+  process.on("exit", stopAllServers);
 
   // Save a recording to disk; returns its path. Keeps the newest KEEP_RECORDINGS.
   ipcMain.handle("voice-save", async (event, { wavBase64 }) => {
