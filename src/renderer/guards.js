@@ -83,9 +83,22 @@
   // Attach a never-opened agent's session without leaving Iddo on its tab.
   // Skips (returns false) when he has text typed in the compose box, so a
   // background sweep never steals focus mid-sentence; the next tick retries.
+  // Also skips while the tab he is looking at is mid-turn (he is probably
+  // reading it stream) or he used the keyboard/mouse in the last 30 s with the
+  // window focused (COO review of v1.61.9: the flick must not fire unattended
+  // mid-read). The next tick retries.
+  let lastUserInputAt = 0;
+  for (const ev of ["keydown", "mousedown", "wheel"]) {
+    document.addEventListener(ev, () => { lastUserInputAt = Date.now(); }, { capture: true, passive: true });
+  }
   async function autoAttachSession(agent) {
     const box = document.getElementById("chat-input");
     if (box && box.value && box.value.trim()) return false;
+    if (document.hasFocus() && Date.now() - lastUserInputAt < 30000) return false;
+    if (activeAgentPath) {
+      const viewing = await window.api.getSessionActivity(activeAgentPath).catch(() => null);
+      if (viewing && viewing.working) return false;
+    }
     const original = activeAgentPath;
     selectAgent(agent);
     const t0 = Date.now();
