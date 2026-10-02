@@ -22,6 +22,7 @@
           <button id="new-agent-btn" title="Create new agent">+ Agent</button>
         </div>
       </div>
+      <button id="restart-all-btn" title="Restart every agent's background process (or a chosen subset) - keeps each conversation, re-reads its settings and CLAUDE.md. Agents that are busy or paused are skipped automatically."><span id="restart-all-btn-icon">&#8635;</span> Restart agents&hellip;</button>
       <button id="app-update-btn" class="hidden"></button>
       <button id="update-available-btn" class="hidden"></button>
       <div id="interfering-service-warning" class="hidden"></div>
@@ -207,6 +208,30 @@
       <div class="modal-actions">
         <button id="cancel-delete-agent-btn" class="secondary">Cancel</button>
         <button id="confirm-delete-agent-btn" class="danger" disabled>Delete permanently</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="restart-all-modal" class="modal hidden">
+    <div class="modal-box modal-box-wide">
+      <h2>Restart agents</h2>
+      <p class="modal-hint">
+        Restarts each checked agent's background process without losing its conversation -
+        same as that agent's own "Restart Session" button, run fleet-wide. An agent that's
+        currently busy (mid-turn, checked right before its own turn) is skipped automatically
+        rather than interrupted; paused agents are unchecked by default so restarting the
+        fleet doesn't wake them back up.
+      </p>
+      <div id="restart-all-select-row">
+        <label><input type="checkbox" id="restart-all-select-all-cb"> Select all</label>
+        <span id="restart-all-count"></span>
+      </div>
+      <div id="restart-all-list"></div>
+      <p id="restart-all-summary" class="modal-hint hidden"></p>
+      <div class="modal-actions">
+        <button id="cancel-restart-all-btn" class="secondary">Cancel</button>
+        <button id="retry-skipped-restart-all-btn" class="secondary hidden">Retry skipped</button>
+        <button id="confirm-restart-all-btn" class="primary" disabled>Restart agents</button>
       </div>
     </div>
   </div>

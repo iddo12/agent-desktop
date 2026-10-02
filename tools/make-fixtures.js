@@ -216,6 +216,40 @@ const FIXTURES = [
       }),
     ],
   },
+  // Added 2026-10-02 for the "Restart agents" fleet-wide picker (see
+  // CLAUDE.md v1.60.8+) - its busy-skip and paused-unchecked paths both need
+  // a real fixture to click-test, which neither existing fixture provides:
+  // "FIX Stuck Turn" looks busy by transcript alone, but getSessionActivity()
+  // also cross-checks the daemon pid file (see archive.js
+  // finishSessionActivity) and flips working back to false when that file is
+  // missing - true for every fixture here, none of which has a real `claude
+  // --bg` process. `pidAlive: true` below writes a pid file pointing at PID 4
+  // ("System" on Windows, always present) so that check passes: `process.kill
+  // (4, 0)` throws EPERM, not ESRCH, which the real code only treats as
+  // "flip to not-working" for ESRCH specifically - any other error leaves the
+  // transcript's "still working" answer alone. It's a signal-0 existence
+  // check only, never an actual kill, so this is inert.
+  {
+    folder: "FIX Busy",
+    role: "Mid-turn with a live-looking process - getSessionActivity() must read this as working",
+    pidAlive: true,
+    // Fixed (not random) so build/clean always target the same pid file -
+    // see pidFileFor() below.
+    fixedSessionId: "deadbeef-0000-4000-8000-000000000001",
+    build: (s, c) => [
+      userEntry(s, c, "Keep going with the audit.", 2),
+      danglingToolUse(s, c, 1),
+    ],
+  },
+  {
+    folder: "FIX Paused",
+    role: "Deliberately paused - Restart All must leave it unchecked by default",
+    configOverrides: { paused: true },
+    build: (s, c) => [
+      userEntry(s, c, "Summarise where we got to.", 60),
+      assistantEntry(s, c, "Done for now - pausing until Iddo says go.", 59),
+    ],
+  },
 ];
 
 // --- build / clean ---------------------------------------------------------
@@ -226,6 +260,17 @@ function sessionCwdFor(folder) {
 function projectDirFor(folder) {
   return path.join(os.homedir(), ".claude", "projects", encodeProjectPath(sessionCwdFor(folder)));
 }
+// Mirrors archive.js finishSessionActivity's own pid-file path exactly - the
+// daemon pid file it cross-checks before trusting a transcript's "still
+// working" read. See the FIX Busy fixture above.
+function pidFileFor(sessionId) {
+  return path.join(os.homedir(), ".claude", "daemon", "pty-pids", `${String(sessionId).split("-")[0]}.pid`);
+}
+// Signal 0 only tests whether the pid exists/is reachable - it never
+// actually signals the process. PID 4 is "System" on Windows: always
+// present, and protected, so this throws EPERM (not ESRCH) - the one error
+// finishSessionActivity does NOT treat as "process is gone".
+const ALWAYS_ALIVE_PID = 4;
 
 function build() {
   fs.mkdirSync(ROOT, { recursive: true });
@@ -236,7 +281,7 @@ function build() {
 
     fs.writeFileSync(
       path.join(agentDir, "agent_config.json"),
-      JSON.stringify({ display_name: fx.folder, role: fx.role, avatar: null }, null, 2),
+      JSON.stringify(Object.assign({ display_name: fx.folder, role: fx.role, avatar: null }, fx.configOverrides || {}), null, 2),
       "utf-8"
     );
     fs.writeFileSync(
@@ -247,7 +292,7 @@ function build() {
       "utf-8"
     );
 
-    const sessionId = uuid();
+    const sessionId = fx.fixedSessionId || uuid();
     const projectDir = projectDirFor(fx.folder);
     fs.mkdirSync(projectDir, { recursive: true });
     const lines = fx.build(sessionId, sessionCwd).map((e) => JSON.stringify(e));
@@ -255,6 +300,13 @@ function build() {
     lines.unshift(JSON.stringify({ type: "custom-title", customTitle: fx.folder, sessionId }));
     lines.unshift(JSON.stringify({ type: "agent-name", agentName: fx.folder, sessionId }));
     fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), lines.join("\n") + "\n", "utf-8");
+
+    if (fx.pidAlive) {
+      const pidFile = pidFileFor(sessionId);
+      fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+      fs.writeFileSync(pidFile, String(ALWAYS_ALIVE_PID), "utf-8");
+    }
+
     console.log(`built  ${fx.folder}\n       ${projectDir}`);
   }
   console.log(`\n${FIXTURES.length} fixtures under ${ROOT}`);
@@ -262,7 +314,9 @@ function build() {
 
 function clean() {
   for (const fx of FIXTURES) {
-    for (const target of [path.join(ROOT, fx.folder), projectDirFor(fx.folder)]) {
+    const targets = [path.join(ROOT, fx.folder), projectDirFor(fx.folder)];
+    if (fx.pidAlive && fx.fixedSessionId) targets.push(pidFileFor(fx.fixedSessionId));
+    for (const target of targets) {
       try {
         fs.rmSync(target, { recursive: true, force: true });
         console.log(`removed ${target}`);

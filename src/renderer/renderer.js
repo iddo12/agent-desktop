@@ -4752,6 +4752,228 @@ restartSessionBtn.addEventListener("click", async () => {
   }
 });
 
+// Restart All: the same per-agent restart (kill + re-dispatch `claude --bg
+// --resume <id>`, conversation kept) run across the whole fleet, or a chosen
+// subset. Iddo's ask (2026-10-02) - after changing an autoMode/settings
+// change that applies fleet-wide, clicking Restart Session on 8 agents by
+// hand was the actual friction.
+//
+// Busy/paused handling deliberately does NOT reuse the single-agent button's
+// `session.busy` (renderer-side, pty-silence-derived, and only populated for
+// an agent whose chat has been opened this launch - see showTerminalFor()).
+// That would silently skip the busy check entirely for any agent never
+// clicked into yet. Instead this calls getSessionActivity() (the same
+// transcript+pid-liveness check the main process already uses - see
+// archive.js finishSessionActivity) fresh, right before each agent's own
+// restart, since that is backed by the live session cwd on disk and works
+// identically whether or not that agent's terminal has ever been attached.
+// Paused agents (agent.paused) are left unchecked by default in the picker
+// rather than silently included - a fleet restart that quietly un-pauses
+// something a human paused on purpose would be a surprising side effect.
+//
+// Restarts run sequentially, not in parallel: it keeps the per-row progress
+// readable, and avoids N `claude --bg` processes all starting at once.
+const restartAllBtn = document.getElementById("restart-all-btn");
+const restartAllModalEl = document.getElementById("restart-all-modal");
+const restartAllListEl = document.getElementById("restart-all-list");
+const restartAllSelectAllCb = document.getElementById("restart-all-select-all-cb");
+const restartAllCountEl = document.getElementById("restart-all-count");
+const restartAllSummaryEl = document.getElementById("restart-all-summary");
+const cancelRestartAllBtn = document.getElementById("cancel-restart-all-btn");
+const confirmRestartAllBtn = document.getElementById("confirm-restart-all-btn");
+
+let restartAllInProgress = false;
+let restartAllRows = new Map(); // agentPath -> { checkbox, statusEl }
+
+function restartAllSetRowStatus(agentPath, cls, text) {
+  const row = restartAllRows.get(agentPath);
+  if (!row) return;
+  row.statusEl.className = "restart-all-row-status " + cls;
+  row.statusEl.textContent = text;
+}
+
+function restartAllUpdateCount() {
+  let checked = 0;
+  for (const { checkbox } of restartAllRows.values()) if (checkbox.checked) checked++;
+  restartAllCountEl.textContent = checked + " selected";
+  confirmRestartAllBtn.disabled = restartAllInProgress || checked === 0;
+  confirmRestartAllBtn.textContent = checked > 0 ? `Restart ${checked} agent${checked === 1 ? "" : "s"}` : "Restart agents";
+  restartAllSelectAllCb.checked = checked > 0 && checked === restartAllRows.size;
+}
+
+function openRestartAllModal() {
+  restartAllListEl.innerHTML = "";
+  restartAllRows = new Map();
+  restartAllSummaryEl.classList.add("hidden");
+  restartAllInProgress = false;
+  restartAllLastSkippedNames = [];
+  cancelRestartAllBtn.disabled = false;
+  cancelRestartAllBtn.textContent = "Cancel";
+  retrySkippedRestartAllBtn.classList.add("hidden");
+  retrySkippedRestartAllBtn.disabled = false;
+
+  const sorted = [...agents].sort((a, b) => (a.displayName || "").localeCompare(b.displayName || ""));
+  for (const agent of sorted) {
+    const row = document.createElement("div");
+    row.className = "restart-all-row";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !agent.paused;
+    checkbox.addEventListener("change", restartAllUpdateCount);
+
+    const name = document.createElement("span");
+    name.className = "restart-all-row-name";
+    name.textContent = agent.displayName || agent.folderName || agent.path;
+    if (agent.paused) {
+      const note = document.createElement("span");
+      note.className = "restart-all-row-note";
+      note.textContent = " (paused - unchecked by default)";
+      name.appendChild(note);
+    }
+
+    const status = document.createElement("span");
+    status.className = "restart-all-row-status status-pending";
+    status.textContent = "";
+
+    row.appendChild(checkbox);
+    row.appendChild(name);
+    row.appendChild(status);
+    restartAllListEl.appendChild(row);
+    restartAllRows.set(agent.path, { checkbox, statusEl: status });
+  }
+
+  restartAllUpdateCount();
+  restartAllModalEl.classList.remove("hidden");
+}
+
+restartAllBtn.addEventListener("click", openRestartAllModal);
+
+restartAllSelectAllCb.addEventListener("click", () => {
+  const checkAll = restartAllSelectAllCb.checked;
+  for (const { checkbox } of restartAllRows.values()) checkbox.checked = checkAll;
+  restartAllUpdateCount();
+});
+
+cancelRestartAllBtn.addEventListener("click", () => {
+  if (restartAllInProgress) return; // disabled while running - see below
+  restartAllModalEl.classList.add("hidden");
+});
+
+const retrySkippedRestartAllBtn = document.getElementById("retry-skipped-restart-all-btn");
+let restartAllLastSkippedNames = []; // [{ path, name }] - busy OR unknown-state skips, for the summary + Retry
+
+// Shared by the initial run and "Retry skipped" - runs the given agent paths
+// sequentially through check-then-restart and returns the per-reason counts
+// plus which ones were skipped (by path+displayName, for the summary text
+// and so Retry skipped can target exactly those next).
+async function restartAllRunBatch(paths) {
+  let restarted = 0, skipped = 0, failed = 0;
+  const skippedEntries = [];
+  for (const agentPath of paths) {
+    restartAllSetRowStatus(agentPath, "status-active", "Checking…");
+    let activity;
+    let checkFailed = false;
+    try {
+      activity = await window.api.getSessionActivity(agentPath);
+    } catch (e) {
+      checkFailed = true; // unknown MUST mean skip here - a false "not busy" would kill a mid-turn agent
+    }
+    if (checkFailed) {
+      restartAllSetRowStatus(agentPath, "status-skip", "Skipped (couldn't check)");
+      skipped++;
+      const agentObj = agents.find((a) => a.path === agentPath);
+      skippedEntries.push({ path: agentPath, name: (agentObj && agentObj.displayName) || agentPath });
+      continue;
+    }
+    if (activity && activity.working) {
+      restartAllSetRowStatus(agentPath, "status-skip", "Skipped (busy)");
+      skipped++;
+      const agentObj = agents.find((a) => a.path === agentPath);
+      skippedEntries.push({ path: agentPath, name: (agentObj && agentObj.displayName) || agentPath });
+      continue;
+    }
+
+    restartAllSetRowStatus(agentPath, "status-active", "Restarting…");
+    try {
+      const convos = await window.api.listConversations(agentPath);
+      const cur = (convos || []).find((c) => c.isCurrent) || (convos || [])[0];
+      const sessionId = cur && cur.sessionId;
+      if (!sessionId) {
+        restartAllSetRowStatus(agentPath, "status-error", "No conversation yet");
+        failed++;
+        continue;
+      }
+      await window.api.switchConversation(agentPath, { resumeSessionId: sessionId });
+      // Same as the single-agent Restart Session handler: if this is the
+      // currently open chat, refresh its view so it re-attaches immediately
+      // instead of showing a stale terminal until next clicked.
+      if (activeAgentPath === agentPath) {
+        reloadAgentSessionView(agentPath);
+        const agentObj = agents.find((a) => a.path === agentPath);
+        if (agentObj) selectAgent(agentObj);
+      }
+      restartAllSetRowStatus(agentPath, "status-success", "✓ Restarted");
+      restarted++;
+    } catch (e) {
+      restartAllSetRowStatus(agentPath, "status-error", "✗ " + (e.message || String(e)));
+      failed++;
+    }
+  }
+  return { restarted, skipped, failed, skippedEntries };
+}
+
+function restartAllShowSummary(prefix, result, notSelectedCount) {
+  restartAllLastSkippedNames = result.skippedEntries;
+  let text = `${prefix} - ${result.restarted} restarted, ${result.skipped} skipped, ${result.failed} failed`;
+  if (notSelectedCount > 0) text += `, ${notSelectedCount} not selected`;
+  text += ".";
+  if (result.skippedEntries.length > 0) {
+    text += ` Skipped: ${result.skippedEntries.map((e) => e.name).join(", ")}.`;
+  }
+  restartAllSummaryEl.textContent = text;
+  restartAllSummaryEl.classList.remove("hidden");
+  retrySkippedRestartAllBtn.classList.toggle("hidden", result.skippedEntries.length === 0);
+}
+
+function restartAllSetBatchUi(running) {
+  restartAllInProgress = running;
+  // "Restart Selected" and the checkboxes stay disabled for the rest of this
+  // picker's lifetime once a batch has started, even after it finishes -
+  // reopening the picker (close + click Restart All again) is the way to get
+  // a fresh run, rather than letting a second pass silently reuse stale row
+  // state. Retry skipped is the one control meant to re-enable after a run.
+  confirmRestartAllBtn.disabled = true;
+  restartAllSelectAllCb.disabled = true;
+  for (const { checkbox } of restartAllRows.values()) checkbox.disabled = true;
+  cancelRestartAllBtn.disabled = running;
+  retrySkippedRestartAllBtn.disabled = running;
+  cancelRestartAllBtn.textContent = running ? "Cancel" : "Close";
+}
+
+confirmRestartAllBtn.addEventListener("click", async () => {
+  if (restartAllInProgress) return;
+  const selected = [...restartAllRows.entries()].filter(([, row]) => row.checkbox.checked).map(([path]) => path);
+  if (selected.length === 0) return;
+
+  restartAllSetBatchUi(true);
+  const result = await restartAllRunBatch(selected);
+  restartAllSetBatchUi(false);
+  restartAllShowSummary("Done", result, restartAllRows.size - selected.length);
+});
+
+retrySkippedRestartAllBtn.addEventListener("click", async () => {
+  if (restartAllInProgress || restartAllLastSkippedNames.length === 0) return;
+  const paths = restartAllLastSkippedNames.map((e) => e.path);
+  for (const path of paths) restartAllSetRowStatus(path, "status-pending", "");
+  retrySkippedRestartAllBtn.classList.add("hidden");
+
+  restartAllSetBatchUi(true);
+  const result = await restartAllRunBatch(paths);
+  restartAllSetBatchUi(false);
+  restartAllShowSummary("Retry done", result, 0);
+});
+
 loadAgents();
 
 window.api.getAppVersion().then((v) => {
