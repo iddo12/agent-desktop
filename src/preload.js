@@ -55,6 +55,8 @@ contextBridge.exposeInMainWorld("api", {
   registryAction: (id, action) => ipcRenderer.invoke("registry-action", { id, action }),
   openLocalPdf: (filePath) => ipcRenderer.invoke("open-local-pdf", { filePath }),
   approveTelegramTasks: (ids) => ipcRenderer.invoke("approve-telegram-tasks", { ids }),
+  heldSave: (json) => ipcRenderer.invoke("guard-held-save", { json }),
+  heldLoad: () => ipcRenderer.invoke("guard-held-load"),
   channelSend: (agentPath, text) => ipcRenderer.invoke("guard-channel-send", { agentPath, text }),
   channelCancel: (id) => ipcRenderer.invoke("guard-channel-cancel", { id }),
   getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),

@@ -1,12 +1,12 @@
 {
   "name": "agent-desktop",
-  "version": "1.67.0",
+  "version": "1.67.1",
   "description": "Standalone desktop app for managing and chatting with local Claude Code agents",
   "main": "src/main.js",
   "private": true,
   "scripts": {
     "start": "electron .",
-    "test": "node tests/handoffDelivery.test.js && node tests/libraryState.test.js && node tests/connectionHealth.test.js && node tools/check-changelog.js"
+    "test": "node tests/handoffDelivery.test.js && node tests/libraryState.test.js && node tests/connectionHealth.test.js && node tests/handoffLogic.test.js && node tools/check-changelog.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

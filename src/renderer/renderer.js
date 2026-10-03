@@ -1623,6 +1623,8 @@ function handoffLabelFor(text) {
   const t = String(text || "");
   if (t.startsWith("[Agent Desktop - planned context reset]")) return "Handoff";
   if (t.startsWith("[Agent Desktop] Your last reply said the handoff was saved")) return "Handoff - reminder to write the file";
+  // v1.67.1 one-line prompts: "[hid:xxx] Write <agent>handoff_latest.md now (...)" / "[hid:xxx] Handoff file ... still not written ..."
+  if (t.startsWith("[hid:") && t.includes("handoff_latest.md")) return t.includes("still not written") ? "Handoff - reminder to write the file" : "Handoff";
   return null;
 }
 

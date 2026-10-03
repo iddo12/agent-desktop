@@ -30,14 +30,14 @@ test("no channel at all: pty", async () => {
 test("not landing: retries with backoff then gives up, logs each attempt", async () => {
   t = 0; let pty = 0; const lines = [];
   const r = await deliver("hi", { ...base(), log: (l) => lines.push(l), ptySend: () => pty++, transcriptHas: async () => false });
-  assert.deepStrictEqual([r.delivered, r.attempts, pty], [false, 3, 3]);
+  assert.deepStrictEqual([r.delivered, r.attempts, pty], [false, 3, 1]);
   assert.strictEqual(lines.filter((l) => /NOT in transcript/.test(l)).length, 3);
   assert.ok(t >= 8000 + 20000 + 45000);
 });
 test("lands on second attempt", async () => {
   t = 0; let n = 0;
-  const r = await deliver("hi", { ...base(), ptySend: () => n++, transcriptHas: async () => n >= 2 });
-  assert.deepStrictEqual([r.delivered, r.attempts], [true, 2]);
+  const r = await deliver("hi", { ...base(), ptySend: () => n++, transcriptHas: async () => t > 9000 }); // lands late (CLI queued it); never retyped
+  assert.deepStrictEqual([r.delivered, r.attempts, n], [true, 2, 1]);
 });
 test("acked channel that never lands falls back to pty on retry", async () => {
   t = 0; let ch = 0, pty = 0;
@@ -179,12 +179,33 @@ test("acked channel that never lands: channel used once, attempt 2 is pty", asyn
 });
 test("never retypes while the first pty prompt is still queued", async () => {
   t = 0; let pty = 0, queued = true;
-  const r = await deliver("hi", { ...base(), ptySend: () => pty++, ptyQueued: () => queued, transcriptHas: async () => { if (t > 9000) queued = false; return pty >= 2; } });
+  const r = await deliver("hi", { ...base(), ptySend: () => pty++, ptyQueued: () => queued, transcriptHas: async () => { if (t > 9000) queued = false; return t > 20000; } });
+  assert.strictEqual(pty, 1);          // v1.67.1: typed once, then only waited for (was: typed again once the queue drained)
   assert.strictEqual(r.delivered, true);
-  assert.ok(pty === 2 && r.attempts >= 2);
   t = 0; pty = 0; queued = true;
   await deliver("hi", { ...base(), ptySend: () => pty++, ptyQueued: () => true, transcriptHas: async () => false });
   assert.strictEqual(pty, 1);
+});
+test("dead pty: the prompt is typed exactly once across all retries, then gives up (no duplicates)", async () => {
+  t = 0; let pty = 0;
+  const r = await deliver("hi", { ...base(), ptySend: () => pty++, transcriptHas: async () => false });
+  assert.strictEqual(pty, 1);
+  assert.strictEqual(r.delivered, false);
+});
+test("duplicate delivery with the same hid marker: second call never types", async () => {
+  t = 0; let pty = 0;
+  const opts = { marker: "[hid:dup1]" };
+  await deliver("hi", { ...base(), ptySend: () => pty++, transcriptHas: async () => true }, opts);
+  await deliver("hi", { ...base(), ptySend: () => pty++, transcriptHas: async () => false }, opts);
+  assert.strictEqual(pty, 1);
+});
+test("queued mid-turn: a receipt in the transcript (queued_command / enqueue) counts as landed, no retype", async () => {
+  t = 0; let pty = 0;
+  // transcriptHas is a raw substring search over the transcript tail, so a queue-operation enqueue entry or a
+  // queued_command attachment carrying the marker is found just like a user entry
+  const transcript = JSON.stringify({ type: "attachment", attachment: { type: "queued_command", prompt: "[hid:q1] Write handoff" } });
+  const r = await deliver("Write handoff", { ...base(), ptySend: () => pty++, transcriptHas: async (m) => transcript.includes(m) }, { marker: "[hid:q1]" });
+  assert.deepStrictEqual([r.delivered, r.attempts, pty], [true, 1, 1]);
 });
 test("abort stops sending and typing", async () => {
   t = 0; let pty = 0, ab = false;
