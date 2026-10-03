@@ -213,6 +213,18 @@ test("abort stops sending and typing", async () => {
   assert.deepStrictEqual([r.delivered, r.aborted, pty], [false, true, 1]);
 });
 
+test("typed prompt that sits unsent: the delivery presses Enter (nudgeSubmit) and it lands, still typed once", async () => {
+  t = 0; let pty = 0, presses = 0, sent = false;
+  const r = await deliver("hi", { ...base(), ptySend: () => pty++, nudgeSubmit: async () => { presses++; sent = true; return true; }, transcriptHas: async () => sent });
+  assert.deepStrictEqual([r.delivered, pty], [true, 1]);
+  assert.ok(presses >= 1);
+});
+test("nudgeSubmit is not used before the prompt was typed (channel path)", async () => {
+  t = 0; let presses = 0;
+  await deliver("hi", { ...base(), channelSend: async () => ({ ok: true }), ptySend: () => {}, nudgeSubmit: async () => { presses++; return false; }, transcriptHas: async () => true });
+  assert.strictEqual(presses, 0);
+});
+
 (async () => {
   let fail = 0;
   for (const [n, f] of tests) {

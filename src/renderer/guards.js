@@ -500,6 +500,17 @@
         // stop as soon as the flow is cleared, replaced, failed, reaped or past the saving phase
         aborted: () => !flow || flows.get(agentPath) !== flow || flow.phase !== "saving",
         transcriptHas: (m) => window.api.transcriptHas(agentPath, m),
+        // v1.68.2 (B2): the typed prompt may sit unsent in the input box (the stuck-Enter check only arms for one unacked write at a time):
+        // press Enter, once per look, when the screen shows exactly this prompt's text
+        nudgeSubmit: async () => {
+          const se = terminals.get(agentPath);
+          if (!se) return false;
+          const holds = await window.api.agentInputHoldsText(agentPath, text).catch(() => false);
+          if (!holds) return false;
+          window.autoHandoffLog(nm + ": handoff prompt sits unsent in the input box - pressing Enter");
+          if (typeof writeQueued === "function") writeQueued(se, () => window.api.sendInput(agentPath, "\r")); else window.api.sendInput(agentPath, "\r");
+          return true;
+        },
         log: (line) => window.autoHandoffLog(nm + ": " + line),
       }, dopts);
     } catch (e) {
@@ -583,7 +594,7 @@
       // flow sat until the 12-minute timeout). If it has been idle and the file is still not fresh,
       // tell it plainly, at most twice, instead of waiting out the clock.
       flow.idleStalePolls = idle && !fresh ? (flow.idleStalePolls || 0) + 1 : 0;
-      if (flow.idleStalePolls >= 3 && (flow.nudges || 0) < 2 && !flow.deliveryPending) {
+      if (flow.idleStalePolls >= 3 && (flow.nudges || 0) < 2 && window.HandoffLogic.mayNudge(flow)) { // v1.68.2 (B2): never a second request while the first is unconfirmed
         flow.nudges = (flow.nudges || 0) + 1;
         flow.idleStalePolls = 0;
         const fileP = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";
@@ -1043,6 +1054,7 @@
   // v1.58.0: read by app-update-overlay.js - Update & restart waits while a
   // handoff is mid-flight (a restart would cut it between reset and resume).
   window.guardsAgentInFlow = (ap) => flows.has(ap) || pendingResume.has(ap) || !!nearHandoff.get(ap) || !!(allRun && !allRun.finished); // v1.65.0
+  window.guardsFlowActive = (ap) => window.HandoffLogic.flowHoldsMessages(flows.get(ap), pendingResume.has(ap)); // v1.68.2 (B1)
   window.guardsBusyReason = () => {
     if (allRun && !allRun.finished) return "\"Handoff all\" is running";
     if (flows.size) return "a handoff is in progress";

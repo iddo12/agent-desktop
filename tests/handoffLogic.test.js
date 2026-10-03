@@ -43,3 +43,29 @@ assert.strictEqual(L.parseHeld("not json").size, 0);
 assert.strictEqual(L.parseHeld('{"x":{"items":[1,null,"ok"]}}').get("x").items.length, 1);
 
 console.log("handoffLogic ok");
+
+// 3. v1.68.2 B1: which flow states hold a user message, even for an idle agent
+assert.strictEqual(L.flowHoldsMessages(undefined, false), false);
+for (const ph of ["saving", "resetting", "resuming"]) assert.strictEqual(L.flowHoldsMessages({ phase: ph }, false), true, ph);
+for (const ph of ["failed", "done"]) assert.strictEqual(L.flowHoldsMessages({ phase: ph }, false), false, ph);
+assert.strictEqual(L.flowHoldsMessages(undefined, true), true, "fresh session waiting for its resume message");
+
+// 4. v1.68.2 B2: no second handoff request until the first is confirmed in the transcript
+assert.strictEqual(L.mayNudge({}), false, "first prompt never confirmed");
+assert.strictEqual(L.mayNudge({ delivery: { delivered: false } }), false, "gave up: prompt may sit unsent in the box");
+assert.strictEqual(L.mayNudge({ delivery: { delivered: true }, deliveryPending: 1 }), false);
+assert.strictEqual(L.mayNudge({ delivery: { delivered: true } }), true);
+
+// 5. v1.68.2 B1 wiring: sendOrHold must test the flow gate BEFORE the idle shortcut (source-order check)
+{
+  const src = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "renderer", "renderer.js"), "utf-8");
+  const fn = src.slice(src.indexOf("async function sendOrHold("));
+  const body = fn.slice(0, fn.indexOf("function renderQueue"));
+  const gate = body.indexOf("guardsFlowActive");
+  const idle = body.indexOf("if (!working()) { sent()");
+  assert.ok(gate > 0 && idle > 0 && gate < idle, "flow gate must come before the idle send");
+  assert.ok(/guardsParkQueue/.test(body), "a held message is parked so the reset does not drop it");
+  const g = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "renderer", "guards.js"), "utf-8");
+  assert.ok(/mayNudge\(flow\)/.test(g) && /window\.guardsFlowActive\s*=/.test(g));
+}
+console.log("handoffLogic ok");

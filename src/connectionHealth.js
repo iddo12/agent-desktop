@@ -145,6 +145,14 @@ function create(deps, opts) {
     if (a.recovering) return true;
     if (size) a.size = size;
     a.reason = String(reason || "attach failed").slice(0, 300);
+    // v1.68.2 (B3): a message written to the link in the seconds before this failure was noticed is not on its way
+    // anywhere: hand it back to the renderer's queue (same mechanism as the dead-link restart) so it is re-sent once connected
+    if (a.unackedSince != null && (a.state === "connected" || a.state === "degraded")) {
+      if (ackState(p, a) !== true) a.requeueSince = a.unackedSince; // already in the transcript: it landed, never send it twice
+      a.unackedSince = null;
+      clearT(a.deadTimer); a.deadTimer = null;
+      clearT(a.stuckTimer); a.stuckTimer = null;
+    }
     if (a.state === "connected" || a.state === "degraded") { a.state = "reconnecting"; a.attempts = 0; a.since = now(); }
     if (!a.timer) { log(`connection: ${p} not connected (${a.reason}) - reconnecting with backoff`); schedule(a); }
     emit(a);

@@ -259,5 +259,29 @@ function harness(over) {
     assert.strictEqual(x.calls.enter, 1); assert.strictEqual(x.calls.restart, 0);
   }
 
+  // 19. v1.68.2 B3: a message written in the seconds before an attach failure is noticed is handed back (requeueSince)
+  {
+    const x = harness();
+    x.h.sessions[P] = "real";
+    const t0 = x.now();
+    x.ch.noteWrite(P, "\x1b[200~typed just before the pty died");
+    await x.advance(9000);
+    assert.strictEqual(x.ch.onAttachFailed(P, "attach exited"), true);
+    const ev = x.events[x.events.length - 1];
+    assert.strictEqual(ev.state, "reconnecting");
+    assert.strictEqual(ev.requeueSince, t0, "the unacked write is requeued");
+    await x.advance(60000);
+    assert.strictEqual(x.calls.restart, 0, "the cleared dead-link timer must not restart a second time");
+  }
+  // 20. ... but not when the transcript already has it (it landed: re-sending would duplicate)
+  {
+    const x = harness();
+    x.h.sessions[P] = "real"; x.h.ack = true;
+    x.ch.noteWrite(P, "\x1b[200~this one already landed in the transcript");
+    await x.advance(3000);
+    x.ch.onAttachFailed(P, "attach exited");
+    assert.strictEqual(x.events[x.events.length - 1].requeueSince, null);
+  }
+
   console.log("connectionHealth ok");
 })().catch((e) => { console.error(e); process.exit(1); });

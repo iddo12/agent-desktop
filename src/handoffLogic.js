@@ -66,7 +66,21 @@
     return m;
   }
 
-  const api = { REQUIRED_SECTIONS, handoffPrompt, nudgePrompt, fileReady, estimateSecs, progressText, serializeHeld, parseHeld };
+  // v1.68.2 (B1): while a handoff flow is running (saving / resetting / resuming) or a fresh session still waits for
+  // its resume message, a message the user types must be HELD even if the agent is idle at that moment - an idle
+  // agent used to take the "send now" branch and the text went into the dying pty or the old conversation.
+  function flowHoldsMessages(flow, hasPendingResume) {
+    if (hasPendingResume) return true;
+    return !!flow && (flow.phase === "saving" || flow.phase === "resetting" || flow.phase === "resuming");
+  }
+  // v1.68.2 (B2): a second handoff request (the "write it now" nudge) may only be typed once the FIRST request is
+  // confirmed in the transcript. While the first is unconfirmed (it may sit unsent in the input box) a second
+  // prompt would reach the fresh session next to it as a duplicate request.
+  function mayNudge(flow) {
+    return !!flow && !flow.deliveryPending && !!flow.delivery && flow.delivery.delivered === true;
+  }
+
+  const api = { REQUIRED_SECTIONS, flowHoldsMessages, mayNudge, handoffPrompt, nudgePrompt, fileReady, estimateSecs, progressText, serializeHeld, parseHeld };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HandoffLogic = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
