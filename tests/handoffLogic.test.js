@@ -86,9 +86,9 @@ console.log("handoffLogic ok");
   assert.strictEqual(L.mayNudge(f({ deliveryPending: 1 }), T + 61000, free), false);
 }
 // 7. v1.69.1 H1: restored held messages go mid-turn to a working agent
-assert.strictEqual(L.restoreRoute({ working: true, midTurnOk: true, dialogOpen: false }), "midturn");
-assert.strictEqual(L.restoreRoute({ working: true, midTurnOk: true, dialogOpen: true }), "queue");
-assert.strictEqual(L.restoreRoute({ working: true, midTurnOk: false, dialogOpen: false }), "queue");
+assert.strictEqual(L.restoreRoute({ started: true, working: true, midTurnOk: true, dialogOpen: false }), "midturn");
+assert.strictEqual(L.restoreRoute({ started: true, working: true, midTurnOk: true, dialogOpen: true }), "queue");
+assert.strictEqual(L.restoreRoute({ started: true, working: true, midTurnOk: false, dialogOpen: false }), "queue");
 assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen: false }), "queue");
 {
   const fs2 = require("fs"), p2 = require("path");
@@ -110,9 +110,9 @@ assert.strictEqual(L.draftInInputBox("x\n\u2502 > fix the thing please \u2502\n"
 assert.strictEqual(L.draftInInputBox("\u2502 > Try \"edit foo\" \u2502"), false, "placeholder");
 assert.strictEqual(L.draftInInputBox("no input box on screen"), false);
 // B-L1: idle agent, empty queue, live link -> send directly; anything else keeps the queue path
-assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen: false, queueLen: 0, linkHeld: false }), "direct");
-assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen: false, queueLen: 2, linkHeld: false }), "queue");
-assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen: false, queueLen: 0, linkHeld: true }), "queue");
+assert.strictEqual(L.restoreRoute({ started: true, working: false, midTurnOk: true, dialogOpen: false, queueLen: 0, linkHeld: false }), "direct");
+assert.strictEqual(L.restoreRoute({ started: true, working: false, midTurnOk: true, dialogOpen: false, queueLen: 2, linkHeld: false }), "queue");
+assert.strictEqual(L.restoreRoute({ started: true, working: false, midTurnOk: true, dialogOpen: false, queueLen: 0, linkHeld: true }), "queue");
 {
   const fs2 = require("fs"), p2 = require("path");
   const m = fs2.readFileSync(p2.join(__dirname, "..", "src", "main.js"), "utf-8");
@@ -123,3 +123,34 @@ assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen:
   assert.ok(body.indexOf("draftInInputBox") < body.indexOf("typeIntoPty(agentPath, t)"), "draft check before typing");
 }
 console.log("handoffLogic v1.69.2 ok");
+
+// 9. v1.69.3
+// M1: an unstarted session never takes the direct/mid-turn route, and the held list is only dropped after the writes
+assert.strictEqual(L.restoreRoute({ started: false, working: false, midTurnOk: true, dialogOpen: false, queueLen: 0, linkHeld: false }), "queue");
+assert.strictEqual(L.restoreRoute({ started: true, working: false, midTurnOk: true, dialogOpen: false, queueLen: 0, linkHeld: false }), "direct");
+assert.strictEqual(L.restoreRoute({ started: true, working: true, midTurnOk: true, dialogOpen: false }), "midturn");
+{
+  const g = require("fs").readFileSync(require("path").join(__dirname, "..", "src", "renderer", "guards.js"), "utf-8");
+  const rs = g.slice(g.indexOf("async function restoreParkedQueuesInner"), g.indexOf("window.guardsParkQueue"));
+  const sendAt = rs.indexOf("submitToAgent(ap, todo[0]");
+  assert.ok(sendAt > 0 && /started: !!se\.started/.test(rs), "route gets started");
+  assert.ok(rs.indexOf("parkedQueues.delete(ap)") > sendAt || rs.indexOf("parkedQueues.delete(ap)") > rs.indexOf("finally"), "no delete before the direct writes");
+  assert.ok(/parkedQueues\.set\(ap, \{ items: todo/.test(rs), "unsent rest stays parked");
+}
+// M2: the whole nudge with its unique hid must be in the box
+{
+  const body = "[hid:aaa111] You announced a next step. Please do it now, then continue until the task is finished.";
+  const box = "history...\n\u2502 > [hid:aaa111] You announced a next step. Please do it now,   \u2502\n\u2502   then continue until the task is finished.            \u2502\n? for shortcuts";
+  assert.strictEqual(L.boxHoldsNudge(box, body), true, "wrapped in the box");
+  assert.strictEqual(L.boxHoldsNudge(box.replace("aaa111", "bbb222"), body), false, "a stale echo with another hid");
+  assert.strictEqual(L.boxHoldsNudge("...then continue until the task is finished.", body), false, "only the tail of the text");
+  assert.strictEqual(L.boxHoldsNudge(box + "x".repeat(400), body), false, "output after it: not the live bottom");
+  assert.strictEqual(L.boxHoldsNudge(box, "no marker in this text at all, long enough to count"), false);
+}
+// L1: a draft above a tall footer is still seen
+{
+  const lines = ["\u2502 > half typed message \u2502"];
+  for (let i = 0; i < 12; i++) lines.push("footer line " + i);
+  assert.strictEqual(L.draftInInputBox(lines.join("\n")), true);
+}
+console.log("handoffLogic v1.69.3 ok");

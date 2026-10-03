@@ -184,15 +184,22 @@
         if (working) { try { dialogOpen = !!(await window.api.agentDialogOpen(ap)); } catch (e) { dialogOpen = true; } }
         const cur = parkedQueues.get(ap);       // v1.69.1 (L2): re-read after the awaits - more may have been parked meanwhile
         if (!cur) continue;
-        parkedQueues.delete(ap);
-        persistHeld();
         const stillWorking = !!(se.started && (se.busy || se.transcriptWorking));
-        const route = window.HandoffLogic.restoreRoute({ working: working && stillWorking, midTurnOk: midTurnAllowed(), dialogOpen, queueLen: se.sendQueue.length, linkHeld: !!(window.connHealth && window.connHealth.holding(ap)) });
+        const route = window.HandoffLogic.restoreRoute({ started: !!se.started, working: working && stillWorking, midTurnOk: midTurnAllowed(), dialogOpen, queueLen: se.sendQueue.length, linkHeld: !!(window.connHealth && window.connHealth.holding(ap)) });
         if (route === "midturn" || route === "direct") {
-          cur.items.forEach((text, i) => submitToAgent(ap, text, route === "midturn" || i > 0 ? { midTurn: true } : undefined));
+          // v1.69.3 (M1): the held list is only dropped once every write went out; a throw keeps the unsent rest parked
+          const todo = cur.items.slice();
+          try {
+            for (let i = 0; todo.length; i++) { submitToAgent(ap, todo[0], route === "midturn" || i > 0 ? { midTurn: true } : undefined); todo.shift(); }
+          } finally {
+            if (todo.length) parkedQueues.set(ap, { items: todo, at: cur.at }); else parkedQueues.delete(ap);
+            persistHeld();
+          }
           try { window.autoHandoffLog("sent " + cur.items.length + " restored user message(s) to " + agentName(ap) + " (" + route + ")"); } catch (e) {}
           continue;
         }
+        parkedQueues.delete(ap);
+        persistHeld();
         pk.items = cur.items;
         se.sendQueue.unshift(...pk.items);      // ahead of anything queued meanwhile: they were sent first
         try { window.autoHandoffLog("restored " + pk.items.length + " parked user message(s) to " + agentName(ap) + " (flow " + (fl ? fl.phase : "never started") + ")"); } catch (e) {}

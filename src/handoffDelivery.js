@@ -73,7 +73,8 @@
             channelId = null;
           }
           try { typedMarkers.add(marker); deps.ptySend(body); ptySent = true; sentVia = "pty"; log("handoff-delivery attempt " + attempt + ": typed into pty"); }
-          catch (e) { log("handoff-delivery attempt " + attempt + ": pty send FAILED: " + (e && e.message)); }
+          catch (e) { if (e && e.refused) { typedMarkers.delete(marker); ptySent = false; } // a refusal typed nothing: the marker stays usable
+           log("handoff-delivery attempt " + attempt + ": pty send FAILED: " + (e && e.message)); }
         }
       }
       if (sentVia || skipped) {

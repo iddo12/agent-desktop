@@ -238,6 +238,12 @@ test("a ptySend that refuses (user draft) never types and is never retried with 
   assert.strictEqual(tries, 1);
 });
 
+test("a refused pty send (flagged refused) typed nothing: later attempts may still type it once, never twice", async () => {
+  t = 0; let tries = 0, typed = 0;
+  const r = await deliver("keep going", { ...base(), ptySend: () => { tries++; if (tries < 3) { const e = new Error("draft"); e.refused = true; throw e; } typed++; }, transcriptHas: async () => typed > 0 }, { marker: "[hid:kg3]" });
+  assert.deepStrictEqual([r.delivered, typed, tries], [true, 1, 3]);
+});
+
 (async () => {
   let fail = 0;
   for (const [n, f] of tests) {

@@ -94,7 +94,7 @@
   // like a normal send; an idle one drains through its queue; a dialog on screen or mid-turn delivery switched off
   // keeps the old queue behaviour.
   function restoreRoute(s) {
-    if (!s) return "queue";
+    if (!s || !s.started) return "queue";   // v1.69.3 (M1): no live pty yet: never write, keep them for the queue path
     if (!s.working) {
       // v1.69.2 (B-L1): an idle agent with an empty app queue and a live link: send now (first one normal, the rest
       // mid-turn) instead of leaving items in the queue, where a message typed in the next second waited for the whole turn
@@ -106,7 +106,7 @@
   // hold text a person typed? A keep-going nudge is never typed on top of a draft. Best effort: fails towards "draft".
   function draftInInputBox(tail) {
     const lines = String(tail || "").split(/[\r\n]+/).filter((l) => l.trim());
-    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) {
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 40); i--) {
       const m = /^[\s\u2502|]*[>\u276f]\s?(.*?)\s*[\u2502|]?\s*$/.exec(lines[i]);
       if (!m) continue;
       const c = m[1].trim();
@@ -117,7 +117,21 @@
     return false;
   }
 
-  const api = { REQUIRED_SECTIONS, flowHoldsMessages, mayNudge, restoreRoute, draftInInputBox, handoffPrompt, nudgePrompt, fileReady, estimateSecs, progressText, serializeHeld, parseHeld };
+  // v1.69.3 (M2): does the screen tail show THIS nudge (its whole text, which starts with a unique hid marker) sitting at
+  // the live bottom? A stale echo of an earlier nudge has another hid, so it never matches. Box borders and whitespace
+  // (wrapped lines) are ignored; at most 300 characters may follow it.
+  function boxHoldsNudge(tail, body) {
+    const hid = /\[hid:[^\]]+\]/.exec(String(body || ""));
+    if (!hid) return false;
+    const norm = (x) => String(x || "").replace(/[\s\u2502|]/g, "");
+    const t = norm(tail), b = norm(body);
+    if (b.length < 20) return false;
+    const i = t.lastIndexOf(b);
+    if (i < 0) return false;
+    return t.length - (i + b.length) <= 300;
+  }
+
+  const api = { REQUIRED_SECTIONS, flowHoldsMessages, mayNudge, restoreRoute, draftInInputBox, boxHoldsNudge, handoffPrompt, nudgePrompt, fileReady, estimateSecs, progressText, serializeHeld, parseHeld };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HandoffLogic = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

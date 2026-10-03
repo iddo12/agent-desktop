@@ -3112,8 +3112,9 @@ try {
         // v1.69.2 (B-N1): typed ONCE (deliver's marker rule), never on top of a person's draft, and submitted: nudgeSubmit presses
         // Enter (through the renderer's write chain) when the screen shows exactly this text sitting in the input box.
         ptySend: (t) => {
-          if (require("./handoffLogic").draftInInputBox((dialogTails.get(agentPath) || "").slice(-600))) throw new Error("the input box holds text - not typing the nudge over it");
-          if (promptLikelyOpen(agentPath)) throw new Error("a prompt is waiting for an answer - not typing the nudge");
+          if (!(dialogTails.get(agentPath) || "").trim()) throw Object.assign(new Error("nothing known about the screen - not typing the nudge blind"), { refused: true }); // v1.69.3 (L4)
+          if (require("./handoffLogic").draftInInputBox((dialogTails.get(agentPath) || "").slice(-600))) throw Object.assign(new Error("the input box holds text - not typing the nudge over it"), { refused: true });
+          if (promptLikelyOpen(agentPath)) throw Object.assign(new Error("a prompt is waiting for an answer - not typing the nudge"), { refused: true });
           typeIntoPty(agentPath, t);
         },
         ptyQueued: () => false,
@@ -3121,7 +3122,7 @@ try {
           try {
             const act = getSessionActivity(sessionCwdFor(agentPath));
             if (act && act.working) return false;
-            if (!inputHoldsUnsentText(agentPath, body)) return false;
+            if (promptLikelyOpen(agentPath) || !require("./handoffLogic").boxHoldsNudge(dialogTails.get(agentPath) || "", body)) return false; // v1.69.3 (M2): the whole nudge (unique hid) must be in the box
             if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("press-enter", { agentPath });
             return true;
           } catch (e) { return false; }
