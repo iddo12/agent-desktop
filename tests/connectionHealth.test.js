@@ -27,6 +27,10 @@ function harness(over) {
     isWorking: () => h.working,
     wasInterrupted: () => h.interrupted,
     nudge: (p, text) => calls.nudge.push(text),
+    // v1.68.0 stuck Enter
+    inputHoldsText: () => !!h.holds,
+    transcriptHas: () => (h.ack === undefined ? false : h.ack),
+    pressEnter: (p) => { calls.enter = (calls.enter || 0) + 1; if (h.enterWorks) { h.holds = false; h.ack = true; } },
   };
   const ch = create(deps);
   async function advance(ms) {
@@ -196,6 +200,51 @@ function harness(over) {
     await y.advance(31000);
     assert.strictEqual(y.calls.restart, 0);
     assert.ok(y.logs.some((l) => /skipped/.test(l)));
+  }
+
+  // 13. (v1.68.0) stuck Enter: text in the input box, no transcript entry -> one automatic Enter, then verified
+  {
+    const x = harness();
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = true;
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(7000); assert.strictEqual(x.calls.enter || 0, 0);          // not before stuckEnterMs
+    await x.advance(2000); assert.strictEqual(x.calls.enter, 1);               // Enter pressed once
+    await x.advance(60000); assert.strictEqual(x.calls.enter, 1);              // never a second time
+    assert.strictEqual(x.calls.restart, 0);
+    assert.ok(x.logs.some((l) => /stuck-enter/.test(l) && /delivered after/.test(l)));
+  }
+  // 14. already landed (transcript has it): no Enter at all
+  {
+    const x = harness();
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.ack = true;
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(40000); assert.strictEqual(x.calls.enter || 0, 0);
+  }
+  // 15. text is NOT in the input box (not the user's draft, not ours): no Enter
+  {
+    const x = harness();
+    x.h.sessions[P] = "real"; x.h.holds = false; x.h.screenShows = true;
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(40000); assert.strictEqual(x.calls.enter || 0, 0); assert.strictEqual(x.calls.restart, 0);
+  }
+  // 16. Enter did not help and the agent is idle: falls back to the dead-link recovery (restart + requeue), once
+  {
+    const x = harness();
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false; x.h.working = false;
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(8000 + 6000 + 1000);
+    assert.strictEqual(x.calls.enter, 1);
+    assert.strictEqual(x.calls.restart, 1);
+    assert.ok(x.logs.some((l) => /stuck Enter/.test(l)));
+    await x.advance(5 * 60 * 1000); assert.strictEqual(x.calls.enter, 1);
+  }
+  // 17. Enter did not help but the agent is working: no restart (never interrupt a working agent)
+  {
+    const x = harness();
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.working = true; x.h.idleQuiet = false;
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(60000);
+    assert.strictEqual(x.calls.enter, 1); assert.strictEqual(x.calls.restart, 0);
   }
 
   console.log("connectionHealth ok");

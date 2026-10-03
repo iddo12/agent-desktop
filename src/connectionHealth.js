@@ -11,6 +11,11 @@
 //      transcript shows an idle agent that has not grown since the write, the link is dead -> restart that agent's session (same as Session > Restart
 //      Session, resumes with --continue). Capped at 3 per 15 min per agent; beyond that the state becomes
 //      "degraded" and the renderer delivers over the message channel instead.
+//   2b. (v1.68.0) Stuck Enter: the text IS on the screen (the live link is fine) but no transcript entry follows -
+//      the Enter was swallowed by the paste. After stuckEnterMs the app presses Enter itself, ONCE, then checks
+//      again after stuckVerifyMs; if the text is still sitting in the input box and the agent is idle, it falls
+//      back to the dead-link recovery (restart + requeue). Never when a prompt is waiting for an answer, never
+//      unless the screen shows exactly the text this app typed (so an unsent draft of the user's own is left alone).
 //   3. After a stuck-turn recovery (kill + redispatch) interrupted a working agent, one short
 //      "carry on" nudge is typed in, at most once per 15 min per agent.
 // Everything is event driven (no polling loops): the only timers are one-shots armed by a write, a failure
@@ -25,6 +30,8 @@ const DEFAULTS = {
   restartWindowMs: 15 * 60 * 1000,
   nudgeMinGapMs: 15 * 60 * 1000,
   nudgeDelayMs: 10 * 1000,
+  stuckEnterMs: 8 * 1000,       // text typed, still no transcript entry: press Enter once
+  stuckVerifyMs: 6 * 1000,      // ... and look again this much later
   opTimeoutMs: 2 * 60 * 1000,   // a restart / reconnect that hangs (or waits in a start limiter) falls back to backoff
 };
 
@@ -38,6 +45,9 @@ const NUDGE_TEXT =
 //   reconnect(agentPath, size) -> Promise     (find-or-dispatch + attach; throws on failure)
 //   restartSession(agentPath) -> Promise      (Restart Session equivalent; throws on failure)
 //   screenShows(agentPath, snippet) -> bool   (the CLI's screen contains the typed text = the link is alive)
+//   inputHoldsText(agentPath, snippet) -> bool (optional; the text sits UNSENT in the input box, no prompt open)
+//   transcriptHas(agentPath, text, sinceMs) -> true|false|null (optional; delivered per the transcript, null = cannot tell)
+//   pressEnter(agentPath) -> void              (optional)
 //   isIdleAndQuiet(agentPath, sinceMs) -> bool (agent idle per transcript AND transcript not written since sinceMs)
 //   isWorking(agentPath) -> bool
 //   wasInterrupted(agentPath) -> bool
@@ -54,7 +64,7 @@ function create(deps, opts) {
     let a = agents.get(p);
     if (!a) {
       a = { agentPath: p, state: "connected", attempts: 0, timer: null, nextRetryAt: 0, reason: "", since: 0,
-            unackedSince: null, deadTimer: null, restarts: [], lastNudgeAt: 0, requeueSince: null, recovering: false, size: null };
+            unackedSince: null, deadTimer: null, stuckTimer: null, enterPresses: 0, text: "", restarts: [], lastNudgeAt: 0, requeueSince: null, recovering: false, size: null };
       agents.set(p, a);
     }
     return a;
@@ -146,8 +156,47 @@ function create(deps, opts) {
     const a = get(p);
     if ((a.state !== "connected" && a.state !== "degraded") || a.unackedSince != null) return;
     a.unackedSince = now();
+    a.text = String(data).replace(/^\u001b\[200~/, "").slice(0, 4000);
     a.snippet = String(data).replace(/^\u001b\[200~/, "").slice(-40);
+    a.enterPresses = 0;
     a.deadTimer = unref(setT(() => checkDead(p), o.deadLinkMs));
+    if (deps.inputHoldsText && deps.pressEnter) { clearT(a.stuckTimer); a.stuckTimer = unref(setT(() => checkStuck(p), o.stuckEnterMs)); }
+  }
+
+  function ackState(p, a) {
+    try { return deps.transcriptHas ? deps.transcriptHas(p, a.text, a.unackedSince) : null; } catch (e) { return null; }
+  }
+  function holds(p, a) {
+    try { return !!deps.inputHoldsText(p, a.snippet); } catch (e) { return false; }
+  }
+
+  // stuckEnterMs after a message write: still no transcript entry and the text sits in the input box -> Enter, once.
+  function checkStuck(p) {
+    const a = get(p);
+    a.stuckTimer = null;
+    if (a.unackedSince == null || (a.state !== "connected" && a.state !== "degraded")) return;
+    if (ackState(p, a) === true) return;                 // it landed
+    if (!holds(p, a)) return;                            // not in the box: the dead-link check (or the renderer) decides
+    if (a.enterPresses >= 1) return;
+    a.enterPresses++;
+    log(`stuck-enter: ${p} - the typed text sits in the input box ${Math.round(o.stuckEnterMs / 1000)}s after the write with no transcript entry; pressing Enter once`);
+    try { deps.pressEnter(p); } catch (e) { log(`stuck-enter: ${p} pressEnter failed: ${e.message}`); return; }
+    a.stuckTimer = unref(setT(() => verifyStuck(p), o.stuckVerifyMs));
+  }
+
+  function verifyStuck(p) {
+    const a = get(p);
+    a.stuckTimer = null;
+    if (a.unackedSince == null || (a.state !== "connected" && a.state !== "degraded")) return;
+    const ack = ackState(p, a);
+    if (ack === true) { log(`stuck-enter: ${p} - delivered after the automatic Enter`); return; }
+    if (ack === null) return;                            // cannot verify (very short text): one Enter was all we do
+    if (!holds(p, a)) return;                            // left the box (submitted or cleared): the receipt may just be late
+    let working = false;
+    try { working = !!(deps.isWorking && deps.isWorking(p)); } catch (e) {}
+    if (working) { log(`stuck-enter: ${p} - text still in the input box after Enter but the agent is working; leaving it to the Not-confirmed notice`); return; }
+    log(`stuck-enter: ${p} - still in the input box after the automatic Enter; recovering the link`);
+    recover(p, "stuck Enter: the message text stays in the input box after an automatic Enter");
   }
 
   // Kept as a cheap hook: an idle CLI redraws its status line now and then, so "any output" proves nothing.
@@ -167,7 +216,7 @@ function create(deps, opts) {
     if (!quiet) { a.unackedSince = null; return; } // the agent is working or wrote since: not a dead link
     let shown = false;
     try { shown = !!(deps.screenShows && deps.screenShows(p, a.snippet)); } catch (e) {}
-    if (shown) { a.unackedSince = null; return; } // the CLI echoed the text (it sits in the input box): live link, a stuck-Enter case, not this module's
+    if (shown) { a.unackedSince = null; return; } // the CLI echoed the text: live link. A stuck Enter was handled at +8 s / +14 s by checkStuck()/verifyStuck() (v1.68.0)
     recover(p, `no output from the agent's pty for ${Math.round(o.deadLinkMs / 1000)}s after a message was written, and the agent is idle with nothing new in its transcript`);
   }
 
@@ -189,6 +238,7 @@ function create(deps, opts) {
     a.restarts = a.restarts.filter((x) => t - x < o.restartWindowMs);
     a.requeueSince = a.unackedSince;
     a.unackedSince = null;
+    clearT(a.stuckTimer); a.stuckTimer = null;
     if (a.restarts.length >= o.restartCap) {
       a.state = "degraded";
       a.since = t;
@@ -242,7 +292,7 @@ function create(deps, opts) {
 
   function getState(p) { const a = agents.get(p); return a ? snapshot(a) : { agentPath: p, state: "connected" }; }
   function getAll() { return Array.from(agents.values()).filter((a) => a.state !== "connected").map(snapshot); }
-  function forget(p) { const a = agents.get(p); if (a) { clearT(a.timer); clearT(a.deadTimer); agents.delete(p); } }
+  function forget(p) { const a = agents.get(p); if (a) { clearT(a.timer); clearT(a.deadTimer); clearT(a.stuckTimer); agents.delete(p); } }
 
   return { onAttachFailed, onConnected, noteWrite, noteData, afterStuckRecovery, getState, getAll, forget, _recover: recover, NUDGE_TEXT };
 }
