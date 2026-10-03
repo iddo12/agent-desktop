@@ -128,13 +128,68 @@
   const FORCE_CONFIRM_POLLS = 2;              // qualifying polls needed ...
   const FORCE_CONFIRM_WINDOW_MS = 60 * 1000;  // ... within this window
   const FORCE_REPEAT_GUARD_MS = 20 * 60 * 1000; // never Esc the same agent again within this long
+  // 2026-10-03: an agent that is nearly full and STILL working after our Esc (a queued message started a new turn,
+  // see parkQueue below) must not wait 20 min for the next one - Software Engineering reached 243K that way.
+  function forceRepeatGuardMsFor(t) { return t >= 190000 ? 5 * 60 * 1000 : FORCE_REPEAT_GUARD_MS; }
+
+  // 2026-10-03: PARKED USER QUEUE. Root cause of "never handed off" (Software Engineering, 243K): the agent had
+  // user messages waiting in session.sendQueue. After our Esc the turn ended, setBusy(false) drained the queue at
+  // once and a NEW turn started before any sweep saw the agent idle; startFlow's idle test also needs an empty
+  // queue. So while an Esc/flow is pending the user's queued messages are parked here (a Map, because the reset
+  // drops the old session object and its queue with it), then put back at the FRONT of the queue and drained when
+  // the flow ends (done/failed/cleared) or the flow never starts. Nothing is dropped or sent twice.
+  const parkedQueues = new Map();             // agentPath -> { items: [...], at: ms of last parking }
+  const PARK_WAIT_FOR_FLOW_MS = 2 * 60 * 1000; // parked after an Esc but no flow started: give up and restore
+  function isFlowOwnMessage(q) { return typeof q === "string" && (q.indexOf("[Agent Desktop") === 0 || q.indexOf(RESUME_MARKER) !== -1); }
+  function parkQueue(ap, why) {
+    const se = terminals.get(ap);
+    if (!se || !se.sendQueue || !se.sendQueue.length) return 0;
+    const mine = [], keep = [];
+    for (const q of se.sendQueue) (isFlowOwnMessage(q) ? keep : mine).push(q);
+    if (!mine.length) return 0;
+    se.sendQueue.length = 0;
+    for (const q of keep) se.sendQueue.push(q);
+    const cur = parkedQueues.get(ap);
+    parkedQueues.set(ap, { items: (cur ? cur.items : []).concat(mine), at: Date.now() });
+    try { window.autoHandoffLog("parked " + mine.length + " queued user message(s) for " + agentName(ap) + " (" + why + ")"); } catch (e) {}
+    if (typeof renderQueue === "function") renderQueue(ap);
+    return mine.length;
+  }
+  let restoringParked = false;
+  async function restoreParkedQueues() {
+    if (restoringParked) return;
+    restoringParked = true;
+    try { await restoreParkedQueuesInner(); } finally { restoringParked = false; }
+  }
+  async function restoreParkedQueuesInner() {
+    for (const [ap, pk] of Array.from(parkedQueues.entries())) {
+      try {
+        const fl = flows.get(ap);
+        if (fl ? (fl.phase === "saving" || fl.phase === "resetting" || fl.phase === "resuming") : Date.now() - pk.at < PARK_WAIT_FOR_FLOW_MS) continue;
+        let se = terminals.get(ap);
+        if (!se || !se.started) {
+          const ag = agents.find((x) => x.path === ap);
+          if (ag) { await autoAttachSession(ag); se = terminals.get(ap); }
+        }
+        if (!se) continue;                      // keep them parked, try again next tick
+        parkedQueues.delete(ap);
+        se.sendQueue.unshift(...pk.items);      // ahead of anything queued meanwhile: they were sent first
+        try { window.autoHandoffLog("restored " + pk.items.length + " parked user message(s) to " + agentName(ap) + " (flow " + (fl ? fl.phase : "never started") + ")"); } catch (e) {}
+        if (typeof renderQueue === "function") renderQueue(ap);
+        if (se.started && !se.busy && !se.transcriptWorking) setBusy(ap, se, false);   // drain; the idle transition sends the rest one by one
+      } catch (e) { console.error("guards restoreParkedQueues", e); }
+    }
+  }
+  window.guardsParkQueue = parkQueue;           // sandbox tests drive these directly
+  window.guardsRestoreParked = restoreParkedQueues;
+  window.guardsParkedState = () => Array.from(parkedQueues.entries());
 
   async function maybeForceCheckpoint(a, act, t) {
     if (!forcedCheckpointEnabled()) return false;
     if (!act || !act.working || act.sinceMs < forceAfterMsFor(t)) { forcePolls.delete(a.path); return false; }
     // Finding 2: one Esc per agent per FORCE_REPEAT_GUARD_MS (it could repeat every tick).
     const prev = forcedInterrupts.get(a.path);
-    if (prev && Date.now() - prev < FORCE_REPEAT_GUARD_MS) return false;
+    if (prev && Date.now() - prev < forceRepeatGuardMsFor(t)) return false;
     const session = terminals.get(a.path);
     if (!session || !session.started) return false;
     const quiet = await window.api.getTranscriptQuietMs(a.path).catch(() => null);
@@ -451,6 +506,7 @@
       if (confirmFirst && !confirm("Ask this agent to save its lessons + a handoff file, then reset the session and resume from the handoff?")) return;
       const flow = { phase: "saving", startedAt: Date.now(), error: null, quietPolls: 0 };
       flows.set(agentPath, flow);
+      parkQueue(agentPath, "handoff flow start");   // before the prompt goes out, so only the user's messages are parked
       deliverHandoffPrompt(agentPath, handoffPrompt(agentPath), flow);
       render();
       flow.timer = setInterval(() => advanceFlow(agentPath), FLOW_POLL_MS);
@@ -463,6 +519,7 @@
     const flow = flows.get(agentPath);
     if (!flow || flow.phase !== "saving") return;
     try {
+      parkQueue(agentPath, "queued during handoff");   // a message typed mid-flow must not block the idle test or reach the old conversation
       // Time spent stopped on a usage limit does not count: the agent cannot write anything then.
       const lim = await window.api.getLimitStatus(agentPath).catch(() => null);
       if (lim && lim.halt) flow.pausedMs = (flow.pausedMs || 0) + FLOW_POLL_MS;
@@ -545,6 +602,7 @@
   // attaches once the agent is opened), give it a few seconds to settle, send, then confirm the
   // marker landed in the transcript. Resend once if not; after that tell the user what to do.
   async function tickResume() {
+    restoreParkedQueues();
     for (const [ap, r] of Array.from(pendingResume.entries())) {
       try {
         const flow = flows.get(ap);
