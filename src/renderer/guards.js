@@ -140,7 +140,11 @@
   // the flow ends (done/failed/cleared) or the flow never starts. Nothing is dropped or sent twice.
   const parkedQueues = new Map();             // agentPath -> { items: [...], at: ms of last parking }
   const PARK_WAIT_FOR_FLOW_MS = 2 * 60 * 1000; // parked after an Esc but no flow started: give up and restore
-  function isFlowOwnMessage(q) { return typeof q === "string" && (q.indexOf("[Agent Desktop") === 0 || q.indexOf(RESUME_MARKER) !== -1); }
+  function isFlowOwnMessage(q) { return typeof q === "string" && (q.indexOf("[Agent Desktop") === 0 || q.indexOf(RESUME_MARKER) !== -1 || /^\[hid:[^\]]+\]/.test(q)); }
+  // v1.67.1: the held list is written to disk after every change (survives an app restart) and shown in the chat.
+  function persistHeld() {
+    try { window.api.heldSave(window.HandoffLogic.serializeHeld(parkedQueues)); } catch (e) { /* never break the chat */ }
+  }
   function parkQueue(ap, why) {
     const se = terminals.get(ap);
     if (!se || !se.sendQueue || !se.sendQueue.length) return 0;
@@ -151,6 +155,8 @@
     for (const q of keep) se.sendQueue.push(q);
     const cur = parkedQueues.get(ap);
     parkedQueues.set(ap, { items: (cur ? cur.items : []).concat(mine), at: Date.now() });
+    persistHeld();
+    try { render(); } catch (e) {}
     try { window.autoHandoffLog("parked " + mine.length + " queued user message(s) for " + agentName(ap) + " (" + why + ")"); } catch (e) {}
     if (typeof renderQueue === "function") renderQueue(ap);
     return mine.length;
@@ -172,7 +178,29 @@
           if (ag) { await autoAttachSession(ag); se = terminals.get(ap); }
         }
         if (!se) continue;                      // keep them parked, try again next tick
+        // v1.69.1 (H1): a working agent (e.g. the keep-going mission turn after a handoff) gets them mid-turn, like a normal send
+        const working = !!(se.started && (se.busy || se.transcriptWorking));
+        let dialogOpen = false;
+        if (working) { try { dialogOpen = !!(await window.api.agentDialogOpen(ap)); } catch (e) { dialogOpen = true; } }
+        const cur = parkedQueues.get(ap);       // v1.69.1 (L2): re-read after the awaits - more may have been parked meanwhile
+        if (!cur) continue;
+        const stillWorking = !!(se.started && (se.busy || se.transcriptWorking));
+        const route = window.HandoffLogic.restoreRoute({ started: !!se.started, working: working && stillWorking, midTurnOk: midTurnAllowed(), dialogOpen, queueLen: se.sendQueue.length, linkHeld: !!(window.connHealth && window.connHealth.holding(ap)) });
+        if (route === "midturn" || route === "direct") {
+          // v1.69.3 (M1): the held list is only dropped once every write went out; a throw keeps the unsent rest parked
+          const todo = cur.items.slice();
+          try {
+            for (let i = 0; todo.length; i++) { submitToAgent(ap, todo[0], route === "midturn" || i > 0 ? { midTurn: true } : undefined); todo.shift(); }
+          } finally {
+            if (todo.length) parkedQueues.set(ap, { items: todo, at: cur.at }); else parkedQueues.delete(ap);
+            persistHeld();
+          }
+          try { window.autoHandoffLog("sent " + cur.items.length + " restored user message(s) to " + agentName(ap) + " (" + route + ")"); } catch (e) {}
+          continue;
+        }
         parkedQueues.delete(ap);
+        persistHeld();
+        pk.items = cur.items;
         se.sendQueue.unshift(...pk.items);      // ahead of anything queued meanwhile: they were sent first
         try { window.autoHandoffLog("restored " + pk.items.length + " parked user message(s) to " + agentName(ap) + " (flow " + (fl ? fl.phase : "never started") + ")"); } catch (e) {}
         if (typeof renderQueue === "function") renderQueue(ap);
@@ -183,6 +211,17 @@
   window.guardsParkQueue = parkQueue;           // sandbox tests drive these directly
   window.guardsRestoreParked = restoreParkedQueues;
   window.guardsParkedState = () => Array.from(parkedQueues.entries());
+  // after an app restart: put back what was held when the app went down (never lose a message typed during a handoff)
+  try {
+    window.api.heldLoad().then((r) => {
+      const m = window.HandoffLogic.parseHeld(r && r.json);
+      for (const [ap, v] of m.entries()) {
+        const cur = parkedQueues.get(ap);
+        parkedQueues.set(ap, { items: v.items.concat(cur ? cur.items : []), at: cur ? cur.at : 0 });
+      }
+      if (m.size) { try { window.autoHandoffLog("loaded held user messages from disk for " + m.size + " agent(s) after a restart"); } catch (e) {} }
+    }).catch(() => {});
+  } catch (e) { /* older preload */ }
 
   async function maybeForceCheckpoint(a, act, t) {
     if (!forcedCheckpointEnabled()) return false;
@@ -390,6 +429,11 @@
   // had arrived. A working agent has the message; it is simply busy with it.
   const RESUME_MAX_WAIT_MS = 5 * 60 * 1000;
 
+  // v1.67.1: real handoff durations (seconds, last 5) drive the countdown estimate
+  function handoffDurations() { try { return JSON.parse(localStorage.getItem("handoffDurations") || "[]"); } catch (e) { return []; } }
+  function recordHandoffDuration(secs) {
+    try { localStorage.setItem("handoffDurations", JSON.stringify(handoffDurations().concat([Math.round(secs)]).slice(-5))); } catch (e) {}
+  }
   const nearHandoff = new Map(); // agentPath -> over AUTO_HANDOFF_TOKENS at the last sweep (v1.65.0: such agents keep user messages in the app queue so parkQueue can park them before the forced Esc)
   const flows = new Map(); // agentPath -> { phase, startedAt, error, quietPolls }
   const pendingResume = new Map(); // agentPath -> { text, path, readySince, sentAt, tries }
@@ -413,6 +457,8 @@
   const ctxBanner = el("guard-context-banner");
   chatView.insertBefore(limitBanner, chatBody);
   chatView.insertBefore(ctxBanner, chatBody);
+  const heldBanner = el("guard-held-banner");   // v1.67.1: messages held until the handoff finishes (visible, never "Not confirmed")
+  chatView.insertBefore(heldBanner, chatBody);
 
   const headerBtn = document.createElement("button");
   headerBtn.id = "handoff-reset-btn";
@@ -423,6 +469,7 @@
   headerBtn.addEventListener("click", () => startFlow(activeAgentPath, true));
 
   function handoffPrompt(agentPath) {
+    if (window.HandoffLogic) return window.HandoffLogic.handoffPrompt(agentPath.replace(/[\\/]+$/, "") + String.fromCharCode(92) + "handoff_latest.md", { interrupted: forcedInterrupts.has(agentPath) });
     const file = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";
     return (
       "[Agent Desktop - planned context reset] Iddo approved resetting this session to cut usage. " +
@@ -457,7 +504,7 @@
   // v1.63.4: handoff prompts go over the message channel with an acknowledgement, typed into the pty
   // only if the channel is unavailable, and are then VERIFIED in the transcript (retry with backoff,
   // every attempt logged to stuck-turn-watchdog.log). The pty is what silently lost them on 2026-10-03.
-  function deliverHandoffPrompt(agentPath, text, flow) {
+  function deliverHandoffPrompt(agentPath, text, flow, dopts) {
     let ptyTries = 0;
     const nm = agentName(agentPath);
     if (flow) flow.deliveryPending = (flow.deliveryPending || 0) + 1; // nudges wait for this (see advanceFlow)
@@ -474,15 +521,26 @@
         // stop as soon as the flow is cleared, replaced, failed, reaped or past the saving phase
         aborted: () => !flow || flows.get(agentPath) !== flow || flow.phase !== "saving",
         transcriptHas: (m) => window.api.transcriptHas(agentPath, m),
+        // v1.68.2 (B2): the typed prompt may sit unsent in the input box (the stuck-Enter check only arms for one unacked write at a time):
+        // press Enter, once per look, when the screen shows exactly this prompt's text
+        nudgeSubmit: async () => {
+          const se = terminals.get(agentPath);
+          if (!se || se.busy || se.transcriptWorking) return false;   // v1.69.1 (L4): never press Enter into a working agent
+          const holds = await window.api.agentInputHoldsText(agentPath, text).catch(() => false);
+          if (!holds) return false;
+          window.autoHandoffLog(nm + ": handoff prompt sits unsent in the input box - pressing Enter");
+          if (typeof writeQueued === "function") writeQueued(se, () => window.api.sendInput(agentPath, "\r")); else window.api.sendInput(agentPath, "\r");
+          return true;
+        },
         log: (line) => window.autoHandoffLog(nm + ": " + line),
-      });
+      }, dopts);
     } catch (e) {
       settle();
       window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message));
       return Promise.resolve(null);
     }
     return p.then((r) => {
-      if (flow) flow.delivery = r;
+      if (flow) { flow.delivery = r; flow.deliverySettledAt = Date.now(); }
       if (r && r.aborted) {
         // v1.63.8: the flow ended while the prompt still waits for a busy agent - drop it so it is not typed later
         const se = terminals.get(agentPath);
@@ -490,7 +548,7 @@
       }
       if (!r.delivered && !r.aborted) window.autoHandoffLog("handoff prompt for " + nm + " NOT confirmed in transcript after " + r.attempts + " attempts");
       return r;
-    }).catch((e) => { window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message)); }).finally(settle);
+    }).catch((e) => { if (flow) flow.deliverySettledAt = Date.now(); window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message)); }).finally(settle);
   }
 
   // v1.63.4: the existing handoff_latest.md may predate this request entirely (the agent never saw it).
@@ -509,7 +567,10 @@
       const flow = { phase: "saving", startedAt: Date.now(), error: null, quietPolls: 0 };
       flows.set(agentPath, flow);
       parkQueue(agentPath, "handoff flow start");   // before the prompt goes out, so only the user's messages are parked
-      deliverHandoffPrompt(agentPath, handoffPrompt(agentPath), flow);
+      flow.hid = window.HandoffDelivery.makeMarker();   // one hid per flow: the prompt is typed at most once under it
+      flow.firstPrompt = handoffPrompt(agentPath);
+      try { syncKeepGoing(); } catch (e) {}   // v1.69.1 (L3): tell main at once, not at the next 2 s tick, so no keep-going nudge crosses the handoff
+      deliverHandoffPrompt(agentPath, flow.firstPrompt, flow, { marker: flow.hid });
       render();
       flow.timer = setInterval(() => advanceFlow(agentPath), FLOW_POLL_MS);
     } catch (e) {
@@ -556,20 +617,38 @@
       // flow sat until the 12-minute timeout). If it has been idle and the file is still not fresh,
       // tell it plainly, at most twice, instead of waiting out the clock.
       flow.idleStalePolls = idle && !fresh ? (flow.idleStalePolls || 0) + 1 : 0;
-      if (flow.idleStalePolls >= 3 && (flow.nudges || 0) < 2 && !flow.deliveryPending) {
+      let nudgeOk = false;
+      if (flow.idleStalePolls >= 3 && (flow.nudges || 0) < 2) {
+        if (window.HandoffLogic.mayNudge(flow)) nudgeOk = true;   // v1.68.2 (B2): first request confirmed
+        else if (flow.firstPrompt && window.HandoffLogic.mayNudge(flow, Date.now(), { inputHolds: false, queued: false })) {
+          // v1.69.1 (M2): first request never confirmed; bounded wait is over - one nudge, only if nothing of it can still land
+          const holds = await window.api.agentInputHoldsText(agentPath, flow.firstPrompt).catch(() => true);
+          const queued = !!(session && session.sendQueue && session.sendQueue.some((q) => typeof q === "string" && q.indexOf(flow.hid) !== -1));
+          if (!holds && !queued) { nudgeOk = true; flow.unconfirmedNudged = true; window.autoHandoffLog(agentName(agentPath) + ": first handoff request never confirmed and not pending - sending one nudge"); }
+        }
+      }
+      if (nudgeOk) {
         flow.nudges = (flow.nudges || 0) + 1;
         flow.idleStalePolls = 0;
         const fileP = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";
         const last = info && info.exists ? new Date(info.mtimeMs).toLocaleTimeString() : "never";
         deliverHandoffPrompt(
           agentPath,
-          "[Agent Desktop] Your last reply said the handoff was saved, but " + fileP + " has NOT been rewritten since this request (file last modified: " + last + "). " +
-            "Do not answer from memory. Use a tool to write that exact file now with the sections requested (# Handoff, ## LESSONS, ## OPEN NOW, ## STATE, ## KEY FACTS); if the Write tool fails, write it with a Bash heredoc or a Python script. Then reply with only 'Handoff saved'.",
+          window.HandoffLogic.nudgePrompt(fileP),
           flow
         );
         return;
       }
-      if (flow.quietPolls < 2) return; // handoff written AND agent idle for two polls in a row
+      // v1.67.1: do not wait for the agent's reply. A fresh file holding every required section whose mtime has
+      // been stable for two polls is the handoff; the idle path above stays as the fallback.
+      if (fresh && info.ready) {
+        flow.readyPolls = flow.readyMtime === info.mtimeMs ? (flow.readyPolls || 0) + 1 : 1;
+        flow.readyMtime = info.mtimeMs;
+        flow.fileReady = true;
+      } else { flow.readyPolls = 0; }
+      // H1 (review): also require the agent to be done (not working): it may still be saving memory files or editing.
+      const filePollsOk = flow.readyPolls >= 2 && !flow.deliveryPending && !(act && (act.working || act.pendingToolUse));
+      if (!filePollsOk && flow.quietPolls < 2) { render(); return; } // not done yet (render keeps the countdown moving)
       await runReset(agentPath, flow);
     } catch (e) {
       flow.phase = "failed";
@@ -593,7 +672,10 @@
     // v1.62.0: the resume message rides along as the fresh session's FIRST prompt, so it is delivered
     // even if Iddo has moved to another agent (before, it waited for the agent's tab to be opened).
     // tickResume then only VERIFIES it; if it never lands it falls back to the old attach-and-send.
-    const resumeText = resumePrompt(arch.path);
+    let resumeText = resumePrompt(arch.path);
+    // v1.69.0: main decides the text (continue-at-once when the handoff has open work and no BLOCKED) and sets the persisted
+    // "mission in progress" marker; the old static text stays the fallback.
+    try { const kg = await window.api.keepGoingResumePrompt(agentPath, arch.path); if (kg && kg.text && kg.text.startsWith(RESUME_MARKER)) resumeText = kg.text; } catch (e) { /* keep the static text */ }
     await performSessionReset(agentPath, { initialPrompt: resumeText });
     pendingResume.set(agentPath, { text: resumeText, path: arch.path, readySince: null, sentAt: Date.now(), viaDispatch: true, tries: 1 });
     flow.phase = "resuming";
@@ -603,8 +685,20 @@
   // Runs every 2s. For each pending resume: wait until the fresh session is attached (it only
   // attaches once the agent is opened), give it a few seconds to settle, send, then confirm the
   // marker landed in the transcript. Resend once if not; after that tell the user what to do.
+  // v1.69.0 (M4): tell main which agents have a handoff running so keep-going never nudges them (only sent when the list changes)
+  let kgActiveKey = null; // null: the first tick after a (re)load always sends the list, so main never keeps a stale flag
+  function syncKeepGoing() {
+    try {
+      const act = [];
+      for (const [ap, f] of flows.entries()) if (f && (f.phase === "saving" || f.phase === "resetting" || f.phase === "resuming")) act.push(ap);
+      for (const ap of pendingResume.keys()) if (!act.includes(ap)) act.push(ap);
+      const key = act.slice().sort().join("|");
+      if (key !== kgActiveKey) { kgActiveKey = key; window.api.keepGoingHandoffActive(act); }
+    } catch (e) { /* never break the handoff */ }
+  }
   async function tickResume() {
     restoreParkedQueues();
+    syncKeepGoing();
     for (const [ap, r] of Array.from(pendingResume.entries())) {
       try {
         const flow = flows.get(ap);
@@ -625,6 +719,7 @@
           pendingResume.delete(ap);
           if (flow) {
             flow.phase = "done";
+            recordHandoffDuration((Date.now() - flow.startedAt) / 1000);
             window.autoHandoffLog("flow finished OK for " + agentName(ap));
             render();
             setTimeout(() => {
@@ -927,12 +1022,20 @@
         else limitBanner.className = "guard-banner hidden";
       }
 
+      // --- held messages (v1.67.1)
+      const held = ap && parkedQueues.get(ap);
+      if (held && held.items.length) {
+        const short = (t) => { const s = (window.longMessageDisplayText && window.longMessageDisplayText(t)) || String(t); return s.length > 60 ? s.slice(0, 57) + "..." : s; };
+        show(heldBanner, "guard-blue", "Held until the handoff finishes (" + held.items.length + ") - sent in order to the fresh session: " + held.items.map(short).join(" | "), []);
+      } else heldBanner.className = "guard-banner hidden";
+
       // --- context / handoff banner
       const flow = ap && flows.get(ap);
       if (flow) {
-        if (flow.phase === "saving") show(ctxBanner, "guard-blue", "Handoff in progress: the agent is saving lessons to memory and writing handoff_latest.md - the reset happens automatically when it finishes (lessons appear in its reply).", []);
-        else if (flow.phase === "resetting") show(ctxBanner, "guard-blue", "Handoff saved - starting a fresh session now...", []);
-        else if (flow.phase === "resuming") show(ctxBanner, "guard-blue", "Fresh session started - sending it the handoff and confirming it arrived (if this agent was not open, this happens as soon as you open it).", []);
+        const hl = window.HandoffLogic;
+        const stageNow = flow.phase === "saving" ? (flow.fileReady ? "ready" : flow.deliveryPending ? "delivering" : "writing") : flow.phase;
+        const prog = () => hl.progressText(stageNow, Math.round((Date.now() - flow.startedAt) / 1000), hl.estimateSecs(handoffDurations()), (parkedQueues.get(ap) || { items: [] }).items.length);
+        if (flow.phase === "saving" || flow.phase === "resetting" || flow.phase === "resuming") show(ctxBanner, "guard-blue", prog(), []);
         else if (flow.phase === "done") show(ctxBanner, "guard-green", "Reset done and confirmed: the new session received the handoff and is reading it; the red marker above lists the lessons carried over.", []);
         else {
           const btns = [{ label: "Dismiss", onClick: () => { flows.delete(ap); pendingResume.delete(ap); render(); } }];
@@ -999,6 +1102,7 @@
   // v1.58.0: read by app-update-overlay.js - Update & restart waits while a
   // handoff is mid-flight (a restart would cut it between reset and resume).
   window.guardsAgentInFlow = (ap) => flows.has(ap) || pendingResume.has(ap) || !!nearHandoff.get(ap) || !!(allRun && !allRun.finished); // v1.65.0
+  window.guardsFlowActive = (ap) => window.HandoffLogic.flowHoldsMessages(flows.get(ap), pendingResume.has(ap)); // v1.68.2 (B1)
   window.guardsBusyReason = () => {
     if (allRun && !allRun.finished) return "\"Handoff all\" is running";
     if (flows.size) return "a handoff is in progress";

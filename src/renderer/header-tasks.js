@@ -358,6 +358,8 @@
     if (a.dialogOpen) return { kind: "blocked", why: "Blocked: waiting on a permission prompt - open its tab and answer it" };
     const halt = (a.attention || []).find((t) => /^halted/.test(t));
     if (halt) return { kind: "blocked", why: "Blocked: " + halt };
+    // v1.69.0 keep-going: the agent stopped although nobody blocked it. Amber, like "pending" (needs a look, not red).
+    try { const ks = window.keepGoingStopped && window.keepGoingStopped(a.path); if (ks) return { kind: "stopped", why: ks }; } catch (e) { /* cosmetic */ }
     const pend = (a.telegram || []).filter((t) => t.status === "pending");
     if (pend.length) return { kind: "pending", why: "Pending: " + pend.length + " decision" + (pend.length > 1 ? "s" : "") + " queued - the agent keeps working" };
     return { kind: null, why: "" };
@@ -374,7 +376,7 @@
       const key = state + "|" + needs.kind + "|" + needs.why;
       if (row.dataset.xpState === key) return;
       row.dataset.xpState = key;
-      row.classList.remove("xp-working", "xp-ready", "xp-idle", "xp-needs-blocked", "xp-needs-pending");
+      row.classList.remove("xp-working", "xp-ready", "xp-idle", "xp-needs-blocked", "xp-needs-pending", "xp-needs-stopped");
       row.classList.add("xp-" + state);
       if (needs.kind) row.classList.add("xp-needs-" + needs.kind);
       const wrap = row.querySelector(".avatar-wrap");
@@ -387,7 +389,7 @@
       if (!needs.kind) { if (badge) badge.remove(); return; }
       if (!badge) { badge = document.createElement("span"); wrap.appendChild(badge); }
       badge.className = "xp-needs-badge " + needs.kind;
-      badge.textContent = needs.kind === "blocked" ? "!" : "\u2026";
+      badge.textContent = needs.kind === "blocked" ? "!" : needs.kind === "stopped" ? "\u25CB" : "\u2026";
       badge.title = needs.why;
     });
   }
@@ -412,8 +414,11 @@
     add("xp-lg xp-lg-working", "", "working now");
     add("xp-lg-need blocked", "!", "blocked: can't progress, act now");
     add("xp-lg-need pending", "\u2026", "pending: queued, still working");
+    add("xp-lg-need stopped", "\u25CB", "stopped: nobody blocked it, look");
     list.parentNode.insertBefore(legend, list.nextSibling);
   }
+
+  window.xpApplyAgentStates = () => { try { applyAgentStates(); } catch (e) { /* cosmetic */ } };
 
   async function refresh() {
     try {
@@ -441,14 +446,25 @@
   // The chat header and the sidebar are rebuilt on agent selection and every
   // list refresh, so re-apply rather than assuming a single pass is enough.
   // Guarded against re-entry: render() itself mutates the DOM this observes.
-  let applying = false;
+  // v1.68.0: was document.body + subtree, i.e. apply() (four builders and a querySelectorAll over every sidebar
+  // row) ran after ANY mutation anywhere - every chat re-render, every 1 Hz indicator tick. Now only the two places
+  // it manages are watched (sidebar, chat header), one apply per animation frame, and the records caused by apply()
+  // itself are discarded instead of re-triggering it.
+  let applying = false, applyQueued = false;
   apply();
   const mo = new MutationObserver(() => {
-    if (applying) return;
-    applying = true;
-    try { apply(); } finally { applying = false; }
+    if (applying || applyQueued) return;
+    applyQueued = true;
+    requestAnimationFrame(() => {
+      applyQueued = false;
+      applying = true;
+      try { apply(); } finally { applying = false; mo.takeRecords(); }
+    });
   });
-  mo.observe(document.body, { childList: true, subtree: true });
+  for (const id of ["sidebar", "chat-header"]) {
+    const el = document.getElementById(id);
+    if (el) mo.observe(el, { childList: true, subtree: true });
+  }
   refresh();
   setInterval(refresh, POLL_MS);
 })();

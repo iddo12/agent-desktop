@@ -40,7 +40,7 @@ if (testMode.TEST_MODE) {
     // the same taskbar button as the real app - without it the two share one
     // button and the amber icon never gets shown separately.
     app.setAppUserModelId("com.iddo.agentdesktop.sandbox");
-    app.setPath("userData", path.join(app.getPath("appData"), "agent-desktop-test"));
+    app.setPath("userData", path.join(app.getPath("appData"), "agent-desktop-test" + String(process.env.AGENT_DESKTOP_TEST_SUFFIX || "").replace(/[^A-Za-z0-9_-]/g, "")));  // v1.68.0: a second sandbox instance (own userData) can run beside another agent's
   } catch (e) {
     // Better to refuse to start than to run a test instance that shares the
     // live one's logs, sent-message history and UI flags.
@@ -422,6 +422,24 @@ ipcMain.handle("ui-flag-set", (event, { key, value }) => {
   } catch (e) {
     return false;
   }
+});
+
+// v1.66.0: start limiter + CPU guard install/consent + banner state (src/cpuGuardGlue.js).
+const cpuGuard = require("./cpuGuardGlue").init({
+  app,
+  ipcMain,
+  dialog,
+  testMode,
+  getMainWindow: () => mainWindow,
+  readUiFlags,
+  setUiFlag: (key, value) => {
+    try {
+      const f = readUiFlags();
+      f[key] = value;
+      fs.writeFileSync(UI_FLAGS_PATH, JSON.stringify(f, null, 2));
+    } catch (e) {}
+  },
+  log: (m) => logStuckWatchdog(m),
 });
 
 ipcMain.handle("check-claude-code-update", async () => {
@@ -1055,6 +1073,7 @@ if (!gotSingleInstanceLock) {
     }, STUCK_CHECK_INTERVAL_MS);
     setInterval(() => {
       checkForHaltedTurns().catch((e) => logStuckWatchdog(`checkForHaltedTurns error: ${e.message}`));
+      try { if (keepGoing) keepGoing.tick(); } catch (e) { logStuckWatchdog(`keepgoing tick error: ${e.message}`); }
     }, STUCK_CHECK_INTERVAL_MS);
     setInterval(() => {
       try {
@@ -1074,6 +1093,12 @@ if (!gotSingleInstanceLock) {
     // A sandbox whose sweep will be skipped anyway is ready at once rather
     // than after the 10 s settle delay below.
     if (!testMode.liveAgentsPermitted()) markStartupSweepDone(false);
+    // v1.66.1: the startup overlay never waits longer than 90 s for the sweep (a CPU hold can queue starts for
+    // up to 15 min; the sweep carries on in the background, the overlay is released with a log line).
+    setTimeout(() => {
+      logStuckWatchdog("startup: overlay released after 90 s (sweep still queued, probably behind a CPU hold)");
+      markStartupSweepDone(false);
+    }, 100000).unref();
     setTimeout(() => {
       ensureAllAgentsBackgrounded(startupProgress)
         .then((result) => markStartupSweepDone(!!(result && result.measured)))
@@ -1087,6 +1112,7 @@ if (!gotSingleInstanceLock) {
     }, ENSURE_AGENTS_ALIVE_INTERVAL_MS);
     setInterval(repinAllAgentNames, REPIN_AGENT_NAMES_INTERVAL_MS);
     writeRuntimeStamp();
+    setTimeout(() => cpuGuard.ensure().catch(() => {}), 45000); // first-time consent dialog, after the startup rush
     logStuckWatchdog(`started v${app.getVersion()} pid=${process.pid} (${testMode.describe()})`);
     if (testMode.TEST_MODE) {
       enforceTestTokenBudget();
@@ -2035,13 +2061,32 @@ const lastDispatchAt = new Map(); // path.resolve(sessionCwd).toLowerCase() -> m
 function dispatchKey(sessionCwd) {
   return path.resolve(sessionCwd).toLowerCase();
 }
+// v1.66.1: starts that are queued or running (the limiter can hold a start for minutes), per agent.
+const startsInFlight = new Map(); // dispatchKey -> { p: Promise<id>, urgent }
 function dispatchedRecently(sessionCwd) {
-  const at = lastDispatchAt.get(dispatchKey(sessionCwd));
+  const k = dispatchKey(sessionCwd);
+  if (startsInFlight.has(k)) return true;
+  const at = lastDispatchAt.get(k);
   return !!at && Date.now() - at < DISPATCH_GRACE_MS;
 }
 
-async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
-  lastDispatchAt.set(dispatchKey(sessionCwd), Date.now());
+// The same agent is never started twice at once: a second plain start (sweep, reattach) joins the one already
+// queued/running. A forced-fresh / resume start, or an urgent one over a queued non-urgent start, goes ahead
+// (the queued one re-checks that the agent is not up yet once its slot is granted).
+function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
+  const k = dispatchKey(sessionCwd);
+  const plain = !opts.forceFresh && !opts.resumeSessionId;
+  const cur = startsInFlight.get(k);
+  if (cur && plain && (cur.urgent || !opts.urgent)) return cur.p;
+  const entry = { urgent: !!opts.urgent };
+  entry.p = dispatchBackgroundAgentImpl(shell, spawnEnv, sessionCwd, opts).finally(() => {
+    if (startsInFlight.get(k) === entry) startsInFlight.delete(k);
+  });
+  startsInFlight.set(k, entry);
+  return entry.p;
+}
+
+async function dispatchBackgroundAgentImpl(shell, spawnEnv, sessionCwd, opts = {}) {
   let args;
   if (opts.resumeSessionId) {
     args = ["--bg", "--resume", opts.resumeSessionId];
@@ -2061,12 +2106,26 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   // (no 90 s timeout) and rejects with err.untrusted = true.
   let output;
   try {
-    output = await runClaudeCommand(shell, args, {
-      cwd: sessionCwd,
-      env: spawnEnv,
-      timeoutMs: CLAUDE_CLI_TIMEOUT_MS,
-      abortPattern: workspaceTrust.TRUST_PROMPT_RE,
-    });
+    // v1.66.0: start limiter (max 3 starts in flight, 4 s apart, holds while the CPU guard says overloaded).
+    // opts.urgent = one explicit user action (or a reconnect): never queued behind the crowd.
+    output = await cpuGuard.limiter.run(
+      async () => {
+        // A start that waited in the queue may have been overtaken (a tab open, another path): never start a second copy.
+        if (!opts.urgent && !opts.forceFresh && !opts.resumeSessionId) {
+          const up = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd, { fresh: true }).catch(() => null);
+          if (up && up.id) return { existingId: up.id };
+        }
+        lastDispatchAt.set(dispatchKey(sessionCwd), Date.now()); // stamped when the start really begins, not when it was queued
+        return runClaudeCommand(shell, args, {
+          cwd: sessionCwd,
+          env: spawnEnv,
+          timeoutMs: CLAUDE_CLI_TIMEOUT_MS,
+          abortPattern: workspaceTrust.TRUST_PROMPT_RE,
+        });
+      },
+      { label: path.basename(path.dirname(sessionCwd)), urgent: !!opts.urgent }
+    );
+    if (output && output.existingId) return output.existingId;
   } catch (e) {
     if (e.aborted) {
       const err = new Error(
@@ -2271,7 +2330,22 @@ const ENSURE_AGENTS_ALIVE_STAGGER_MS = 2000; // don't launch every configured ag
 // `progress` (optional) is the startup countdown's hook - see startupProgress.
 // Returns { measured: true } only when it actually walked the agent list, so
 // the caller can tell a real sweep from a skipped/failed one.
+// v1.66.1: one sweep at a time. With starts queued behind a CPU hold a sweep can take minutes; the 15-min timer
+// must not stack a second sweep on top of it.
+let sweepRunning = false;
 async function ensureAllAgentsBackgrounded(progress) {
+  if (sweepRunning) {
+    logStuckWatchdog("ensureAllAgentsBackgrounded: previous sweep still running - skipping this one");
+    return { measured: false, skipped: true };
+  }
+  sweepRunning = true;
+  try {
+    return await ensureAllAgentsBackgroundedImpl(progress);
+  } finally {
+    sweepRunning = false;
+  }
+}
+async function ensureAllAgentsBackgroundedImpl(progress) {
   // Tier 1/2 sandboxes must never dispatch a real `claude --bg` process: that
   // spends real quota and, in a fixtures-only sandbox, there is nothing for a
   // live process to do anyway. Tier 3 turns it on explicitly, and stops again
@@ -2488,7 +2562,7 @@ async function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
     existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
   }
   if (existing) return { id: existing.id, freshlyDispatched: false };
-  const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+  const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, { urgent: true }); // opening one agent's tab
   return { id, freshlyDispatched: true };
 }
 
@@ -2845,6 +2919,246 @@ ipcMain.on("guard-log", (event, { line }) => {
   logStuckWatchdog("[autohandoff] " + String(line || "").replace(/\s+/g, " ").slice(0, 400));
 });
 
+// v1.67.0 connection health (reconnect with backoff, dead-link auto-restart, post-recovery nudge) - see
+// src/connectionHealth.js. Hook points elsewhere in this file: handlePtyExit, recoverStuckSession,
+// start-terminal's catch, startTerminalSession (noteData / onConnected), terminal-input (noteWrite).
+const lateInputs = new Map(); // agentPath -> input written while disconnected; replayed by the next attach (review M1)
+// v1.67.3: removing a failed "starting" placeholder must keep the input it queued (it is replayed by the next attach)
+function dropPlaceholder(agentPath) {
+  const ph = ptySessions.get(agentPath);
+  if (ph && ph.starting && ph.pendingInput && ph.pendingInput.length) lateInputs.set(agentPath, ph.pendingInput.concat(lateInputs.get(agentPath) || []));
+  if (ph && ph.starting) ptySessions.delete(agentPath);
+}
+const TEST_FAULT_DIR = () => app.getPath("userData");
+function testFaultFile(name) { return path.join(TEST_FAULT_DIR(), name); }
+async function restartAgentSession(agentPath) {
+  const sessionCwd = sessionCwdFor(agentPath);
+  const convos = listConversations(sessionCwd);
+  const cur = convos.find((c) => c.isCurrent) || convos[0];
+  if (!cur || !cur.sessionId) throw new Error("no conversation to resume");
+  const old = ptySessions.get(agentPath);
+  const size = { cols: old && old.cols, rows: old && old.rows };
+  const r = await switchConversationImpl(agentPath, { resumeSessionId: cur.sessionId, placeholder: true });
+  try {
+    await startTerminalSession(agentPath, sessionCwd, size.cols, size.rows, r.agentId);
+  } catch (e) {
+    dropPlaceholder(agentPath);
+    throw e;
+  }
+  if (testMode.TEST_MODE) { try { fs.unlinkSync(testFaultFile("mute-" + path.basename(agentPath))); } catch (e) {} }
+}
+function typeIntoPty(agentPath, text) {
+  const s = ptySessions.get(agentPath);
+  if (!s || !s.proc) return;
+  logSentInput(agentPath, text);
+  writeToPtyChunked(s.proc, agentPath, "\x1b[200~" + text);
+  setTimeout(() => writeToPtyChunked(s.proc, agentPath, "\x1b[201~"), 30);
+  setTimeout(() => writeToPtyChunked(s.proc, agentPath, "\r"), 230);
+}
+const connHealth = require("./connectionHealth").create({
+  log: (line) => logStuckWatchdog(line),
+  emit: (agentPath, snap) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("connection-state", snap);
+  },
+  shouldRetry: (agentPath) => {
+    if (heartbeatQuitting) return false;
+    if (testMode.TEST_MODE && !testMode.liveAgentsPermitted()) return false;
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(agentPath, "agent_config.json"), "utf-8"));
+      if (cfg && cfg.paused) return false;
+    } catch (e) { /* no config: fall through to the folder check */ }
+    return fs.existsSync(agentPath);
+  },
+  sessionKind: (agentPath) => {
+    const s = ptySessions.get(agentPath);
+    return !s ? null : s.starting ? "starting" : "real";
+  },
+  reconnect: async (agentPath, size) => {
+    if (ptySessions.has(agentPath)) return;
+    ptySessions.set(agentPath, { starting: true, pendingInput: lateInputs.get(agentPath) ? lateInputs.get(agentPath).splice(0) : [] });
+    try {
+      await startTerminalSession(agentPath, sessionCwdFor(agentPath), size && size.cols, size && size.rows);
+    } catch (e) {
+      // v1.67.3: a failed attempt must not swallow the input it was carrying - keep it for the next attempt
+      dropPlaceholder(agentPath);
+      throw e;
+    }
+  },
+  restartSession: (agentPath) => restartAgentSession(agentPath),
+  screenShows: (agentPath, snippet) => {
+    const strip = (x) => String(x).replace(/\s+/g, "");
+    const want = strip(snippet || "").slice(-30);
+    return want.length >= 3 && strip(dialogTails.get(agentPath) || "").includes(want);
+  },
+  isIdleAndQuiet: (agentPath, sinceMs) => {
+    const cwd = sessionCwdFor(agentPath);
+    const act = getSessionActivity(cwd);
+    if (act && act.working) return false;
+    const mt = getLatestTranscriptMtimeMs(cwd);
+    return mt == null || mt < sinceMs;
+  },
+  isWorking: (agentPath) => {
+    const act = getSessionActivity(sessionCwdFor(agentPath));
+    return !!(act && act.working);
+  },
+  wasInterrupted: (agentPath) => {
+    const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
+    if (!nt) return false;
+    const fd = fs.openSync(nt.jsonlPath, "r");
+    try {
+      const len = Math.min(16384, nt.size);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, nt.size - len);
+      return /Request interrupted/.test(buf.toString("utf-8"));
+    } finally { fs.closeSync(fd); }
+  },
+  nudge: (agentPath, text) => typeIntoPty(agentPath, text),
+  // v1.68.0 stuck Enter (see connectionHealth.js)
+  inputHoldsText: (agentPath, snippet) => inputHoldsUnsentText(agentPath, snippet),
+  transcriptHas: (agentPath, text, sinceMs) => transcriptTailHasText(agentPath, text, sinceMs),
+  // v1.68.1: the renderer presses it, through the same per-session write chain as every message (a bare write from
+  // here could land inside the next message's bracketed paste)
+  pressEnter: (agentPath) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("press-enter", { agentPath });
+  },
+});
+// true/false = the agent's newest transcript (last 1 MB) does / does not contain the message (via its longest plain
+// run of characters); null = cannot tell (nothing to look for, or no transcript). Only a transcript written since
+// `sinceMs` counts, so an identical older message does not read as delivered.
+function transcriptTailHasText(agentPath, text, sinceMs) {
+  try {
+    const runs = String(text || "").match(/[\p{L}\p{N} ]{14,}/gu) || [];
+    const needle = runs.sort((x, y) => y.length - x.length)[0];
+    if (!needle) return null;
+    const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
+    if (!nt) return null;
+    if (sinceMs && fs.statSync(nt.jsonlPath).mtimeMs < sinceMs - 1000) return false;
+    const fd = fs.openSync(nt.jsonlPath, "r");
+    try {
+      const len = Math.min(1024 * 1024, nt.size);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, nt.size - len);
+      return buf.toString("utf-8").includes(needle.trim().slice(0, 60));
+    } finally { fs.closeSync(fd); }
+  } catch (e) { return null; }
+}
+// v1.69.0 "Keep going": an agent that ends a turn announcing a next step nobody is blocking gets one short, calm nudge
+// (src/keepGoing.js decides, src/keepGoingGlue.js holds the safety rails). Rides on the 30 s tick above; reads a
+// transcript tail only when the transcript changed. Also: the fresh session after a handoff is told to continue at once.
+let keepGoing = null;
+const kgHandoffActive = new Map(); // agent -> flagged-at ms: handoff flow running in the renderer (M4); entries expire after 50 min
+const norm_kg = (p) => String(p || "").replace(/[\\/]+$/, "").toLowerCase();
+// L4: only known agent folders, and a handoff file that lives inside that agent's own folder
+function kgKnownAgent(agentPath) {
+  try { return listAgents().some((a) => norm_kg(a.path) === norm_kg(agentPath)); } catch (e) { return false; }
+}
+try {
+  const keepGoingFile = () => path.join(app.getPath("userData"), "keepgoing.json");
+  const throttleFile = () => process.env.AGENT_DESKTOP_THROTTLE_FILE ||
+    path.join(AGENTS_ROOT, "System Optimization & Maintenance Agent", "UsageModel", "data", "usage_now.json");
+  const kgTestPaths = () => (testMode.TEST_MODE && process.env.AGENT_DESKTOP_KEEPGOING_AGENTS ? process.env.AGENT_DESKTOP_KEEPGOING_AGENTS.split(";").filter(Boolean) : []);
+  const kgDry = () => testMode.TEST_MODE && !testMode.liveAgentsPermitted();
+  keepGoing = require("./keepGoingGlue").create({
+    log: (line) => logStuckWatchdog(line),
+    emit: (agentPath, snap) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("keepgoing-state", snap); },
+    agents: () => {
+      const out = [];
+      for (const [p, s] of ptySessions) if (s && !s.starting && s.proc) out.push(p);
+      for (const p of kgTestPaths()) if (!out.includes(p)) out.push(p);
+      return out;
+    },
+    // M5: stat-only signature (the glue reads the tail only when it changed)
+    sig: (agentPath) => { const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath)); return nt ? nt.mtimeMs + ":" + nt.size : null; },
+    handoffActive: (agentPath) => { const at = kgHandoffActive.get(norm_kg(agentPath)); return !!at && Date.now() - at < 50 * 60 * 1000; },
+    readTail: (agentPath) => {
+      const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
+      if (!nt) return null;
+      const len = Math.min(128 * 1024, nt.size);
+      const fd = fs.openSync(nt.jsonlPath, "r");
+      try {
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, nt.size - len);
+        return { text: buf.toString("utf-8"), partialFirst: len < nt.size, sig: nt.mtimeMs + ":" + nt.size };
+      } finally { fs.closeSync(fd); }
+    },
+    isWorking: (agentPath) => { const a = getSessionActivity(sessionCwdFor(agentPath)); return !!(a && a.working); },
+    getHalt: (agentPath) => getHaltInfo(sessionCwdFor(agentPath)),
+    isPaused: (agentPath) => {
+      try { return !!JSON.parse(fs.readFileSync(path.join(agentPath, "agent_config.json"), "utf-8")).paused; } catch (e) { return false; }
+    },
+    readThrottle: () => {
+      try { const j = JSON.parse(fs.readFileSync(throttleFile(), "utf-8")); return j && j.fleetThrottle && j.fleetThrottle.state; } catch (e) { return null; }
+    },
+    readFile: (f) => fs.readFileSync(f, "utf-8").slice(0, 200000),
+    storage: {
+      load: () => { try { return JSON.parse(fs.readFileSync(keepGoingFile(), "utf-8")); } catch (e) { return {}; } },
+      save: (o) => { const tmp = keepGoingFile() + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o), "utf-8"); fs.renameSync(tmp, keepGoingFile()); },
+    },
+    // Same reliable path as the handoff prompts: message channel first (acked), pty typing only if the channel is
+    // unavailable, never typed twice, verified in the transcript. The agent is idle when this runs.
+    deliver: (agentPath, text) => {
+      if (kgDry()) { logStuckWatchdog(`keepgoing: DRY RUN (test mode, live agents not permitted) - would deliver the nudge to ${agentPath}`); return Promise.resolve({ delivered: false, attempts: 0, dry: true }); }
+      const HD = require("./handoffDelivery");
+      const contains = (needle) => {
+        const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
+        if (!nt) return false;
+        const len = Math.min(64 * 1024, nt.size); // M5: the marker is in the newest entries
+        const fd = fs.openSync(nt.jsonlPath, "r");
+        try { const buf = Buffer.alloc(len); fs.readSync(fd, buf, 0, len, nt.size - len); return buf.toString("utf-8").includes(needle); } finally { fs.closeSync(fd); }
+      };
+      return HD.deliver(text, {
+        channelSend: (t, o) => require("./agentChannel").send(agentPath, t, undefined, o),
+        channelCancel: (id) => require("./agentChannel").cancel(id),
+        // v1.69.2 (B-N1): typed ONCE (deliver's marker rule), never on top of a person's draft, and submitted: nudgeSubmit presses
+        // Enter (through the renderer's write chain) when the screen shows exactly this text sitting in the input box.
+        ptySend: (t) => {
+          if (!(dialogTails.get(agentPath) || "").trim()) throw Object.assign(new Error("nothing known about the screen - not typing the nudge blind"), { refused: true }); // v1.69.3 (L4)
+          if (require("./handoffLogic").draftInInputBox((dialogTails.get(agentPath) || "").slice(-600))) throw Object.assign(new Error("the input box holds text - not typing the nudge over it"), { refused: true });
+          if (promptLikelyOpen(agentPath)) throw Object.assign(new Error("a prompt is waiting for an answer - not typing the nudge"), { refused: true });
+          typeIntoPty(agentPath, t);
+        },
+        ptyQueued: () => false,
+        nudgeSubmit: async (body) => {
+          try {
+            const act = getSessionActivity(sessionCwdFor(agentPath));
+            if (act && act.working) return false;
+            if (promptLikelyOpen(agentPath) || !require("./handoffLogic").boxHoldsNudge(dialogTails.get(agentPath) || "", body)) return false; // v1.69.3 (M2): the whole nudge (unique hid) must be in the box
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("press-enter", { agentPath });
+            return true;
+          } catch (e) { return false; }
+        },
+        aborted: () => { const at = kgHandoffActive.get(norm_kg(agentPath)); return !!at && Date.now() - at < 50 * 60 * 1000; }, // a handoff started meanwhile: never land the nudge in the old session
+        transcriptHas: (m) => contains(m),
+        log: (line) => logStuckWatchdog("keepgoing: " + line),
+      }, { ttlSec: 180 });
+    },
+  });
+  ipcMain.handle("keepgoing-get", () => keepGoing.getSettings());
+  ipcMain.handle("keepgoing-set", (event, { agentPath, enabled }) => {
+    if (agentPath && !kgKnownAgent(agentPath)) return keepGoing.getSettings();
+    return keepGoing.setEnabled(agentPath || null, !!enabled);
+  });
+  // M4: the renderer lists the agents whose handoff flow is saving / resetting / resuming; no nudges for them
+  ipcMain.on("keepgoing-handoff-active", (event, payload) => {
+    const agents = payload && payload.agents;
+    kgHandoffActive.clear();
+    for (const a of Array.isArray(agents) ? agents : []) if (typeof a === "string") kgHandoffActive.set(norm_kg(a), Date.now());
+  });
+  // The renderer asks for the resume message of a fresh session after a handoff reset; this also sets the persisted
+  // "mission in progress" marker (the nudge counters are NOT touched by a handoff).
+  ipcMain.handle("keepgoing-resume-prompt", (event, { agentPath, archivedPath }) => {
+    try {
+      const ap = norm_kg(agentPath), fp = norm_kg(archivedPath);
+      if (!kgKnownAgent(agentPath) || !fp.startsWith(ap + "\\") && !fp.startsWith(ap + "/")) return { text: null, mission: false, error: "unknown agent or file outside the agent folder" };
+      return keepGoing.resumeText(agentPath, archivedPath);
+    } catch (e) { return { text: null, mission: false, error: e.message }; }
+  });
+} catch (e) {
+  console.error("keep-going failed to load:", e);
+  keepGoing = null;
+}
+ipcMain.handle("get-connection-states", () => connHealth.getAll());
+
 async function recoverStuckSession(agentPath, session, recoveryCount) {
   const { sessionCwd, cols, rows } = session;
   logStuckWatchdog(
@@ -2861,6 +3175,7 @@ async function recoverStuckSession(agentPath, session, recoveryCount) {
   try {
     await startTerminalSession(agentPath, sessionCwd, cols, rows);
     logStuckWatchdog(`recovery dispatched OK for agentPath=${agentPath}`);
+    try { connHealth.afterStuckRecovery(agentPath, { wasWorking: true }); } catch (e) { /* best effort */ }
     if (mainWindow && !mainWindow.isDestroyed()) {
       const extra =
         recoveryCount > MAX_VISIBLE_RECOVERIES_BEFORE_WARNING
@@ -2878,6 +3193,8 @@ async function recoverStuckSession(agentPath, session, recoveryCount) {
   } catch (e) {
     ptySessions.delete(agentPath);
     logStuckWatchdog(`recovery dispatch FAILED for agentPath=${agentPath}: ${e.message}`);
+    // v1.67.0: this used to be the end of the line - no session, no retry, messages written into the void.
+    try { connHealth.onAttachFailed(agentPath, e.message, { cols, rows }); } catch (e2) { /* best effort */ }
   }
 }
 
@@ -3258,6 +3575,7 @@ async function handlePtyExit(agentPath, isReattachAttempt = false) {
   } catch (e) {}
   ptySessions.delete(agentPath);
 
+  let failReason = "the attach process ended";
   if (!isReattachAttempt && session.shell && session.spawnEnv) {
     const stillAlive = await findAliveBackgroundAgent(session.shell, session.spawnEnv, session.sessionCwd).catch(() => null);
     if (stillAlive) {
@@ -3265,10 +3583,17 @@ async function handlePtyExit(agentPath, isReattachAttempt = false) {
         await startTerminalSession(agentPath, session.sessionCwd, session.cols, session.rows, stillAlive.id, /* isReattach */ true);
         return; // reconnected silently, don't notify the renderer
       } catch (e) {
-        /* fall through to the normal "session ended" notice below */
+        failReason = e && e.message ? e.message : String(e);
+        /* fall through to the reconnect-with-backoff takeover / normal "session ended" notice below */
       }
     }
   }
+
+  // v1.67.0: keep trying instead of leaving a dead end. When the connection-health module takes over, the
+  // renderer is told through "connection-state" (not terminal-exit), so no misleading "restart the app" notice.
+  try {
+    if (connHealth.onAttachFailed(agentPath, failReason, { cols: session.cols, rows: session.rows })) return;
+  } catch (e) { /* fall through to the old notice */ }
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("terminal-exit", { agentPath });
@@ -3350,6 +3675,14 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
 
   let proc;
   try {
+    if (testMode.TEST_MODE) {
+      // Sandbox-only fault injection: a file holding N makes the next N attach attempts time out.
+      try {
+        const ff = testFaultFile("fail-attach");
+        const n = parseInt(fs.readFileSync(ff, "utf-8"), 10) || 0;
+        if (n > 0) { fs.writeFileSync(ff, String(n - 1)); throw new Error("Error launching WinPTY agent: agent timed out (injected by sandbox test)"); }
+      } catch (e) { if (/injected/.test(e.message)) throw e; }
+    }
     proc = await spawnPtyWithRetry(shell, ["attach", agentId], {
       name: "xterm-color",
       cols: cols || 80,
@@ -3404,7 +3737,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
         // fix (the alternative - hanging forever - is strictly worse).
         await stopClaudeAgent(shell, agentId, spawnEnv, { timeoutMs: 5000 });
       } catch (e) {}
-      const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+      const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, { urgent: true });
       return startTerminalSession(agentPath, sessionCwd, cols, rows, freshAgentId, isReattachAttempt, /* isLoginRecoveryAttempt */ true);
     }
 
@@ -3495,15 +3828,37 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     // before this fix, visible as 53 near-identical entries in the
     // session's own JSONL transcript.
     const toSend = pendingInput.splice(0, pendingInput.length);
+    // v1.67.3: same gaps as the renderer's submitToAgent (30 ms before the paste end, 200 ms before Enter); the old
+    // flat 80 ms let a slow CLI read the replayed Enter as part of the paste, so the next message merged into it
+    let at = 0;
     toSend.forEach((data, i) => {
+      const myAt = at;
+      at += /^.?\[200~/.test(String(data)) || /\[200~/.test(String(data)) ? 30 : /\[201~/.test(String(data)) ? 200 : 80;
       // Still staggered, not blasted as one synchronous burst - see
       // submitToAgent() in renderer.js for why a composed message and its
       // trailing "\r" must land as two separately-timed writes. Each
       // individual item is itself now chunked if long - see
       // writeToPtyChunked()'s own comment for why a large single write can
       // arrive at the CLI garbled or truncated.
-      setTimeout(() => writeToPtyChunked(proc, agentPath, data), i * 80);
+      setTimeout(() => writeToPtyChunked(proc, agentPath, data), myAt);
     });
+    // v1.67.3: a replayed message whose Enter was swallowed (CLI still booting) would sit in the input box and
+    // merge with the next message. Two seconds after the replay: if the screen still shows the last message
+    // text and no prompt/dialog is open, press Enter once (an empty prompt ignores it).
+    const lastMsg = toSend.filter((d) => /\[200~/.test(String(d))).pop();
+    if (lastMsg) {
+      setTimeout(() => {
+        try {
+          const strip = (x) => String(x).replace(/\s+/g, "");
+          const want = strip(String(lastMsg).replace(/^.*\[200~/, "")).slice(-30);
+          const tail = strip(dialogTails.get(agentPath) || "");
+          if (want.length >= 3 && !promptLikelyOpen(agentPath) && tail.includes(want) && !/Presstoeditqueuedmessages/.test(tail)) {
+            logStuckWatchdog(`replay: ${agentPath} replayed message still shown in the input box - pressing Enter once`);
+            writeToPtyChunked(proc, agentPath, "\r");
+          }
+        } catch (e) { /* best effort */ }
+      }, at + 2000);
+    }
   }
 
   // Unconditionally arm one flush attempt up front, not just reactively
@@ -3552,6 +3907,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
   });
 
   ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows });
+  connHealth.onConnected(agentPath, { delayMs: pendingInput && pendingInput.length ? 5000 : 0 });
 }
 
 ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows, knownAgentId }) => {
@@ -3607,6 +3963,8 @@ ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows, knownAge
     await startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId || undefined);
   } catch (e) {
     ptySessions.delete(agentPath);
+    // v1.67.0: an attach timeout on a tab open is retried in the background too (find/dispatch failures are not).
+    if (/\[attach stage/.test(e && e.message)) { try { connHealth.onAttachFailed(agentPath, e.message, { cols, rows }); } catch (e2) {} }
     throw e;
   }
   return { alreadyRunning: false };
@@ -3626,7 +3984,25 @@ ipcMain.handle("read-archived-day", (event, { agentPath, dateKey }) => readArchi
 
 ipcMain.handle("get-context-usage", (event, { agentPath }) => getLatestUsage(sessionCwdFor(agentPath)));
 
-ipcMain.handle("get-live-transcript", (event, { agentPath }) => getLiveTranscriptBlocks(sessionCwdFor(agentPath)));
+// v1.68.0: the memoised blocks array is the same object while the transcript files are unchanged. A renderer that
+// already holds the last array it was sent (ifChanged) gets a one-word answer instead of the whole transcript
+// copied over IPC again every 4 s poll.
+const lastLiveSent = new Map(); // agentPath -> last blocks array handed to the renderer
+ipcMain.handle("get-live-transcript", (event, { agentPath, ifChanged }) => {
+  const blocks = getLiveTranscriptBlocks(sessionCwdFor(agentPath));
+  if (ifChanged && lastLiveSent.get(agentPath) === blocks) return { unchanged: true };
+  lastLiveSent.set(agentPath, blocks);
+  return blocks;
+});
+// v1.68.0 timing probes (renderer, off by default - localStorage.perfProbes = "1"): one short line per probe.
+ipcMain.on("perf-log", (event, { lines }) => {
+  try {
+    const f = path.join(app.getPath("userData"), "ui-timing.log");
+    try { if (fs.statSync(f).size > 1024 * 1024) fs.renameSync(f, f + ".old"); } catch (e) {}
+    const ts = new Date().toISOString();
+    fs.appendFileSync(f, (Array.isArray(lines) ? lines : []).slice(0, 200).map((l) => ts + " " + String(l).slice(0, 300)).join("\n") + "\n");
+  } catch (e) { /* diagnostics only */ }
+});
 
 ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActivity(sessionCwdFor(agentPath)));
 // 2026-09-23: how long the agent's transcript has been quiet. The delivery
@@ -3645,7 +4021,7 @@ ipcMain.handle("get-transcript-quiet-ms", (event, { agentPath }) => {
 // Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
 // v1.65.0: the stuck-Enter retry may press Enter ONLY when the screen shows the unsent message text in the
 // CLI input box and nothing that looks like a prompt waiting for an answer (Enter would accept its default).
-ipcMain.handle("agent-input-holds-text", (event, { agentPath, snippet }) => {
+function inputHoldsUnsentText(agentPath, snippet) {
   if (promptLikelyOpen(agentPath)) return false;
   const strip = (x) => String(x).replace(/\s+/g, "");
   const tail = strip((dialogTails.get(agentPath) || "").slice(-900));
@@ -3653,9 +4029,36 @@ ipcMain.handle("agent-input-holds-text", (event, { agentPath, snippet }) => {
   if (want.length < 3 || !tail.includes(want)) return false;
   const after = tail.slice(tail.lastIndexOf(want) + want.length);
   return !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]|Doyouwant|Yes,|No,/i.test(after) && !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]/i.test(tail.slice(-250));
+}
+ipcMain.handle("agent-input-holds-text", (event, { agentPath, snippet }) => inputHoldsUnsentText(agentPath, snippet));
+// v1.68.0: a message that was delivered another way (message channel) can still sit unsent in the CLI input box.
+// Once the bubble has settled, clear that leftover (Ctrl+C = "clear input" in the CLI) - only when the box holds
+// exactly this text, no prompt is open and the agent is idle (Ctrl+C would interrupt a working turn).
+const staleClearedAt = new Map();
+ipcMain.handle("clear-stale-input", (event, { agentPath, text }) => {
+  try {
+    const s = ptySessions.get(agentPath);
+    if (!s || !s.proc) return false;
+    if (Date.now() - (staleClearedAt.get(agentPath) || 0) < 20000) return false;
+    const act = getSessionActivity(sessionCwdFor(agentPath));
+    if (act && act.working) return false;
+    if (!inputHoldsUnsentText(agentPath, text)) return false;
+    // the text must be the LAST thing on the screen (the live input line), not an older echo with output after it
+    const strip = (x) => String(x).replace(/\s+/g, "");
+    const tailS = strip((dialogTails.get(agentPath) || "").slice(-900));
+    const wantS = strip(text || "").slice(-40);
+    const after = tailS.slice(tailS.lastIndexOf(wantS) + wantS.length);
+    if (after.length > 120 || /Working|Thinking|esctointerrupt|tokens/i.test(after)) return false;
+    const mt = getLatestTranscriptMtimeMs(sessionCwdFor(agentPath));
+    if (mt != null && Date.now() - mt < 5000) return false; // the agent wrote very recently: do not touch its input
+    staleClearedAt.set(agentPath, Date.now());
+    writeToPtyChunked(s.proc, agentPath, "\x03");
+    logStuckWatchdog(`stale-input: ${agentPath} - the message was delivered another way but its text sat unsent in the input box; cleared it`);
+    return true;
+  } catch (e) { return false; }
 });
 ipcMain.handle("agent-dialog-open", (event, { agentPath }) => promptLikelyOpen(agentPath)); // v1.65.0: mid-turn send must not type into a permission prompt
-ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor, dialogOpenFor));
+ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents({ noAvatar: true }), sessionCwdFor, dialogOpenFor));
 // ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
 // AGENTS_ROOT: in the sandbox the agents are fixtures but the report files are
 // real, and they are only ever read here.
@@ -3742,7 +4145,20 @@ ipcMain.handle("get-inferred-plan-id", () => getInferredPlanId());
 // Show agent this way and only noticed because the agent's next reply
 // didn't reflect it. This fires an OS notification so a delivery failure is
 // visible even if Agent Desktop isn't the focused window at the time.
-ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
+// v1.68.0: name the CAUSE of a failed delivery in one short line. dead link = the pty is gone or the connection module is
+// reconnecting; stuck Enter = the text still sits in the CLI input box; queued mid-turn = the agent is working and
+// the CLI has the message queued behind the turn; unknown = none of the above (the claude-logs tail line below helps).
+function classifySendFailure(agentPath, info) {
+  const i = info || {};
+  const st = connHealth.getState(agentPath).state;
+  const s = ptySessions.get(agentPath);
+  if (st !== "connected") return "dead-link(" + st + ")";
+  if (!s || !s.proc) return "dead-link(no-pty)";
+  if (inputHoldsUnsentText(agentPath, i.text || "")) return "stuck-enter";
+  if (i.received || (i.midTurn && i.working) || i.busyWait) return "queued-mid-turn";
+  return "unknown";
+}
+ipcMain.handle("notify-send-failed", (event, { agentPath, text, info }) => {
   try {
     if (Notification.isSupported()) {
       const agentName = path.basename(agentPath);
@@ -3763,7 +4179,22 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
   } catch (e) {
     /* a notification failure must never break anything else */
   }
-  logStuckWatchdog(`notify-send-failed: ${agentPath} - message never landed in transcript, re-queued`);
+  let cause = "unknown";
+  try { cause = classifySendFailure(agentPath, Object.assign({}, info, { text })); } catch (e) {}
+  const inf = info || {};
+  logStuckWatchdog(`notify-send-failed: ${agentPath} - message never landed in transcript, re-queued [cause=${cause} why=${inf.why || "?"} age=${inf.ageSec != null ? inf.ageSec + "s" : "?"} midTurn=${inf.midTurn ? 1 : 0} received=${inf.received ? 1 : 0} nudges=${inf.nudges || 0} working=${inf.working ? 1 : 0}]`);
+  // v1.67.0: the log never said WHY. Snapshot the agent's own screen (`claude logs <id>`) at failure time:
+  // idle + empty input box = dead link, text in the box = stuck Enter, a dialog = prompt waiting.
+  try {
+    const sess = ptySessions.get(agentPath);
+    const id = sess && sess.agentId ? String(sess.agentId).slice(0, 8) : null;
+    if (id && /^[0-9a-f]{8}$/i.test(id) && sess.shell) {
+      execFile(sess.shell, ["logs", id], { windowsHide: true, timeout: 8000, env: sess.spawnEnv, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+        const tail = stripTerminalCodes(String(stdout || "")).replace(/\s+/g, " ").trim().slice(-500);
+        logStuckWatchdog(`notify-send-failed: ${agentPath} claude logs ${id} tail: ${err && !tail ? "(unavailable: " + err.message + ")" : tail}`);
+      });
+    }
+  } catch (e) { /* diagnostics only */ }
   return { ok: true };
 });
 
@@ -3823,7 +4254,8 @@ ipcMain.handle("rename-conversation", (event, { agentPath, sessionId, title }) =
 // dispatch (`--bg --resume <id>` or `--bg` with no --continue) can change
 // that. Tear down the attach pty, stop the bg daemon, dispatch a new one;
 // the renderer then re-attaches through its normal start-terminal path.
-ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId, newConversation, initialPrompt }) => {
+ipcMain.handle("switch-conversation", (event, args) => switchConversationImpl(args.agentPath, args));
+async function switchConversationImpl(agentPath, { resumeSessionId, newConversation, initialPrompt, placeholder }) {
   const sessionCwd = sessionCwdFor(agentPath);
   // Drop the ptySessions entry BEFORE killing the pty: proc.onExit ->
   // handlePtyExit checks `if (!session) return` first, so removing it now
@@ -3840,15 +4272,28 @@ ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId
       if (live.proc) live.proc.kill();
     } catch (e) {}
   }
+  // review M1: claim the slot BEFORE the (slow) stop so input arriving meanwhile queues instead of being dropped
+  if (placeholder) ptySessions.set(agentPath, { starting: true, pendingInput: [] });
   // Stops the underlying `claude --bg` daemon for this cwd and polls until
   // its pid is actually gone (same helper delete-agent uses).
-  await stopBackgroundAgentForCwd(sessionCwd);
+  try {
+    await stopBackgroundAgentForCwd(sessionCwd);
+  } catch (e) {
+    if (placeholder) dropPlaceholder(agentPath);
+    throw e;
+  }
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
-  const opts = newConversation ? { forceFresh: true, initialPrompt } : { resumeSessionId };
-  const newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
+  const opts = newConversation ? { forceFresh: true, initialPrompt, urgent: true } : { resumeSessionId, urgent: true };
+  let newId;
+  try {
+    newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
+  } catch (e) {
+    if (placeholder) dropPlaceholder(agentPath);
+    throw e;
+  }
   return { ok: true, agentId: newId };
-});
+}
 
 // Caught live (2026-08-20): a real crash, not a hang. If the underlying
 // claude process has already died on its own (crashed, or one of the
@@ -3891,7 +4336,7 @@ function logSentInput(agentPath, data) {
   } catch (e) {}
 }
 
-ipcMain.on("terminal-input", (event, { agentPath, data }) => {
+ipcMain.on("terminal-input", (event, { agentPath, data, app: fromApp }) => {
   logSentInput(agentPath, data);
   const session = ptySessions.get(agentPath);
   if (!session) {
@@ -3905,6 +4350,12 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
     // Root trigger for how ptySessions can lack an entry while the user is
     // still looking at this agent's chat isn't confirmed - flagging rather
     // than guessing further.
+    // v1.67.2: while the connection-health module is reconnecting, keep the input and replay it on attach.
+    if (connHealth.getState(agentPath).state !== "connected") {
+      if (!lateInputs.has(agentPath)) lateInputs.set(agentPath, []);
+      lateInputs.get(agentPath).push(data);
+      return;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("terminal-data", {
         agentPath,
@@ -3926,6 +4377,8 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
     session.pendingInput.push(data);
     return;
   }
+  if (fromApp) connHealth.noteWrite(agentPath, data); // v1.68.1: only the app's own message writes, never Terminal-tab typing/pastes
+  if (testMode.TEST_MODE && fs.existsSync(testFaultFile("mute-" + path.basename(agentPath)))) return; // sandbox: simulate a dead pty
   writeToPtyChunked(session.proc, agentPath, data);
 });
 

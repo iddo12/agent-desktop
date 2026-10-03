@@ -19,6 +19,10 @@
   }
 
   const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // v1.67.1: a prompt (identified by its hid marker) is typed into the pty AT MOST ONCE, ever. On 2026-10-03 the
+  // SE agent got the same long handoff prompt three times: every retry typed it again while the agent was
+  // mid-turn and the CLI had already queued the earlier copies (queued_command), so all three landed.
+  const typedMarkers = new Set();
 
   // deps: { channelSend(text, {ttlSec}) -> {ok, reason?}, ptySend(text) -> void, transcriptHas(marker) -> bool,
   //         ptyQueued() -> bool (the prompt is still in the busy-agent send queue), aborted() -> bool,
@@ -58,6 +62,9 @@
         if (queued) {
           skipped = true;
           log("handoff-delivery attempt " + attempt + ": previous prompt still queued for a busy agent - not typing a duplicate, waiting");
+        } else if (ptySent || typedMarkers.has(marker)) {
+          skipped = true;
+          log("handoff-delivery attempt " + attempt + ": this prompt (" + marker + ") was already typed once - never typing it twice, waiting for it to land");
         } else {
           // v1.63.8: the acked channel send did not land; withdraw its still-queued request file so a
           // late relay cannot deliver it a second time next to this pty prompt.
@@ -65,14 +72,16 @@
             try { await deps.channelCancel(channelId); log("handoff-delivery attempt " + attempt + ": withdrew the unlanded channel request " + channelId); } catch (e) {}
             channelId = null;
           }
-          try { deps.ptySend(body); ptySent = true; sentVia = "pty"; log("handoff-delivery attempt " + attempt + ": typed into pty"); }
-          catch (e) { log("handoff-delivery attempt " + attempt + ": pty send FAILED: " + (e && e.message)); }
+          try { typedMarkers.add(marker); deps.ptySend(body); ptySent = true; sentVia = "pty"; log("handoff-delivery attempt " + attempt + ": typed into pty"); }
+          catch (e) { if (e && e.refused) { typedMarkers.delete(marker); ptySent = false; } // a refusal typed nothing: the marker stays usable
+           log("handoff-delivery attempt " + attempt + ": pty send FAILED: " + (e && e.message)); }
         }
       }
       if (sentVia || skipped) {
         if (sentVia) via = sentVia;
         const waitMs = o.verifyWaitMs[Math.min(attempt - 1, o.verifyWaitMs.length - 1)];
         const t0 = now();
+        let lastSubmitLook = -1e12;
         for (;;) {
           let has = false;
           try { has = await deps.transcriptHas(marker); } catch (e) {}
@@ -81,6 +90,11 @@
             return { delivered: true, via: sentVia || via, attempts: attempt, marker };
           }
           if (aborted()) { log("handoff-delivery: stopped (flow no longer active)"); return { delivered: false, via, attempts: attempt, marker, aborted: true }; }
+          // v1.68.2: typed but not in the transcript yet: if it sits unsent in the input box, press Enter (at most every 6 s)
+          if ((ptySent || via === "pty") && deps.nudgeSubmit && now() - t0 >= 5000 && now() - lastSubmitLook >= 6000) {
+            lastSubmitLook = now();
+            try { if (await deps.nudgeSubmit(body)) log("handoff-delivery attempt " + attempt + ": prompt was unsent in the input box - pressed Enter"); } catch (e) {}
+          }
           if (now() - t0 >= waitMs) break;
           await sleep(Math.min(o.pollMs, Math.max(0, waitMs - (now() - t0))) || 1);
         }

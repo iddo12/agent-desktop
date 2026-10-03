@@ -26,7 +26,8 @@ contextBridge.exposeInMainWorld("api", {
   voiceWarm: () => ipcRenderer.invoke("voice-warm"),
   voiceSave: (wavBase64) => ipcRenderer.invoke("voice-save", { wavBase64 }),
   logGuard: (line) => ipcRenderer.send("guard-log", { line }),
-  sendInput: (agentPath, data) => ipcRenderer.send("terminal-input", { agentPath, data }),
+  sendInput: (agentPath, data, opts) => ipcRenderer.send("terminal-input", { agentPath, data, app: !!(opts && opts.app) }),
+  onPressEnter: (callback) => { ipcRenderer.on("press-enter", (event, payload) => callback(payload)); },
   resizeTerminal: (agentPath, cols, rows) => ipcRenderer.send("terminal-resize", { agentPath, cols, rows }),
 
   listArchivedDays: (agentPath) => ipcRenderer.invoke("list-archived-days", { agentPath }),
@@ -38,8 +39,10 @@ contextBridge.exposeInMainWorld("api", {
   getContextUsage: (agentPath) => ipcRenderer.invoke("get-context-usage", { agentPath }),
   getUsageWindows: () => ipcRenderer.invoke("get-usage-windows"),
   getInferredPlanId: () => ipcRenderer.invoke("get-inferred-plan-id"),
-  notifySendFailed: (agentPath, text) => ipcRenderer.invoke("notify-send-failed", { agentPath, text }),
-  getLiveTranscript: (agentPath) => ipcRenderer.invoke("get-live-transcript", { agentPath }),
+  notifySendFailed: (agentPath, text, info) => ipcRenderer.invoke("notify-send-failed", { agentPath, text, info }),
+  clearStaleInput: (agentPath, text) => ipcRenderer.invoke("clear-stale-input", { agentPath, text }),
+  getLiveTranscript: (agentPath, ifChanged) => ipcRenderer.invoke("get-live-transcript", { agentPath, ifChanged: !!ifChanged }),
+  perfLog: (lines) => ipcRenderer.send("perf-log", { lines }),
   getSessionActivity: (agentPath) => ipcRenderer.invoke("get-session-activity", { agentPath }),
   agentInputHoldsText: (agentPath, snippet) => ipcRenderer.invoke("agent-input-holds-text", { agentPath, snippet }),
   agentDialogOpen: (agentPath) => ipcRenderer.invoke("agent-dialog-open", { agentPath }),
@@ -55,6 +58,8 @@ contextBridge.exposeInMainWorld("api", {
   registryAction: (id, action) => ipcRenderer.invoke("registry-action", { id, action }),
   openLocalPdf: (filePath) => ipcRenderer.invoke("open-local-pdf", { filePath }),
   approveTelegramTasks: (ids) => ipcRenderer.invoke("approve-telegram-tasks", { ids }),
+  heldSave: (json) => ipcRenderer.invoke("guard-held-save", { json }),
+  heldLoad: () => ipcRenderer.invoke("guard-held-load"),
   channelSend: (agentPath, text) => ipcRenderer.invoke("guard-channel-send", { agentPath, text }),
   channelCancel: (id) => ipcRenderer.invoke("guard-channel-cancel", { id }),
   getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),
@@ -95,8 +100,27 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("untrusted-agents", (event, list) => callback(list));
   },
 
+  // CPU guard + start limiter (v1.66.0) - see src/cpuGuardGlue.js.
+  getCpuGuardState: () => ipcRenderer.invoke("cpuguard-state"),
+  cpuGuardAction: (action) => ipcRenderer.invoke("cpuguard-action", { action }),
+  onCpuGuardState: (callback) => {
+    ipcRenderer.on("cpuguard-state", (event, state) => callback(state));
+  },
+
   onTerminalData: (callback) => {
     ipcRenderer.on("terminal-data", (event, payload) => callback(payload));
+  },
+  onConnectionState: (callback) => {
+    ipcRenderer.on("connection-state", (event, payload) => callback(payload));
+  },
+  getConnectionStates: () => ipcRenderer.invoke("get-connection-states"),
+  // v1.69.0 Keep going (see src/keepGoing.js)
+  keepGoingGet: () => ipcRenderer.invoke("keepgoing-get"),
+  keepGoingSet: (agentPath, enabled) => ipcRenderer.invoke("keepgoing-set", { agentPath, enabled }),
+  keepGoingHandoffActive: (agents) => ipcRenderer.send("keepgoing-handoff-active", { agents }),
+  keepGoingResumePrompt: (agentPath, archivedPath) => ipcRenderer.invoke("keepgoing-resume-prompt", { agentPath, archivedPath }),
+  onKeepGoingState: (callback) => {
+    ipcRenderer.on("keepgoing-state", (event, payload) => callback(payload));
   },
   onTerminalExit: (callback) => {
     ipcRenderer.on("terminal-exit", (event, payload) => callback(payload));

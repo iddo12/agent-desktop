@@ -1,0 +1,8 @@
+/* v1.69.0 keep-going (see renderer/keepgoing.js). Amber = needs a look, never red (red is reserved for genuinely blocked). */
+#keepgoing-btn { font-size: 0.78rem; padding: 3px 10px; border-radius: 5px; border: 1px solid var(--border, #c9c5b8); background: transparent; color: var(--text); cursor: pointer; }
+#keepgoing-btn.keepgoing-off { opacity: 0.6; }
+#keepgoing-btn:hover { background: var(--bg-active, var(--bg-hover)); }
+#keepgoing-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; padding: 6px 10px; font-size: 0.8rem; color: var(--text); background: var(--needs-pending-bg, #faf1e6); border: 1px solid var(--needs-pending, var(--health-warning)); border-radius: 6px; }
+#keepgoing-banner.hidden { display: none; }
+#keepgoing-banner button { font-size: 0.78rem; padding: 3px 10px; border: 1px solid var(--needs-pending, var(--health-warning)); border-radius: 5px; background: transparent; color: var(--text); cursor: pointer; }
+#keepgoing-banner button:hover { background: var(--bg-active, var(--bg-hover)); }

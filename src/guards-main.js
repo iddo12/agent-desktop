@@ -61,11 +61,28 @@ function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, lo
     try { return require("./agentChannel").cancel(id); } catch (e) { return { ok: false, reason: e.message }; }
   });
 
+  // v1.67.1: user messages held until a handoff finishes survive an app restart (renderer guards.js parkedQueues).
+  const heldPath = () => path.join(require("electron").app.getPath("userData"), "held-queues.json");
+  ipcMain.handle("guard-held-save", (event, { json }) => {
+    try {
+      const tmp = heldPath() + ".tmp";
+      fs.writeFileSync(tmp, String(json || "{}"), { encoding: "utf-8", mode: 0o600 });
+      fs.renameSync(tmp, heldPath());
+      return { ok: true };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+  ipcMain.handle("guard-held-load", () => {
+    try { return { ok: true, json: fs.readFileSync(heldPath(), "utf-8") }; } catch (e) { return { ok: true, json: "{}" }; }
+  });
+
   ipcMain.handle("guard-handoff-info", (event, { agentPath }) => {
     try {
       const p = path.join(agentPath, "handoff_latest.md");
       const st = fs.statSync(p);
-      return { exists: true, path: p, mtimeMs: st.mtimeMs, sizeBytes: st.size };
+      // v1.67.1: `ready` = every required section heading is present, so the reset need not wait for the agent's reply.
+      let ready = false;
+      try { ready = require("./handoffLogic").fileReady(fs.readFileSync(p, "utf-8").slice(0, 200000)); } catch (e) {}
+      return { exists: true, path: p, mtimeMs: st.mtimeMs, sizeBytes: st.size, ready };
     } catch (e) {
       return { exists: false };
     }

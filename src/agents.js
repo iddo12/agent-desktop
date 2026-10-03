@@ -139,12 +139,22 @@ function setAgentPaused(agentPath, paused) {
   return config.paused;
 }
 
+// v1.68.0: avatars are ~340 KB each (6.4 MB across 19 agents). They used to be read from disk and base64-encoded
+// again on EVERY listAgents() call (every 10 s from the overview poll, on the main thread). Now one stat per call,
+// and the data URL is rebuilt only when the file's size/mtime changed.
+const avatarMemo = new Map(); // avatarPath -> { sig, url }
 function avatarDataUrl(agentDir, config) {
   if (!config.avatar) return null;
   const avatarPath = path.join(agentDir, config.avatar);
-  if (!fs.existsSync(avatarPath)) return null;
+  let st;
+  try { st = fs.statSync(avatarPath); } catch (e) { avatarMemo.delete(avatarPath); return null; }
+  const sig = st.size + ":" + st.mtimeMs;
+  const hit = avatarMemo.get(avatarPath);
+  if (hit && hit.sig === sig) return hit.url;
   const buf = fs.readFileSync(avatarPath);
-  return `data:image/png;base64,${buf.toString("base64")}`;
+  const url = `data:image/png;base64,${buf.toString("base64")}`;
+  avatarMemo.set(avatarPath, { sig, url });
+  return url;
 }
 
 // A denylist alone isn't enough - any folder ROOT happens to contain (a
@@ -167,7 +177,8 @@ function looksLikeAgentFolder(agentDir) {
   );
 }
 
-function listAgents() {
+// opts.noAvatar: callers that never draw the avatar (the 10 s overview poll) skip even the stat.
+function listAgents(opts) {
   if (!fs.existsSync(ROOT)) return [];
   const entries = fs
     .readdirSync(ROOT, { withFileTypes: true })
@@ -189,7 +200,7 @@ function listAgents() {
       path: agentDir,
       displayName: config.display_name || entry.name,
       role: config.role || "",
-      avatar: avatarDataUrl(agentDir, config),
+      avatar: opts && opts.noAvatar ? null : avatarDataUrl(agentDir, config),
       healthLabel: healthLabel(parsed.health),
       status: parsed.status,
       tasks: parsed.tasks,
