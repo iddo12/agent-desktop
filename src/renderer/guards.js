@@ -105,7 +105,14 @@
   //   - Same fleet-wide and once-per-agent guards as the idle path (it only interrupts; the
   //     handoff itself still goes through checkAutoHandoff's normal conditions).
   //   - ON by default since 2026-10-02 (Iddo said yes); the four review findings are fixed below. Off switch: localStorage.setItem("forcedCheckpointOff","1").
-  const FORCE_AFTER_MS = 10 * 60 * 1000;     // continuous working time before a forced checkpoint
+  const FORCE_AFTER_MS = 10 * 60 * 1000;     // continuous working time before a forced checkpoint (at AUTO_HANDOFF_TOKENS)
+  // 2026-10-03: token-aware - the fuller the context, the sooner we interrupt (agents were reaching 190-250K
+  // while waiting out the flat 10 minutes). >=190K: 30 s of work + the confirm polls; >=175K: 2 min; else 10 min.
+  function forceAfterMsFor(t) {
+    if (t >= 190000) return 30 * 1000;      // floor: a turn Iddo only just started is not Esc'd instantly
+    if (t >= 175000) return 2 * 60 * 1000;
+    return FORCE_AFTER_MS;
+  }
   const FORCE_ACTIVE_QUIET_MS = 15000;       // transcript must have grown within this to count as "actively writing"
   const FORCE_BLOCKED_QUIET_MS = 90000;      // quiet this long while "working" = waiting on something, tell Iddo
   const forcedInterrupts = new Map();        // agentPath -> time of the Esc we sent
@@ -124,7 +131,7 @@
 
   async function maybeForceCheckpoint(a, act, t) {
     if (!forcedCheckpointEnabled()) return false;
-    if (!act || !act.working || act.sinceMs < FORCE_AFTER_MS) { forcePolls.delete(a.path); return false; }
+    if (!act || !act.working || act.sinceMs < forceAfterMsFor(t)) { forcePolls.delete(a.path); return false; }
     // Finding 2: one Esc per agent per FORCE_REPEAT_GUARD_MS (it could repeat every tick).
     const prev = forcedInterrupts.get(a.path);
     if (prev && Date.now() - prev < FORCE_REPEAT_GUARD_MS) return false;
@@ -149,6 +156,10 @@
     // appeared (Esc would answer "No" for Iddo). Only count a poll when the newest entry is NOT a pending
     // tool_use (model generating, or a tool result just came back), and require two such polls close together.
     if (act.pendingToolUse) return false;
+    // Second review (2026-10-03): `act` predates the awaits above; a tool_use landing meanwhile could be a fresh
+    // permission prompt. Re-read activity right before counting the poll.
+    const fresh = await window.api.getSessionActivity(a.path).catch(() => null);
+    if (!fresh || !fresh.working || fresh.pendingToolUse) { forcePolls.delete(a.path); return false; }
     const now = Date.now();
     const polls = (forcePolls.get(a.path) || []).filter((x) => now - x < FORCE_CONFIRM_WINDOW_MS);
     polls.push(now);
@@ -157,6 +168,7 @@
     forcePolls.delete(a.path);
     forcedInterrupts.set(a.path, now);
     window.api.sendInput(a.path, "");              // Esc: interrupt the running turn
+    try { window.autoHandoffLog("forced Esc: " + a.displayName + " " + Math.round(t / 1000) + "K after " + Math.round(act.sinceMs / 1000) + " s continuous work"); } catch (e) {}
     console.log("[guards] forced checkpoint: interrupted", a.displayName, "at", t, "tokens after", Math.round(act.sinceMs / 60000), "min of continuous work");
     return true;
   }
