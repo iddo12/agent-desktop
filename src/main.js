@@ -40,7 +40,7 @@ if (testMode.TEST_MODE) {
     // the same taskbar button as the real app - without it the two share one
     // button and the amber icon never gets shown separately.
     app.setAppUserModelId("com.iddo.agentdesktop.sandbox");
-    app.setPath("userData", path.join(app.getPath("appData"), "agent-desktop-test"));
+    app.setPath("userData", path.join(app.getPath("appData"), "agent-desktop-test" + String(process.env.AGENT_DESKTOP_TEST_SUFFIX || "").replace(/[^A-Za-z0-9_-]/g, "")));  // v1.68.0: a second sandbox instance (own userData) can run beside another agent's
   } catch (e) {
     // Better to refuse to start than to run a test instance that shares the
     // live one's logs, sent-message history and UI flags.
@@ -3012,7 +3012,35 @@ const connHealth = require("./connectionHealth").create({
     } finally { fs.closeSync(fd); }
   },
   nudge: (agentPath, text) => typeIntoPty(agentPath, text),
+  // v1.68.0 stuck Enter (see connectionHealth.js)
+  inputHoldsText: (agentPath, snippet) => inputHoldsUnsentText(agentPath, snippet),
+  transcriptHas: (agentPath, text, sinceMs) => transcriptTailHasText(agentPath, text, sinceMs),
+  // v1.68.1: the renderer presses it, through the same per-session write chain as every message (a bare write from
+  // here could land inside the next message's bracketed paste)
+  pressEnter: (agentPath) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("press-enter", { agentPath });
+  },
 });
+// true/false = the agent's newest transcript (last 1 MB) does / does not contain the message (via its longest plain
+// run of characters); null = cannot tell (nothing to look for, or no transcript). Only a transcript written since
+// `sinceMs` counts, so an identical older message does not read as delivered.
+function transcriptTailHasText(agentPath, text, sinceMs) {
+  try {
+    const runs = String(text || "").match(/[\p{L}\p{N} ]{14,}/gu) || [];
+    const needle = runs.sort((x, y) => y.length - x.length)[0];
+    if (!needle) return null;
+    const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
+    if (!nt) return null;
+    if (sinceMs && fs.statSync(nt.jsonlPath).mtimeMs < sinceMs - 1000) return false;
+    const fd = fs.openSync(nt.jsonlPath, "r");
+    try {
+      const len = Math.min(1024 * 1024, nt.size);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, nt.size - len);
+      return buf.toString("utf-8").includes(needle.trim().slice(0, 60));
+    } finally { fs.closeSync(fd); }
+  } catch (e) { return null; }
+}
 ipcMain.handle("get-connection-states", () => connHealth.getAll());
 
 async function recoverStuckSession(agentPath, session, recoveryCount) {
@@ -3840,7 +3868,25 @@ ipcMain.handle("read-archived-day", (event, { agentPath, dateKey }) => readArchi
 
 ipcMain.handle("get-context-usage", (event, { agentPath }) => getLatestUsage(sessionCwdFor(agentPath)));
 
-ipcMain.handle("get-live-transcript", (event, { agentPath }) => getLiveTranscriptBlocks(sessionCwdFor(agentPath)));
+// v1.68.0: the memoised blocks array is the same object while the transcript files are unchanged. A renderer that
+// already holds the last array it was sent (ifChanged) gets a one-word answer instead of the whole transcript
+// copied over IPC again every 4 s poll.
+const lastLiveSent = new Map(); // agentPath -> last blocks array handed to the renderer
+ipcMain.handle("get-live-transcript", (event, { agentPath, ifChanged }) => {
+  const blocks = getLiveTranscriptBlocks(sessionCwdFor(agentPath));
+  if (ifChanged && lastLiveSent.get(agentPath) === blocks) return { unchanged: true };
+  lastLiveSent.set(agentPath, blocks);
+  return blocks;
+});
+// v1.68.0 timing probes (renderer, off by default - localStorage.perfProbes = "1"): one short line per probe.
+ipcMain.on("perf-log", (event, { lines }) => {
+  try {
+    const f = path.join(app.getPath("userData"), "ui-timing.log");
+    try { if (fs.statSync(f).size > 1024 * 1024) fs.renameSync(f, f + ".old"); } catch (e) {}
+    const ts = new Date().toISOString();
+    fs.appendFileSync(f, (Array.isArray(lines) ? lines : []).slice(0, 200).map((l) => ts + " " + String(l).slice(0, 300)).join("\n") + "\n");
+  } catch (e) { /* diagnostics only */ }
+});
 
 ipcMain.handle("get-session-activity", (event, { agentPath }) => getSessionActivity(sessionCwdFor(agentPath)));
 // 2026-09-23: how long the agent's transcript has been quiet. The delivery
@@ -3859,7 +3905,7 @@ ipcMain.handle("get-transcript-quiet-ms", (event, { agentPath }) => {
 // Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
 // v1.65.0: the stuck-Enter retry may press Enter ONLY when the screen shows the unsent message text in the
 // CLI input box and nothing that looks like a prompt waiting for an answer (Enter would accept its default).
-ipcMain.handle("agent-input-holds-text", (event, { agentPath, snippet }) => {
+function inputHoldsUnsentText(agentPath, snippet) {
   if (promptLikelyOpen(agentPath)) return false;
   const strip = (x) => String(x).replace(/\s+/g, "");
   const tail = strip((dialogTails.get(agentPath) || "").slice(-900));
@@ -3867,9 +3913,36 @@ ipcMain.handle("agent-input-holds-text", (event, { agentPath, snippet }) => {
   if (want.length < 3 || !tail.includes(want)) return false;
   const after = tail.slice(tail.lastIndexOf(want) + want.length);
   return !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]|Doyouwant|Yes,|No,/i.test(after) && !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]/i.test(tail.slice(-250));
+}
+ipcMain.handle("agent-input-holds-text", (event, { agentPath, snippet }) => inputHoldsUnsentText(agentPath, snippet));
+// v1.68.0: a message that was delivered another way (message channel) can still sit unsent in the CLI input box.
+// Once the bubble has settled, clear that leftover (Ctrl+C = "clear input" in the CLI) - only when the box holds
+// exactly this text, no prompt is open and the agent is idle (Ctrl+C would interrupt a working turn).
+const staleClearedAt = new Map();
+ipcMain.handle("clear-stale-input", (event, { agentPath, text }) => {
+  try {
+    const s = ptySessions.get(agentPath);
+    if (!s || !s.proc) return false;
+    if (Date.now() - (staleClearedAt.get(agentPath) || 0) < 20000) return false;
+    const act = getSessionActivity(sessionCwdFor(agentPath));
+    if (act && act.working) return false;
+    if (!inputHoldsUnsentText(agentPath, text)) return false;
+    // the text must be the LAST thing on the screen (the live input line), not an older echo with output after it
+    const strip = (x) => String(x).replace(/\s+/g, "");
+    const tailS = strip((dialogTails.get(agentPath) || "").slice(-900));
+    const wantS = strip(text || "").slice(-40);
+    const after = tailS.slice(tailS.lastIndexOf(wantS) + wantS.length);
+    if (after.length > 120 || /Working|Thinking|esctointerrupt|tokens/i.test(after)) return false;
+    const mt = getLatestTranscriptMtimeMs(sessionCwdFor(agentPath));
+    if (mt != null && Date.now() - mt < 5000) return false; // the agent wrote very recently: do not touch its input
+    staleClearedAt.set(agentPath, Date.now());
+    writeToPtyChunked(s.proc, agentPath, "\x03");
+    logStuckWatchdog(`stale-input: ${agentPath} - the message was delivered another way but its text sat unsent in the input box; cleared it`);
+    return true;
+  } catch (e) { return false; }
 });
 ipcMain.handle("agent-dialog-open", (event, { agentPath }) => promptLikelyOpen(agentPath)); // v1.65.0: mid-turn send must not type into a permission prompt
-ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor, dialogOpenFor));
+ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents({ noAvatar: true }), sessionCwdFor, dialogOpenFor));
 // ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
 // AGENTS_ROOT: in the sandbox the agents are fixtures but the report files are
 // real, and they are only ever read here.
@@ -3956,7 +4029,20 @@ ipcMain.handle("get-inferred-plan-id", () => getInferredPlanId());
 // Show agent this way and only noticed because the agent's next reply
 // didn't reflect it. This fires an OS notification so a delivery failure is
 // visible even if Agent Desktop isn't the focused window at the time.
-ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
+// v1.68.0: name the CAUSE of a failed delivery in one short line. dead link = the pty is gone or the connection module is
+// reconnecting; stuck Enter = the text still sits in the CLI input box; queued mid-turn = the agent is working and
+// the CLI has the message queued behind the turn; unknown = none of the above (the claude-logs tail line below helps).
+function classifySendFailure(agentPath, info) {
+  const i = info || {};
+  const st = connHealth.getState(agentPath).state;
+  const s = ptySessions.get(agentPath);
+  if (st !== "connected") return "dead-link(" + st + ")";
+  if (!s || !s.proc) return "dead-link(no-pty)";
+  if (inputHoldsUnsentText(agentPath, i.text || "")) return "stuck-enter";
+  if (i.received || (i.midTurn && i.working) || i.busyWait) return "queued-mid-turn";
+  return "unknown";
+}
+ipcMain.handle("notify-send-failed", (event, { agentPath, text, info }) => {
   try {
     if (Notification.isSupported()) {
       const agentName = path.basename(agentPath);
@@ -3977,7 +4063,10 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
   } catch (e) {
     /* a notification failure must never break anything else */
   }
-  logStuckWatchdog(`notify-send-failed: ${agentPath} - message never landed in transcript, re-queued`);
+  let cause = "unknown";
+  try { cause = classifySendFailure(agentPath, Object.assign({}, info, { text })); } catch (e) {}
+  const inf = info || {};
+  logStuckWatchdog(`notify-send-failed: ${agentPath} - message never landed in transcript, re-queued [cause=${cause} why=${inf.why || "?"} age=${inf.ageSec != null ? inf.ageSec + "s" : "?"} midTurn=${inf.midTurn ? 1 : 0} received=${inf.received ? 1 : 0} nudges=${inf.nudges || 0} working=${inf.working ? 1 : 0}]`);
   // v1.67.0: the log never said WHY. Snapshot the agent's own screen (`claude logs <id>`) at failure time:
   // idle + empty input box = dead link, text in the box = stuck Enter, a dialog = prompt waiting.
   try {
@@ -4131,7 +4220,7 @@ function logSentInput(agentPath, data) {
   } catch (e) {}
 }
 
-ipcMain.on("terminal-input", (event, { agentPath, data }) => {
+ipcMain.on("terminal-input", (event, { agentPath, data, app: fromApp }) => {
   logSentInput(agentPath, data);
   const session = ptySessions.get(agentPath);
   if (!session) {
@@ -4172,7 +4261,7 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
     session.pendingInput.push(data);
     return;
   }
-  connHealth.noteWrite(agentPath, data);
+  if (fromApp) connHealth.noteWrite(agentPath, data); // v1.68.1: only the app's own message writes, never Terminal-tab typing/pastes
   if (testMode.TEST_MODE && fs.existsSync(testFaultFile("mute-" + path.basename(agentPath)))) return; // sandbox: simulate a dead pty
   writeToPtyChunked(session.proc, agentPath, data);
 });

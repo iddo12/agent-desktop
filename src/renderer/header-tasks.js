@@ -441,14 +441,25 @@
   // The chat header and the sidebar are rebuilt on agent selection and every
   // list refresh, so re-apply rather than assuming a single pass is enough.
   // Guarded against re-entry: render() itself mutates the DOM this observes.
-  let applying = false;
+  // v1.68.0: was document.body + subtree, i.e. apply() (four builders and a querySelectorAll over every sidebar
+  // row) ran after ANY mutation anywhere - every chat re-render, every 1 Hz indicator tick. Now only the two places
+  // it manages are watched (sidebar, chat header), one apply per animation frame, and the records caused by apply()
+  // itself are discarded instead of re-triggering it.
+  let applying = false, applyQueued = false;
   apply();
   const mo = new MutationObserver(() => {
-    if (applying) return;
-    applying = true;
-    try { apply(); } finally { applying = false; }
+    if (applying || applyQueued) return;
+    applyQueued = true;
+    requestAnimationFrame(() => {
+      applyQueued = false;
+      applying = true;
+      try { apply(); } finally { applying = false; mo.takeRecords(); }
+    });
   });
-  mo.observe(document.body, { childList: true, subtree: true });
+  for (const id of ["sidebar", "chat-header"]) {
+    const el = document.getElementById(id);
+    if (el) mo.observe(el, { childList: true, subtree: true });
+  }
   refresh();
   setInterval(refresh, POLL_MS);
 })();
