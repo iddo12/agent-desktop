@@ -1742,6 +1742,13 @@ function trackDialog(agentPath, data) {
   const tail = ((dialogTails.get(agentPath) || "") + stripTerminalCodes(String(data))).slice(-1500);
   dialogTails.set(agentPath, tail);
 }
+// v1.65.0: broader than DIALOG_RE (which drives the red badge): any screen that looks like a prompt
+// waiting for an answer. Used only to gate typing/Enter into a session.
+const PROMPT_RE = /Esc to cancel|Enter to confirm|Do you want to|\(y\/n\)|\[Y\/n\]|❯\s*1\.\s|Press Enter/i;
+function promptLikelyOpen(agentPath) {
+  if (dialogOpenFor(agentPath)) return true;
+  return PROMPT_RE.test((dialogTails.get(agentPath) || "").slice(-600));
+}
 function dialogOpenFor(agentPath) {
   if (!ptySessions.get(agentPath) || !ptySessions.get(agentPath).proc) return false;
   const tail = dialogTails.get(agentPath) || "";
@@ -3636,6 +3643,18 @@ ipcMain.handle("get-transcript-quiet-ms", (event, { agentPath }) => {
   }
 });
 // Tasks panel + sidebar state rings (v1.37.0) - see overview.js.
+// v1.65.0: the stuck-Enter retry may press Enter ONLY when the screen shows the unsent message text in the
+// CLI input box and nothing that looks like a prompt waiting for an answer (Enter would accept its default).
+ipcMain.handle("agent-input-holds-text", (event, { agentPath, snippet }) => {
+  if (promptLikelyOpen(agentPath)) return false;
+  const strip = (x) => String(x).replace(/\s+/g, "");
+  const tail = strip((dialogTails.get(agentPath) || "").slice(-900));
+  const want = strip(snippet || "").slice(-40);
+  if (want.length < 3 || !tail.includes(want)) return false;
+  const after = tail.slice(tail.lastIndexOf(want) + want.length);
+  return !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]|Doyouwant|Yes,|No,/i.test(after) && !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]/i.test(tail.slice(-250));
+});
+ipcMain.handle("agent-dialog-open", (event, { agentPath }) => promptLikelyOpen(agentPath)); // v1.65.0: mid-turn send must not type into a permission prompt
 ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(), sessionCwdFor, dialogOpenFor));
 // ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
 // AGENTS_ROOT: in the sandbox the agents are fixtures but the report files are

@@ -105,7 +105,14 @@
   //   - Same fleet-wide and once-per-agent guards as the idle path (it only interrupts; the
   //     handoff itself still goes through checkAutoHandoff's normal conditions).
   //   - ON by default since 2026-10-02 (Iddo said yes); the four review findings are fixed below. Off switch: localStorage.setItem("forcedCheckpointOff","1").
-  const FORCE_AFTER_MS = 10 * 60 * 1000;     // continuous working time before a forced checkpoint
+  const FORCE_AFTER_MS = 10 * 60 * 1000;     // continuous working time before a forced checkpoint (at AUTO_HANDOFF_TOKENS)
+  // 2026-10-03: token-aware - the fuller the context, the sooner we interrupt (agents were reaching 190-250K
+  // while waiting out the flat 10 minutes). >=190K: 30 s of work + the confirm polls; >=175K: 2 min; else 10 min.
+  function forceAfterMsFor(t) {
+    if (t >= 190000) return 30 * 1000;      // floor: a turn Iddo only just started is not Esc'd instantly
+    if (t >= 175000) return 2 * 60 * 1000;
+    return FORCE_AFTER_MS;
+  }
   const FORCE_ACTIVE_QUIET_MS = 15000;       // transcript must have grown within this to count as "actively writing"
   const FORCE_BLOCKED_QUIET_MS = 90000;      // quiet this long while "working" = waiting on something, tell Iddo
   const forcedInterrupts = new Map();        // agentPath -> time of the Esc we sent
@@ -121,13 +128,68 @@
   const FORCE_CONFIRM_POLLS = 2;              // qualifying polls needed ...
   const FORCE_CONFIRM_WINDOW_MS = 60 * 1000;  // ... within this window
   const FORCE_REPEAT_GUARD_MS = 20 * 60 * 1000; // never Esc the same agent again within this long
+  // 2026-10-03: an agent that is nearly full and STILL working after our Esc (a queued message started a new turn,
+  // see parkQueue below) must not wait 20 min for the next one - Software Engineering reached 243K that way.
+  function forceRepeatGuardMsFor(t) { return t >= 190000 ? 5 * 60 * 1000 : FORCE_REPEAT_GUARD_MS; }
+
+  // 2026-10-03: PARKED USER QUEUE. Root cause of "never handed off" (Software Engineering, 243K): the agent had
+  // user messages waiting in session.sendQueue. After our Esc the turn ended, setBusy(false) drained the queue at
+  // once and a NEW turn started before any sweep saw the agent idle; startFlow's idle test also needs an empty
+  // queue. So while an Esc/flow is pending the user's queued messages are parked here (a Map, because the reset
+  // drops the old session object and its queue with it), then put back at the FRONT of the queue and drained when
+  // the flow ends (done/failed/cleared) or the flow never starts. Nothing is dropped or sent twice.
+  const parkedQueues = new Map();             // agentPath -> { items: [...], at: ms of last parking }
+  const PARK_WAIT_FOR_FLOW_MS = 2 * 60 * 1000; // parked after an Esc but no flow started: give up and restore
+  function isFlowOwnMessage(q) { return typeof q === "string" && (q.indexOf("[Agent Desktop") === 0 || q.indexOf(RESUME_MARKER) !== -1); }
+  function parkQueue(ap, why) {
+    const se = terminals.get(ap);
+    if (!se || !se.sendQueue || !se.sendQueue.length) return 0;
+    const mine = [], keep = [];
+    for (const q of se.sendQueue) (isFlowOwnMessage(q) ? keep : mine).push(q);
+    if (!mine.length) return 0;
+    se.sendQueue.length = 0;
+    for (const q of keep) se.sendQueue.push(q);
+    const cur = parkedQueues.get(ap);
+    parkedQueues.set(ap, { items: (cur ? cur.items : []).concat(mine), at: Date.now() });
+    try { window.autoHandoffLog("parked " + mine.length + " queued user message(s) for " + agentName(ap) + " (" + why + ")"); } catch (e) {}
+    if (typeof renderQueue === "function") renderQueue(ap);
+    return mine.length;
+  }
+  let restoringParked = false;
+  async function restoreParkedQueues() {
+    if (restoringParked) return;
+    restoringParked = true;
+    try { await restoreParkedQueuesInner(); } finally { restoringParked = false; }
+  }
+  async function restoreParkedQueuesInner() {
+    for (const [ap, pk] of Array.from(parkedQueues.entries())) {
+      try {
+        const fl = flows.get(ap);
+        if (fl ? (fl.phase === "saving" || fl.phase === "resetting" || fl.phase === "resuming") : Date.now() - pk.at < PARK_WAIT_FOR_FLOW_MS) continue;
+        let se = terminals.get(ap);
+        if (!se || !se.started) {
+          const ag = agents.find((x) => x.path === ap);
+          if (ag) { await autoAttachSession(ag); se = terminals.get(ap); }
+        }
+        if (!se) continue;                      // keep them parked, try again next tick
+        parkedQueues.delete(ap);
+        se.sendQueue.unshift(...pk.items);      // ahead of anything queued meanwhile: they were sent first
+        try { window.autoHandoffLog("restored " + pk.items.length + " parked user message(s) to " + agentName(ap) + " (flow " + (fl ? fl.phase : "never started") + ")"); } catch (e) {}
+        if (typeof renderQueue === "function") renderQueue(ap);
+        if (se.started && !se.busy && !se.transcriptWorking) setBusy(ap, se, false);   // drain; the idle transition sends the rest one by one
+      } catch (e) { console.error("guards restoreParkedQueues", e); }
+    }
+  }
+  window.guardsParkQueue = parkQueue;           // sandbox tests drive these directly
+  window.guardsRestoreParked = restoreParkedQueues;
+  window.guardsParkedState = () => Array.from(parkedQueues.entries());
 
   async function maybeForceCheckpoint(a, act, t) {
     if (!forcedCheckpointEnabled()) return false;
-    if (!act || !act.working || act.sinceMs < FORCE_AFTER_MS) { forcePolls.delete(a.path); return false; }
+    if (!act || !act.working || act.sinceMs < forceAfterMsFor(t)) { forcePolls.delete(a.path); return false; }
     // Finding 2: one Esc per agent per FORCE_REPEAT_GUARD_MS (it could repeat every tick).
     const prev = forcedInterrupts.get(a.path);
-    if (prev && Date.now() - prev < FORCE_REPEAT_GUARD_MS) return false;
+    if (prev && Date.now() - prev < forceRepeatGuardMsFor(t)) return false;
     const session = terminals.get(a.path);
     if (!session || !session.started) return false;
     const quiet = await window.api.getTranscriptQuietMs(a.path).catch(() => null);
@@ -149,6 +211,10 @@
     // appeared (Esc would answer "No" for Iddo). Only count a poll when the newest entry is NOT a pending
     // tool_use (model generating, or a tool result just came back), and require two such polls close together.
     if (act.pendingToolUse) return false;
+    // Second review (2026-10-03): `act` predates the awaits above; a tool_use landing meanwhile could be a fresh
+    // permission prompt. Re-read activity right before counting the poll.
+    const fresh = await window.api.getSessionActivity(a.path).catch(() => null);
+    if (!fresh || !fresh.working || fresh.pendingToolUse) { forcePolls.delete(a.path); return false; }
     const now = Date.now();
     const polls = (forcePolls.get(a.path) || []).filter((x) => now - x < FORCE_CONFIRM_WINDOW_MS);
     polls.push(now);
@@ -157,6 +223,7 @@
     forcePolls.delete(a.path);
     forcedInterrupts.set(a.path, now);
     window.api.sendInput(a.path, "");              // Esc: interrupt the running turn
+    try { window.autoHandoffLog("forced Esc: " + a.displayName + " " + Math.round(t / 1000) + "K after " + Math.round(act.sinceMs / 1000) + " s continuous work"); } catch (e) {}
     console.log("[guards] forced checkpoint: interrupted", a.displayName, "at", t, "tokens after", Math.round(act.sinceMs / 60000), "min of continuous work");
     return true;
   }
@@ -239,6 +306,7 @@
         if (t && window.guardUsageIsStale(a.path, u)) t = 0;
         // v1.54.3: re-arm once the agent is back under the warning line (a real, finished reset).
         if (t && t < CONTEXT_WARN_TOKENS) { autoHandedOff.delete(a.path); forcedInterrupts.delete(a.path); attachFailedAt.delete(a.path); }
+        nearHandoff.set(a.path, t >= AUTO_HANDOFF_TOKENS);
         if (t >= AUTO_HANDOFF_TOKENS) eligible.push({ a, t });
         else if (raw >= AUTO_HANDOFF_TOKENS) glog(a.displayName, "stale", a.displayName + " " + Math.round(raw / 1000) + "K: skipped, usage predates our last reset (stale)");
       } catch (e) { /* one agent's hiccup must not stop the sweep */ }
@@ -322,6 +390,7 @@
   // had arrived. A working agent has the message; it is simply busy with it.
   const RESUME_MAX_WAIT_MS = 5 * 60 * 1000;
 
+  const nearHandoff = new Map(); // agentPath -> over AUTO_HANDOFF_TOKENS at the last sweep (v1.65.0: such agents keep user messages in the app queue so parkQueue can park them before the forced Esc)
   const flows = new Map(); // agentPath -> { phase, startedAt, error, quietPolls }
   const pendingResume = new Map(); // agentPath -> { text, path, readySince, sentAt, tries }
   const dismissedAt = new Map(); // agentPath -> token count when "Later" was clicked
@@ -439,6 +508,7 @@
       if (confirmFirst && !confirm("Ask this agent to save its lessons + a handoff file, then reset the session and resume from the handoff?")) return;
       const flow = { phase: "saving", startedAt: Date.now(), error: null, quietPolls: 0 };
       flows.set(agentPath, flow);
+      parkQueue(agentPath, "handoff flow start");   // before the prompt goes out, so only the user's messages are parked
       deliverHandoffPrompt(agentPath, handoffPrompt(agentPath), flow);
       render();
       flow.timer = setInterval(() => advanceFlow(agentPath), FLOW_POLL_MS);
@@ -451,6 +521,7 @@
     const flow = flows.get(agentPath);
     if (!flow || flow.phase !== "saving") return;
     try {
+      parkQueue(agentPath, "queued during handoff");   // a message typed mid-flow must not block the idle test or reach the old conversation
       // Time spent stopped on a usage limit does not count: the agent cannot write anything then.
       const lim = await window.api.getLimitStatus(agentPath).catch(() => null);
       if (lim && lim.halt) flow.pausedMs = (flow.pausedMs || 0) + FLOW_POLL_MS;
@@ -533,6 +604,7 @@
   // attaches once the agent is opened), give it a few seconds to settle, send, then confirm the
   // marker landed in the transcript. Resend once if not; after that tell the user what to do.
   async function tickResume() {
+    restoreParkedQueues();
     for (const [ap, r] of Array.from(pendingResume.entries())) {
       try {
         const flow = flows.get(ap);
@@ -926,6 +998,7 @@
   }
   // v1.58.0: read by app-update-overlay.js - Update & restart waits while a
   // handoff is mid-flight (a restart would cut it between reset and resume).
+  window.guardsAgentInFlow = (ap) => flows.has(ap) || pendingResume.has(ap) || !!nearHandoff.get(ap) || !!(allRun && !allRun.finished); // v1.65.0
   window.guardsBusyReason = () => {
     if (allRun && !allRun.finished) return "\"Handoff all\" is running";
     if (flows.size) return "a handoff is in progress";
