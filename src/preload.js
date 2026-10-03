@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld("api", {
   argusDecisionCount: () => ipcRenderer.invoke("argus-decision-count"),
   argusOpenSource: (file) => ipcRenderer.invoke("argus-open-source", { file }),
   argusSetIdeaDecision: (payload) => ipcRenderer.invoke("argus-set-idea-decision", payload),
+  libraryStateGet: () => ipcRenderer.invoke("library-state-get"),
+  libraryStateOp: (op) => ipcRenderer.invoke("library-state-op", op),
   registryAction: (id, action) => ipcRenderer.invoke("registry-action", { id, action }),
   openLocalPdf: (filePath) => ipcRenderer.invoke("open-local-pdf", { filePath }),
   approveTelegramTasks: (ids) => ipcRenderer.invoke("approve-telegram-tasks", { ids }),

@@ -127,6 +127,8 @@ function listRegistryRaw(workspaceRoot) {
         // What the in-app viewer can show: the entry's PDF copy if it has one,
         // else a local PDF/image/HTML link. Web links open in the browser.
         viewable: !!viewablePath(e),
+        // v1.64.0: the full local path of the document itself (its PDF copy for a web entry), for "send to an agent".
+        path: viewablePath(e) || (local ? e.link : ""),
         status: e.status || "active",
         // v1.60.0: pipeline stage (idea | researched | active) for the Projects
         // view. A project with no stage is active (every entry older than this).

@@ -3657,6 +3657,10 @@ ipcMain.handle("registry-action", (event, { id, action }) =>
   ["open", "reveal", "copy", "view", "openPdf"].includes(action)
     ? registry.registryAction(AGENTS_ROOT, String(id || ""), action)
     : { ok: false, error: "Unknown action." });
+// Library read-state + per-document send history (v1.64.0): per-user, in userData, never the shared registry.
+const libraryState = require("./libraryState").create(path.join(app.getPath("userData"), "library-state.json"));
+ipcMain.handle("library-state-get", () => libraryState.get());
+ipcMain.handle("library-state-op", (event, op) => libraryState.apply(op));
 // Clickable PDF paths in chat bubbles (v1.52.0). The path comes from an
 // agent's reply, so registry.openLocalPdf treats it as untrusted: existing
 // .pdf files under the workspace or E:\Claude work only; refusals logged.

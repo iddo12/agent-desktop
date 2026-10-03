@@ -4020,6 +4020,75 @@ voiceInputBtn.addEventListener("click", () => {
   else startVoiceRecording();
 });
 
+// v1.64.0: a small bridge for the Library (library.js) so "comment on a document and send it to an
+// agent" reuses THIS file's send path (the same busy-queue / submitToAgent the compose box uses) and the
+// same local whisper dictation, instead of a second transport. Nothing here runs until the Library calls it.
+window.libraryBridge = {
+  agents: () => agents.map((a) => ({ path: a.path, folderName: a.folderName, displayName: a.displayName, role: a.role || "", paused: !!a.paused })),
+  warmVoice: () => { try { if (window.api.voiceWarm) window.api.voiceWarm(); } catch (e) {} },
+  // Sends `text` to an agent exactly as if typed in its compose box, without changing the visible agent
+  // or touching anyone's draft. Starts the agent's session in the background if it has none yet.
+  async send(agentPath, text) {
+    const agent = agents.find((a) => a.path === agentPath);
+    if (!agent) return { ok: false, error: "That agent is not in the list." };
+    if (agent.paused) return { ok: false, error: agent.displayName + " is paused - resume it first." };
+    let toSend = String(text || "");
+    if (!toSend.trim()) return { ok: false, error: "Nothing to send." };
+    if (toSend.length > LONG_MESSAGE_FILE_THRESHOLD) {
+      try {
+        const filePath = await window.api.saveLongMessage(toSend);
+        longMessageCache.set(filePath, toSend);
+        toSend = `This message was too long to paste directly, so it was saved to a file - please read it: "${filePath}"`;
+      } catch (e) { /* send inline */ }
+    }
+    let session = terminals.get(agentPath);
+    if (!session || !session.started) {
+      const ok = await attachSessionInBackground(agent);
+      if (!ok) return { ok: false, error: "Could not start " + agent.displayName + "'s session." };
+      session = terminals.get(agentPath);
+    }
+    if (session.busy || session.transcriptWorking || !session.started) {
+      session.sendQueue.push(toSend);
+      renderQueue(agentPath);
+      return { ok: true, how: "queued" };
+    }
+    submitToAgent(agentPath, toSend);
+    return { ok: true, how: "sent" };
+  },
+  // Audio blob -> text through the same engine as the chat mic (local whisper, Cloudflare fallback).
+  async dictate(blob, note) {
+    const say = typeof note === "function" ? note : () => {};
+    try {
+      const pcm = await blobToPcm16k(blob);
+      let saved = null;
+      try { saved = await window.api.voiceSave(encodeWav16k(pcm, 16000)); } catch (e) {}
+      const savedFile = saved && saved.ok ? saved.file : null;
+      let local = false;
+      try { local = !!(window.api.voiceEngine && (await window.api.voiceEngine()).local); } catch (e) {}
+      say(local ? "Transcribing on this PC..." : "Transcribing...");
+      const parts = [];
+      if (local) {
+        const res = savedFile ? await window.api.transcribeAudio(null, savedFile) : await window.api.transcribeAudio(encodeWav16k(pcm, 16000));
+        if (!res || !res.ok) return { ok: false, error: (res && res.error) || "Transcription failed." };
+        if (res.text) parts.push(res.text.trim());
+      } else {
+        const wavChunks = pcmToWavChunks(pcm);
+        for (let i = 0; i < wavChunks.length; i++) {
+          const res = await window.api.transcribeAudio(wavChunks[i]);
+          if (!res || !res.ok) {
+            if (parts.length) break;
+            return { ok: false, error: (res && res.error) || "Transcription failed." };
+          }
+          if (res.text) parts.push(res.text.trim());
+        }
+      }
+      return { ok: true, text: stitchTranscripts(parts).trim() };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  },
+};
+
 // Pure visual reminder/shortcut - just prefills the compose box, doesn't
 // send anything itself. Prepends rather than overwrites so it still works
 // if the user already started typing what to save before remembering to
