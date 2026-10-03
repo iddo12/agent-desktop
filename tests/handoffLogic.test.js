@@ -69,3 +69,37 @@ assert.strictEqual(L.mayNudge({ delivery: { delivered: true } }), true);
   assert.ok(/mayNudge\(flow\)/.test(g) && /window\.guardsFlowActive\s*=/.test(g));
 }
 console.log("handoffLogic ok");
+
+// 6. v1.69.1 M2: bounded wait, then ONE nudge, only when nothing of the first request can still land
+{
+  const T = 1000000;
+  const f = (o) => Object.assign({ delivery: { delivered: false }, deliverySettledAt: T }, o);
+  const free = { inputHolds: false, queued: false };
+  assert.strictEqual(L.mayNudge(f(), T + 10000, free), false, "inside the wait");
+  assert.strictEqual(L.mayNudge(f(), T + 61000, free), true, "wait over, nothing pending");
+  assert.strictEqual(L.mayNudge(f(), T + 61000, { inputHolds: true, queued: false }), false, "still in the input box");
+  assert.strictEqual(L.mayNudge(f(), T + 61000, { inputHolds: false, queued: true }), false, "still in the app queue");
+  assert.strictEqual(L.mayNudge(f(), T + 61000, {}), false, "unknown input state");
+  assert.strictEqual(L.mayNudge(f({ unconfirmedNudged: true }), T + 61000, free), false, "only one");
+  assert.strictEqual(L.mayNudge(f({ delivery: undefined }), T + 61000, free), true, "delivery errored");
+  assert.strictEqual(L.mayNudge(f({ delivery: { aborted: true } }), T + 61000, free), false);
+  assert.strictEqual(L.mayNudge(f({ deliveryPending: 1 }), T + 61000, free), false);
+}
+// 7. v1.69.1 H1: restored held messages go mid-turn to a working agent
+assert.strictEqual(L.restoreRoute({ working: true, midTurnOk: true, dialogOpen: false }), "midturn");
+assert.strictEqual(L.restoreRoute({ working: true, midTurnOk: true, dialogOpen: true }), "queue");
+assert.strictEqual(L.restoreRoute({ working: true, midTurnOk: false, dialogOpen: false }), "queue");
+assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen: false }), "queue");
+{
+  const fs2 = require("fs"), p2 = require("path");
+  const g = fs2.readFileSync(p2.join(__dirname, "..", "src", "renderer", "guards.js"), "utf-8");
+  const r = fs2.readFileSync(p2.join(__dirname, "..", "src", "renderer", "renderer.js"), "utf-8");
+  const rs = g.slice(g.indexOf("async function restoreParkedQueuesInner"), g.indexOf("window.guardsParkQueue"));
+  assert.ok(/restoreRoute/.test(rs) && /midTurn: true/.test(rs), "restore delivers mid-turn to a working agent");
+  assert.ok(rs.indexOf("parkedQueues.get(ap)") > rs.indexOf("autoAttachSession"), "L2: parked list re-read after the awaits");
+  const sh = r.slice(r.indexOf("async function sendOrHold("), r.indexOf("function renderQueue"));
+  assert.ok(/terminals\.get\(agentPath\) \|\| session/.test(sh), "M3: hold on the current session");
+  assert.ok(sh.indexOf("guardsFlowActive") < sh.indexOf("interceptSend"), "L1: flow gate before the link-down check");
+  assert.ok(/syncKeepGoing\(\)/.test(g.slice(g.indexOf("async function startFlow"), g.indexOf("async function advanceFlow"))), "L3");
+}
+console.log("handoffLogic v1.69.1 ok");

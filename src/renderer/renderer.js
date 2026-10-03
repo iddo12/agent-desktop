@@ -2897,15 +2897,19 @@ async function sendOrHold(agentPath, session, text, entry) {
   };
   if (!session) { sent(); return "sent"; }
   if (!session.started) { held(); session.sendQueue.push(text); renderQueue(agentPath); return "held"; }
-  { const h = window.connHealth && window.connHealth.interceptSend(agentPath, session, text); if (h) { held(); return h; } } // v1.67.0: link down -> queue visibly
   // v1.68.2 (B1): the handoff-flow gate comes BEFORE the idle shortcut. An idle agent in a flow used to get the message
   // typed into the pty that is being stopped (lost, or answered by the old session). Held, then parked so the flow's
   // restore step delivers it to the fresh session (kept on disk, shown in the banner count).
+  // v1.69.1 (M3): `session` may be a stale object (a long message awaited a file save while the reset swapped the session):
+  // hold on the CURRENT session, or the message and its bubble vanish with the old one. (L1) this gate also runs before the
+  // link-down check, so a message typed in a handoff while the link is down is parked too.
   if (window.guardsFlowActive && window.guardsFlowActive(agentPath)) {
-    held(); session.sendQueue.push(text); renderQueue(agentPath);
+    const cs = terminals.get(agentPath) || session;
+    held(); cs.sendQueue.push(text); renderQueue(agentPath);
     try { if (window.guardsParkQueue) window.guardsParkQueue(agentPath, "typed during handoff"); } catch (e) {}
     return "held";
   }
+  { const h = window.connHealth && window.connHealth.interceptSend(agentPath, session, text); if (h) { held(); return h; } } // v1.67.0: link down -> queue visibly
   const working = () => session.busy || session.transcriptWorking;
   if (!working()) { sent(); return "sent"; }
   let ok = midTurnAllowed() && session.sendQueue.length === 0 && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath));

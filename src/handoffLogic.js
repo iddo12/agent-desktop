@@ -76,11 +76,29 @@
   // v1.68.2 (B2): a second handoff request (the "write it now" nudge) may only be typed once the FIRST request is
   // confirmed in the transcript. While the first is unconfirmed (it may sit unsent in the input box) a second
   // prompt would reach the fresh session next to it as a duplicate request.
-  function mayNudge(flow) {
-    return !!flow && !flow.deliveryPending && !!flow.delivery && flow.delivery.delivered === true;
+  // v1.69.1 (M2): if the first request was never confirmed (gave up after its attempts, or errored), ONE nudge is
+  // allowed after a bounded wait (waitMs after the delivery settled) and only when nothing of the first request can
+  // still be pending: its text is not in the CLI input box and not in the app queue. Otherwise the flow would just
+  // idle until the 12-minute timeout.
+  function mayNudge(flow, nowMs, state) {
+    if (!flow || flow.deliveryPending) return false;
+    if (flow.delivery && flow.delivery.delivered === true) return true;
+    if (flow.delivery && flow.delivery.aborted) return false;
+    const st = state || {};
+    const waitMs = st.waitMs == null ? 60000 : st.waitMs;
+    if (!flow.deliverySettledAt || (nowMs || Date.now()) - flow.deliverySettledAt < waitMs) return false;
+    if (st.inputHolds !== false || st.queued) return false;     // unknown or present: may still land
+    return !flow.unconfirmedNudged;
+  }
+  // v1.69.1 (H1): how restored (held) messages are handed to a session. A working agent gets them mid-turn, exactly
+  // like a normal send; an idle one drains through its queue; a dialog on screen or mid-turn delivery switched off
+  // keeps the old queue behaviour.
+  function restoreRoute(s) {
+    if (!s || !s.working) return "queue";
+    return s.midTurnOk && !s.dialogOpen ? "midturn" : "queue";
   }
 
-  const api = { REQUIRED_SECTIONS, flowHoldsMessages, mayNudge, handoffPrompt, nudgePrompt, fileReady, estimateSecs, progressText, serializeHeld, parseHeld };
+  const api = { REQUIRED_SECTIONS, flowHoldsMessages, mayNudge, restoreRoute, handoffPrompt, nudgePrompt, fileReady, estimateSecs, progressText, serializeHeld, parseHeld };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HandoffLogic = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

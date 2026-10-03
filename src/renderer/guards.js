@@ -178,8 +178,21 @@
           if (ag) { await autoAttachSession(ag); se = terminals.get(ap); }
         }
         if (!se) continue;                      // keep them parked, try again next tick
+        // v1.69.1 (H1): a working agent (e.g. the keep-going mission turn after a handoff) gets them mid-turn, like a normal send
+        const working = !!(se.started && (se.busy || se.transcriptWorking));
+        let dialogOpen = false;
+        if (working) { try { dialogOpen = !!(await window.api.agentDialogOpen(ap)); } catch (e) { dialogOpen = true; } }
+        const cur = parkedQueues.get(ap);       // v1.69.1 (L2): re-read after the awaits - more may have been parked meanwhile
+        if (!cur) continue;
         parkedQueues.delete(ap);
         persistHeld();
+        const stillWorking = !!(se.started && (se.busy || se.transcriptWorking));
+        if (window.HandoffLogic.restoreRoute({ working: working && stillWorking, midTurnOk: midTurnAllowed(), dialogOpen }) === "midturn") {
+          for (const text of cur.items) submitToAgent(ap, text, { midTurn: true });
+          try { window.autoHandoffLog("sent " + cur.items.length + " restored user message(s) to " + agentName(ap) + " mid-turn (agent working)"); } catch (e) {}
+          continue;
+        }
+        pk.items = cur.items;
         se.sendQueue.unshift(...pk.items);      // ahead of anything queued meanwhile: they were sent first
         try { window.autoHandoffLog("restored " + pk.items.length + " parked user message(s) to " + agentName(ap) + " (flow " + (fl ? fl.phase : "never started") + ")"); } catch (e) {}
         if (typeof renderQueue === "function") renderQueue(ap);
@@ -504,7 +517,7 @@
         // press Enter, once per look, when the screen shows exactly this prompt's text
         nudgeSubmit: async () => {
           const se = terminals.get(agentPath);
-          if (!se) return false;
+          if (!se || se.busy || se.transcriptWorking) return false;   // v1.69.1 (L4): never press Enter into a working agent
           const holds = await window.api.agentInputHoldsText(agentPath, text).catch(() => false);
           if (!holds) return false;
           window.autoHandoffLog(nm + ": handoff prompt sits unsent in the input box - pressing Enter");
@@ -519,7 +532,7 @@
       return Promise.resolve(null);
     }
     return p.then((r) => {
-      if (flow) flow.delivery = r;
+      if (flow) { flow.delivery = r; flow.deliverySettledAt = Date.now(); }
       if (r && r.aborted) {
         // v1.63.8: the flow ended while the prompt still waits for a busy agent - drop it so it is not typed later
         const se = terminals.get(agentPath);
@@ -527,7 +540,7 @@
       }
       if (!r.delivered && !r.aborted) window.autoHandoffLog("handoff prompt for " + nm + " NOT confirmed in transcript after " + r.attempts + " attempts");
       return r;
-    }).catch((e) => { window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message)); }).finally(settle);
+    }).catch((e) => { if (flow) flow.deliverySettledAt = Date.now(); window.autoHandoffLog("handoff delivery error for " + nm + ": " + (e && e.message)); }).finally(settle);
   }
 
   // v1.63.4: the existing handoff_latest.md may predate this request entirely (the agent never saw it).
@@ -547,7 +560,9 @@
       flows.set(agentPath, flow);
       parkQueue(agentPath, "handoff flow start");   // before the prompt goes out, so only the user's messages are parked
       flow.hid = window.HandoffDelivery.makeMarker();   // one hid per flow: the prompt is typed at most once under it
-      deliverHandoffPrompt(agentPath, handoffPrompt(agentPath), flow, { marker: flow.hid });
+      flow.firstPrompt = handoffPrompt(agentPath);
+      try { syncKeepGoing(); } catch (e) {}   // v1.69.1 (L3): tell main at once, not at the next 2 s tick, so no keep-going nudge crosses the handoff
+      deliverHandoffPrompt(agentPath, flow.firstPrompt, flow, { marker: flow.hid });
       render();
       flow.timer = setInterval(() => advanceFlow(agentPath), FLOW_POLL_MS);
     } catch (e) {
@@ -594,7 +609,17 @@
       // flow sat until the 12-minute timeout). If it has been idle and the file is still not fresh,
       // tell it plainly, at most twice, instead of waiting out the clock.
       flow.idleStalePolls = idle && !fresh ? (flow.idleStalePolls || 0) + 1 : 0;
-      if (flow.idleStalePolls >= 3 && (flow.nudges || 0) < 2 && window.HandoffLogic.mayNudge(flow)) { // v1.68.2 (B2): never a second request while the first is unconfirmed
+      let nudgeOk = false;
+      if (flow.idleStalePolls >= 3 && (flow.nudges || 0) < 2) {
+        if (window.HandoffLogic.mayNudge(flow)) nudgeOk = true;   // v1.68.2 (B2): first request confirmed
+        else if (flow.firstPrompt && window.HandoffLogic.mayNudge(flow, Date.now(), { inputHolds: false, queued: false })) {
+          // v1.69.1 (M2): first request never confirmed; bounded wait is over - one nudge, only if nothing of it can still land
+          const holds = await window.api.agentInputHoldsText(agentPath, flow.firstPrompt).catch(() => true);
+          const queued = !!(session && session.sendQueue && session.sendQueue.some((q) => typeof q === "string" && q.indexOf(flow.hid) !== -1));
+          if (!holds && !queued) { nudgeOk = true; flow.unconfirmedNudged = true; window.autoHandoffLog(agentName(agentPath) + ": first handoff request never confirmed and not pending - sending one nudge"); }
+        }
+      }
+      if (nudgeOk) {
         flow.nudges = (flow.nudges || 0) + 1;
         flow.idleStalePolls = 0;
         const fileP = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";

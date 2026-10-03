@@ -148,7 +148,9 @@ function create(deps, opts) {
     // v1.68.2 (B3): a message written to the link in the seconds before this failure was noticed is not on its way
     // anywhere: hand it back to the renderer's queue (same mechanism as the dead-link restart) so it is re-sent once connected
     if (a.unackedSince != null && (a.state === "connected" || a.state === "degraded")) {
-      if (ackState(p, a) !== true) a.requeueSince = a.unackedSince; // already in the transcript: it landed, never send it twice
+      // v1.69.1 (M1): only a DEFINITE not-in-the-transcript (false) is requeued. null = cannot tell (short text like yes)
+      // and true = landed: both stay as they are (a Not-confirmed bubble with Resend) - sending twice is worse than asking.
+      if (ackState(p, a) === false) a.requeueSince = a.unackedSince;
       a.unackedSince = null;
       clearT(a.deadTimer); a.deadTimer = null;
       clearT(a.stuckTimer); a.stuckTimer = null;

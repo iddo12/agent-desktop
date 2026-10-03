@@ -283,5 +283,15 @@ function harness(over) {
     assert.strictEqual(x.events[x.events.length - 1].requeueSince, null);
   }
 
+  // 21. v1.69.1 M1: ack unknown (null: short text like "yes") is NOT requeued - it may have landed
+  {
+    const x = harness();
+    x.h.sessions[P] = "real"; x.h.ack = null;
+    x.ch.noteWrite(P, "\x1b[200~yes");
+    await x.advance(3000);
+    x.ch.onAttachFailed(P, "attach exited");
+    assert.strictEqual(x.events[x.events.length - 1].requeueSince, null);
+  }
+
   console.log("connectionHealth ok");
 })().catch((e) => { console.error(e); process.exit(1); });
