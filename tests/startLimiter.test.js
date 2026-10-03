@@ -73,6 +73,28 @@ function make(extra = {}) {
     assert.strictEqual(lim.snapshot().inflight, 0);
   }
 
+  // --- a start that never reports back frees its slot after 3 min (and logs it) ---
+  {
+    const { c, lim } = make({ maxConcurrent: 1, spacingMs: 1000 });
+    const got = [];
+    lim.acquire({ label: "hung" }).then(() => got.push("hung"));
+    lim.acquire({ label: "next" }).then(() => got.push("next"));
+    await c.advance(170000);
+    assert.deepStrictEqual(got, ["hung"], "slot still held before the timeout");
+    await c.advance(15000);
+    assert.deepStrictEqual(got, ["hung", "next"], "slot freed by the timeout");
+    assert.strictEqual(lim.snapshot().inflight, 1);
+  }
+
+  // --- first start is granted synchronously when idle (no 0 ms timer) ---
+  {
+    const { lim } = make();
+    let g = false;
+    lim.acquire({}).then(() => { g = true; });
+    await flush();
+    assert.ok(g, "idle limiter grants without waiting for a timer");
+  }
+
   // --- never more than cap in flight even when nothing is released ---
   {
     const { c, lim } = make({ maxConcurrent: 2 });
@@ -102,7 +124,9 @@ function make(extra = {}) {
   // --- hold blocks, resumes when the file disappears ---
   {
     const { c, lim, setHold } = make();
-    const since = new Date(c.now()).toISOString().slice(0, 19); // like Get-Date -Format s (zone-less)
+    const pad = (v) => String(v).padStart(2, "0");
+    const dd = new Date(c.now());
+    const since = `${dd.getFullYear()}-${pad(dd.getMonth() + 1)}-${pad(dd.getDate())}T${pad(dd.getHours())}:${pad(dd.getMinutes())}:${pad(dd.getSeconds())}`; // like Get-Date -Format s (local, zone-less)
     setHold({ hold: true, since, boxed: ["Security"], reason: "cpu" });
     let n = 0;
     lim.acquire({ label: "x" }).then(() => n++);

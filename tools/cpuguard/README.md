@@ -26,3 +26,9 @@ schtasks /Delete /TN AgentDesktop_CpuGuard /F
 powershell -File CpuGuard.ps1 -Mode Release
 ```
 then delete `%APPDATA%\agent-desktop\cpuguard`.
+
+## Safety details (v2.2)
+- When the guard stops for any reason (normal exit, disable, uninstall, `-Mode Release`, or the next start after a crash/kill) it puts back the priority and CPU affinity of every process it changed (originals are recorded in `state\originals.json` with the process start time, so a reused pid is never touched).
+- It never touches browsers, Adobe/Premiere/media tools, Explorer, Dropbox, terminals or editors, and tool servers (node, bun...) are never boxed or paused. Only known batch helpers (find, grep, rg, git, python, 7z, tar, robocopy...) of a boxed agent are ever paused.
+- The stop code (`fleet_hold.json`) is only written when the agents themselves are the main load; a long render in another program never holds your agents. A stale hold is removed when the guard starts. If the load cannot be split per agent (command lines unreadable) it does not throttle, it only logs.
+- One guard per state folder (named mutex). Incident reports: at most one per 5 minutes, newest 30 kept.

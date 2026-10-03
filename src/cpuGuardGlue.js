@@ -63,12 +63,13 @@ function init({ app, ipcMain, dialog, testMode, getMainWindow, readUiFlags, setU
   }
   function compute() {
     const f = flags();
-    return computeBannerState(limiter.snapshot(), guard.readStatusFile(stateDir), f.cpuGuardEnabled !== false);
+    // a sandbox must never read the real machine's hold / status
+    return computeBannerState(limiter.snapshot(), testMode.TEST_MODE ? null : guard.readStatusFile(stateDir), f.cpuGuardEnabled !== false);
   }
 
   const limiter = createStartLimiter({
-    readHold: () => readHoldFile(holdFile),
-    enabled: () => flags().limiterEnabled !== false,
+    readHold: () => (testMode.TEST_MODE ? null : readHoldFile(holdFile)),
+    enabled: () => !testMode.TEST_MODE && flags().limiterEnabled !== false,
     log,
     onChange: () => push(),
   });

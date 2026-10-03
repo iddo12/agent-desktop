@@ -208,6 +208,7 @@ async function installGuard({ srcDir, stateDir, taskName = TASK_NAME, env = proc
   }
   await run("schtasks.exe", ["/End", "/TN", taskName]); // ignore failure: not running
   await killGuardProcesses(stateDir);
+  await releaseGuard(stateDir); // the old guard was killed: resume what it paused, restore what it throttled
   const c = await run("schtasks.exe", ["/Create", "/TN", taskName, "/XML", xmlFile, "/F"]);
   try { fs.unlinkSync(xmlFile); } catch (e) { /* ignore */ }
   if (!c.ok) {
@@ -220,12 +221,18 @@ async function installGuard({ srcDir, stateDir, taskName = TASK_NAME, env = proc
 
 // Task Scheduler's /End does not reach the PowerShell grandchild started via wscript, so end it by PID,
 // matching only OUR copy (<stateDir>\bin\CpuGuard.ps1) - never another guard (e.g. SEC_CpuGuard) and never by name alone.
-async function killGuardProcesses(stateDir) {
+// The PowerShell script that ends our guard. Exact match on <stateDir>\bin\CpuGuard.ps1, never its own process
+// ($PID, whose command line contains that path too) and never a "-Mode Release/Status" helper run.
+function buildKillScript(stateDir) {
   const needle = path.join(stateDir, "bin", "CpuGuard.ps1").replace(/'/g, "''");
-  const ps =
-    `Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='wscript.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf('${needle}', [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ` +
-    `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
-  return (await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 20000 })).ok;
+  return (
+    `Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='wscript.exe'" | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and ` +
+    `$_.CommandLine.IndexOf('${needle}', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.CommandLine -notmatch '-Mode +(Release|Status)' } | ` +
+    `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`
+  );
+}
+async function killGuardProcesses(stateDir) {
+  return (await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", buildKillScript(stateDir)], { timeout: 20000 })).ok;
 }
 
 async function startGuard(taskName = TASK_NAME) {
@@ -326,6 +333,7 @@ module.exports = {
   stopGuard,
   releaseGuard,
   killGuardProcesses,
+  buildKillScript,
   uninstallGuard,
   setTaskEnabled,
   ensureCpuGuard,

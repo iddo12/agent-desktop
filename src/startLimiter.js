@@ -25,6 +25,7 @@ const DEFAULTS = {
   pollMs: 5000,
   holdTimeoutMs: 15 * 60 * 1000,
   staleMs: 30 * 60 * 1000,
+  slotTimeoutMs: 3 * 60 * 1000, // a start that never reports back frees its slot after this
 };
 
 // info = parsed fleet_hold.json (or null). Pure: is this hold still to be honoured at `nowMs`?
@@ -135,18 +136,31 @@ function createStartLimiter(options = {}) {
   function release(slot) {
     if (slot.released) return;
     slot.released = true;
+    if (slot.timer) clearT(slot.timer);
     inflight = Math.max(0, inflight - 1);
     resetBatchIfIdle();
     changed();
     pump();
   }
 
+  function makeSlot(label) {
+    const slot = { released: false, timer: null };
+    if (o.slotTimeoutMs > 0) {
+      slot.timer = setT(() => {
+        slot.timer = null;
+        log(`start limiter: start of ${label} did not finish in ${Math.round(o.slotTimeoutMs / 1000)} s - freeing its slot`);
+        release(slot);
+      }, o.slotTimeoutMs);
+      if (slot.timer && typeof slot.timer.unref === "function") slot.timer.unref();
+    }
+    return () => release(slot);
+  }
+
   function grant(entry) {
     inflight++;
     batchStarted++;
     currentLabel = entry.label;
-    const slot = { released: false };
-    entry.resolve(() => release(slot));
+    entry.resolve(makeSlot(entry.label));
   }
 
   function pump() {
@@ -212,15 +226,14 @@ function createStartLimiter(options = {}) {
     const label = opts.label || "agent";
     if (opts.urgent || !enabled()) {
       inflight++;
-      const slot = { released: false };
-      return Promise.resolve(() => release(slot));
+      return Promise.resolve(makeSlot(label));
     }
     return new Promise((resolve) => {
       queue.push({ label, resolve });
       batchTotal++;
       changed();
-      // Not pumped synchronously: starts requested in the same tick form ONE wave (up to the cap).
-      if (!timer) schedule(0);
+      // Granted at once when idle (no 0 ms timer); otherwise the spacing / release timers drive it.
+      if (!timer) pump();
     });
   }
 
