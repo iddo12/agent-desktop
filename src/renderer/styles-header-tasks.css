@@ -348,7 +348,7 @@ body.xp-header .xp-controls { margin-left: 0; }
 .xp-state-icon.ready { background: var(--state-ready); }
 .xp-state-icon.ready::after { content: ""; width: 9px; height: 9px;
   background: linear-gradient(90deg, #fff 0 3px, transparent 3px 6px, #fff 6px 9px); }
-.xp-state-icon.working { background: var(--state-working); animation: xp-icon-pulse 2.2s ease-in-out infinite; }
+.xp-state-icon.working { background: var(--state-working); } /* v1.68.0: static (was an infinite pulse per working agent, up to 19 at once) */
 .xp-state-icon.working::after { content: ""; width: 0; height: 0; margin-left: 1.5px;
   border-top: 6px solid transparent; border-bottom: 6px solid transparent; border-left: 9px solid #fff; }
 /* Only the working icon animates: one moving thing means "this one is doing something". */

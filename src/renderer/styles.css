@@ -662,7 +662,7 @@ html, body {
      usage had already hit the account-wide cap. A slow pulse (not the
      mic button's fast recording pulse - this isn't urgent/live, just
      "don't fully trust this number") draws the eye without being alarming. */
-  animation: stale-badge-pulse 2s ease-in-out infinite;
+  animation: stale-badge-pulse 2s ease-in-out 3; /* v1.68.0: three slow pulses, then still (was infinite) */
 }
 @keyframes stale-badge-pulse {
   0%, 100% { opacity: 0.5; }
@@ -1242,12 +1242,22 @@ html, body {
    back through the real terminal buffer yet - pulses gently so it reads as
    "sending" rather than a normal, already-confirmed message. */
 .chat-bubble-pending {
-  animation: pending-pulse 1.4s ease-in-out infinite;
+  /* v1.68.0: calm and static (Iddo: no long pulsing/blinking). The small mark below says where it is. */
+  opacity: 0.82;
+}
+.chat-pending-mark {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-align: right;
 }
 @keyframes pending-pulse {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 0.9; }
 }
+/* v1.68.0: nothing animates while the window is hidden or minimised (class set from renderer.js) */
+html.app-idle *, html.app-idle *::before, html.app-idle *::after { animation-play-state: paused !important; }
 
 /* 2026-09-20: a pendingSent bubble that timed out with no matching
    transcript entry used to just silently disappear (see rebuildChatView's
@@ -1378,7 +1388,7 @@ html, body {
   font-size: 0.78rem;
   color: var(--text-muted);
   margin-bottom: 6px;
-  animation: pending-pulse 1.4s ease-in-out infinite;
+  /* v1.68.0: no infinite pulse - the counter already ticks, so it reads as alive without a GPU animation loop */
 }
 #chat-thinking-indicator.long {
   color: #b26f00;
