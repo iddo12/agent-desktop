@@ -225,7 +225,7 @@ t("resumePromptText: mission text vs old text, marker kept", () => {
 });
 
 t("parseHandoff: 'wait for Iddo to say go' is not a mission", () => {
-  assert.strictEqual(K.parseHandoff("## LESSONS\n- a\n## OPEN NOW\n- x\n## STATE\nExact next step: wait for Iddo to say go, then push\n## KEY FACTS\nz").mission, false);
+  assert.strictEqual(K.parseHandoff("## LESSONS\n- a\n## OPEN NOW\n- wait for Iddo to say go\n## STATE\nExact next step: wait for Iddo to say go, then push\n## KEY FACTS\nz").mission, false);
 });
 t("hashText stable + differs", () => {
   assert.strictEqual(K.hashText("abc"), K.hashText("abc"));
