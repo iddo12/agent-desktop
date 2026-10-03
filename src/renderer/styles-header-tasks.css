@@ -358,7 +358,10 @@ body.xp-header .xp-controls { margin-left: 0; }
   display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 800; }
 .xp-needs-badge.blocked { background: var(--needs-blocked); font-size: 12px; }
 .xp-needs-badge.pending { background: var(--needs-pending); font-size: 9px; letter-spacing: -.5px; }
+/* v1.69.0 keep-going: stopped although nobody blocked it - amber like pending (never red), different glyph */
+.xp-needs-badge.stopped { background: var(--needs-pending); font-size: 11px; }
 #agent-list .agent-item.xp-needs-blocked { box-shadow: inset 3px 0 0 0 var(--needs-blocked); background: var(--needs-blocked-bg); }
+#agent-list .agent-item.xp-needs-stopped { box-shadow: inset 3px 0 0 0 var(--needs-pending); background: var(--needs-pending-bg); }
 #agent-list .agent-item.xp-needs-pending { box-shadow: inset 3px 0 0 0 var(--needs-pending); background: var(--needs-pending-bg); }
 
 .xp-legend {
@@ -379,6 +382,7 @@ body.xp-header .xp-controls { margin-left: 0; }
 .xp-lg-need { width: 15px; height: 15px; border-radius: 50%; color: #fff; font-weight: 800; font-size: 10px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .xp-lg-need.blocked { background: var(--needs-blocked); }
 .xp-lg-need.pending { background: var(--needs-pending); font-size: 8px; }
+.xp-lg-need.stopped { background: var(--needs-pending); font-size: 9px; }
 
 /* v1.37.0 additions for real data */
 .xp-empty { margin: 4px 0 8px; font-size: 12px; opacity: 0.6; }

@@ -628,7 +628,10 @@
     // v1.62.0: the resume message rides along as the fresh session's FIRST prompt, so it is delivered
     // even if Iddo has moved to another agent (before, it waited for the agent's tab to be opened).
     // tickResume then only VERIFIES it; if it never lands it falls back to the old attach-and-send.
-    const resumeText = resumePrompt(arch.path);
+    let resumeText = resumePrompt(arch.path);
+    // v1.69.0: main decides the text (continue-at-once when the handoff has open work and no BLOCKED) and sets the persisted
+    // "mission in progress" marker; the old static text stays the fallback.
+    try { const kg = await window.api.keepGoingResumePrompt(agentPath, arch.path); if (kg && kg.text && kg.text.startsWith(RESUME_MARKER)) resumeText = kg.text; } catch (e) { /* keep the static text */ }
     await performSessionReset(agentPath, { initialPrompt: resumeText });
     pendingResume.set(agentPath, { text: resumeText, path: arch.path, readySince: null, sentAt: Date.now(), viaDispatch: true, tries: 1 });
     flow.phase = "resuming";

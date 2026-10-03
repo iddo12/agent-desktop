@@ -114,6 +114,13 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("connection-state", (event, payload) => callback(payload));
   },
   getConnectionStates: () => ipcRenderer.invoke("get-connection-states"),
+  // v1.69.0 Keep going (see src/keepGoing.js)
+  keepGoingGet: () => ipcRenderer.invoke("keepgoing-get"),
+  keepGoingSet: (agentPath, enabled) => ipcRenderer.invoke("keepgoing-set", { agentPath, enabled }),
+  keepGoingResumePrompt: (agentPath, archivedPath) => ipcRenderer.invoke("keepgoing-resume-prompt", { agentPath, archivedPath }),
+  onKeepGoingState: (callback) => {
+    ipcRenderer.on("keepgoing-state", (event, payload) => callback(payload));
+  },
   onTerminalExit: (callback) => {
     ipcRenderer.on("terminal-exit", (event, payload) => callback(payload));
   },
