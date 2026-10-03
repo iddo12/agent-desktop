@@ -2907,9 +2907,10 @@ function killProcessTree(proc) {
 }
 
 const STUCK_WATCHDOG_LOG_PATH = path.join(app.getPath("userData"), "stuck-turn-watchdog.log");
+let watchdogLogLines = 0;
 function logStuckWatchdog(line) {
   try {
-    try { if (fs.statSync(STUCK_WATCHDOG_LOG_PATH).size > 2 * 1024 * 1024) fs.renameSync(STUCK_WATCHDOG_LOG_PATH, STUCK_WATCHDOG_LOG_PATH + ".old"); } catch (e) { /* no file yet */ }
+    try { if (++watchdogLogLines % 50 === 1 && fs.statSync(STUCK_WATCHDOG_LOG_PATH).size > 2 * 1024 * 1024) fs.renameSync(STUCK_WATCHDOG_LOG_PATH, STUCK_WATCHDOG_LOG_PATH + ".old"); } catch (e) { /* no file yet */ }
     fs.appendFileSync(STUCK_WATCHDOG_LOG_PATH, `${new Date().toISOString()} ${line}\n`);
   } catch (e) {
     /* logging itself must never be why the watchdog fails */
@@ -3093,21 +3094,25 @@ function screenStateFor(agentPath, snippet, fullText) {
 // v1.69.4: re-spawn ONLY the `claude attach` client of an agent (kicked / detached / dead), the bg agent keeps running. Input that
 // arrives meanwhile queues in the placeholder and is replayed into the new client once (the same mechanism as a fresh open).
 const reattaching = new Set();
+// Returns true (re-attached), "busy" (another re-attach or a starting placeholder is in flight: not a failure), "gone" (no live client
+// to replace) or false (the spawn failed; the placeholder is dropped so connection health can retry at once, and it is told).
 async function reattachClient(agentPath, reason) {
   const live = ptySessions.get(agentPath);
-  if (!live || live.starting || !live.proc || !live.agentId || reattaching.has(agentPath)) return false;
+  if (reattaching.has(agentPath) || (live && live.starting)) return "busy";
+  if (!live || !live.proc || !live.agentId) return "gone";
   reattaching.add(agentPath);
   logStuckWatchdog(`attach: ${agentPath} path=reattach-client oldpid=${live.proc.pid} reason=${String(reason).slice(0, 200)}`);
   try { clearInterval(live.archiveTimer); } catch (e) {}
   ptySessions.set(agentPath, { starting: true, pendingInput: [] }); // the old client's exit then finds a placeholder and does nothing
-  try { live.proc.kill(); } catch (e) {}
+  killProcessTree(live.proc); // the winpty agent child too (a plain kill can leave it behind: live check on Windows)
   dialogTails.set(agentPath, "");
   try {
     await startTerminalSession(agentPath, live.sessionCwd, live.cols, live.rows, live.agentId, true, false, "reattach-client");
     return true;
   } catch (e) {
     dropPlaceholder(agentPath);
-    logStuckWatchdog(`attach: ${agentPath} path=reattach-client FAILED: ${e && e.message}`);
+    logStuckWatchdog(`attach: ${agentPath} path=reattach-client FAILED: ${e && e.message}; no session now, connection health retries`);
+    try { connHealth.onAttachFailed(agentPath, "re-attach failed: " + (e && e.message), { cols: live.cols, rows: live.rows }); } catch (e2) {}
     return false;
   } finally {
     reattaching.delete(agentPath);
@@ -4565,19 +4570,19 @@ ipcMain.on("terminal-input", (event, { agentPath, data, app: fromApp }) => {
   // v1.69.4: liveness check by EVIDENCE before a message is typed (attachDeadEvidence: kicked client, detached client / dashboard,
   // blank attach confirmed by `claude logs`): re-spawn only the attach client, wait for its screen (the placeholder queue replays
   // after the CLI has drawn), then the message is typed ONCE. The message and its end marker / Enter go into the placeholder queue.
-  if (fromApp && String(data).indexOf("\x1b[200~") === 0 && String(data).length > 6 && !reattaching.has(agentPath)) {
+  if (fromApp && String(data).indexOf("\x1b[200~") === 0 && String(data).length > 6 && !reattaching.has(agentPath) && !isWorkingNow(agentPath)) {
     const why = attachDeadEvidence(agentPath);
     if (why) {
-      logStuckWatchdog(`dead-attach: ${agentPath} - before sending: ${why}; re-attaching the client first. screen: ${deliveryScreen.lastLines(dialogTails.get(agentPath) || "", 25, 1200, data.replace(/^\x1b\[200~/, ""))}`.slice(0, 2400));
-      const prevS = ptySessions.get(agentPath), size = { cols: prevS && prevS.cols, rows: prevS && prevS.rows };
+      logStuckWatchdog(`dead-attach: ${agentPath} - before sending: ${why}; re-attaching the client first. screen: ${deliveryScreen.lastLines(dialogTails.get(agentPath) || "", 25, 1200, String(data).replace(/^\x1b\[200~/, ""))}`.slice(0, 2400));
       const pr = reattachClient(agentPath, "before send: " + why);
       const ph = ptySessions.get(agentPath);
       if (ph && ph.starting) {
         ph.pendingInput.push(data);
         pr.then((ok) => {
-          if (ok) return;
-          lateInputs.delete(agentPath); // the message was not delivered: the renderer's Not-confirmed notice offers Resend; never replay it later
-          try { connHealth.onAttachFailed(agentPath, "re-attach before send failed", size); } catch (e) {}
+          if (ok === true) { setTimeout(() => { try { connHealth.noteWrite(agentPath, data); } catch (e) {} }, 1500); return; } // replayed by the new client: track it for stuck-Enter / ladder
+          // not delivered: remove ONLY this message's chunks from the replay queue; the renderer's Not-confirmed notice offers Resend
+          const li = lateInputs.get(agentPath);
+          if (li) { const i = li.indexOf(data); if (i >= 0) { let n = 1; while (i + n < li.length && (li[i + n] === "\x1b[201~" || li[i + n] === "\r") && n < 3) n++; li.splice(i, n); } if (!li.length) lateInputs.delete(agentPath); }
         });
         return;
       }

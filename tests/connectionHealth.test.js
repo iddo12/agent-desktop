@@ -39,7 +39,7 @@ function harness(over) {
     deps.resetScreen = () => { calls.resets++; if (h.onReset) h.onReset(h); };
     deps.screenState = () => Object.assign({ cause: "unsent-box", holds: true, dialog: false, queued: false, working: false, ctrlCAgain: false, seen: true, lines: "SCREEN-LINES" }, h.screen || {});
   }
-  if (h.reattach) { calls.reattach = 0; deps.reattachClient = async (p) => { calls.reattach++; if (h.reattachFails > 0) { h.reattachFails--; return false; } return true; }; }
+  if (h.reattach) { calls.reattach = 0; deps.reattachClient = async (p) => { calls.reattach++; if (h.reattachBusy > 0) { h.reattachBusy--; return "busy"; } if (h.reattachFails > 0) { h.reattachFails--; return false; } return true; }; }
   const ch = create(deps);
   async function advance(ms) {
     const end = t + ms;
@@ -438,14 +438,14 @@ function harness(over) {
   }
   // 33. two failed re-attaches: Restart Session as the LAST resort, never while the agent works
   {
-    const x = harness({ reattach: true, reattachFails: 2 });
+    const x = harness({ reattach: true, reattachFails: 1, reconnectFails: 1 });  // attempt 1: client re-spawn fails; attempt 2: fresh attach fails
     x.h.sessions[P] = "real";
     x.ch.deadAttach(P, "dashboard"); for (let i = 0; i < 20; i++) await Promise.resolve(); await x.advance(5000);
-    assert.strictEqual(x.calls.reattach, 2); assert.strictEqual(x.calls.restart, 1);
-    const y = harness({ reattach: true, reattachFails: 2, working: true });
+    assert.strictEqual(x.calls.reattach, 1); assert.strictEqual(x.calls.reconnect, 1); assert.strictEqual(x.calls.restart, 1);
+    const y = harness({ reattach: true, reattachFails: 1, reconnectFails: 1, working: true });
     y.h.sessions[P] = "real";
     y.ch.deadAttach(P, "dashboard"); for (let i = 0; i < 20; i++) await Promise.resolve(); await y.advance(5000);
-    assert.strictEqual(y.calls.reattach, 2); assert.strictEqual(y.calls.restart, 0);
+    assert.strictEqual(y.calls.reattach, 1); assert.strictEqual(y.calls.restart, 0);
     assert.strictEqual(y.ch.getState(P).state, "reconnecting");
     assert.ok(y.logs.some((l) => /agent is working: no Restart Session/.test(l)));
   }
@@ -484,6 +484,21 @@ function harness(over) {
     await x.advance(30000);
     assert.deepStrictEqual(x.calls.guards, ["ctrlc"]);
   }
+
+
+  // 38. round 4 M2: "busy" from reattachClient is neither a failure nor a reason for Restart Session
+  {
+    const x = harness({ reattach: true, reattachBusy: 3 });
+    x.h.sessions[P] = "real";
+    x.ch.deadAttach(P, "kicked"); for (let i = 0; i < 20; i++) await Promise.resolve(); await x.advance(10000);
+    assert.strictEqual(x.calls.reattach, 4); assert.strictEqual(x.calls.restart, 0); assert.strictEqual(x.ch.getState(P).state, "connected");
+    const y = harness({ reattach: true, reattachBusy: 99 });
+    y.h.sessions[P] = "real";
+    y.ch.deadAttach(P, "kicked"); for (let i = 0; i < 20; i++) await Promise.resolve(); await y.advance(30000);
+    assert.strictEqual(y.calls.restart, 0); assert.strictEqual(y.calls.reconnect, 0); assert.strictEqual(y.ch.getState(P).state, "connected");
+    assert.ok(y.logs.some((l) => /still running/.test(l)));
+  }
+
 
   console.log("connectionHealth ok");
 })().catch((e) => { console.error(e); process.exit(1); });

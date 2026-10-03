@@ -56,7 +56,7 @@ assert.strictEqual(DS.inputHolds("Press up to edit queued messages\n...\n> fresh
 // log helper: bounded, ANSI free
 {
   const l = DS.lastLines(F.stuck, 25, 1500);
-  assert.ok(l.length <= 1500 && !/\x1b/.test(l) && /summarise it/.test(l));
+  assert.ok(l.length <= 1500 && !/\x1b/.test(l) && !/summarise it/.test(l) && /\[box\]/.test(l) && /manual mode/.test(l), l); // the box content never reaches the log; footer/status stay
   assert.ok(DS.lastLines("x\n".repeat(5000), 25, 300).length <= 300);
 }
 // trailing backslash
@@ -107,5 +107,26 @@ assert.strictEqual(DS.attachEvidence(tailOf(F.ctrlCAgain)), null);   // "Press C
   const l = DS.lastLines("token=abc123supersecret\n> please read the status report now\nand then summarise it\nfooter", 25, 1500, "please read the status report now\nand then summarise it");
   assert.ok(!/abc123supersecret/.test(l) && !/status report/.test(l) && !/summarise it/.test(l) && /\[msg\]/.test(l) && /footer/.test(l), l);
   assert.ok(!/sk-[A-Za-z0-9]{20}/.test(DS.redactSecrets("key sk-ABCDEFGHIJKLMNOPQRST here")));
+}
+
+// round 4 privacy: a WRAPPED long message (CLI wrap + indent) and a spaces-stripped screen must not leak into the log
+{
+  const msg = "please email the quarterly invoice summary to the accountant and then archive the old thread so nothing is left in the inbox";
+  const wrapped = "\u2500".repeat(30) + "\n\u276f please email the quarterly invoice summary to the\n  accountant and then archive the old thread so nothing\n  is left in the inbox\n" + "\u2500".repeat(30) + "\n  Haiku 4.5 \u00b7 status line";
+  const l1 = DS.lastLines(wrapped, 25, 1500, msg);
+  assert.ok(!/invoice|accountant|archive|inbox/.test(l1) && /Haiku/.test(l1), l1);
+  const stripped = "some tool output\nplease" + "email" + "thequarterlyinvoicesummarytotheaccountant\nandthenarchivetheoldthread\nfooter line";   // cursor-forward moves ate the spaces; no box rules
+  const l2 = DS.lastLines(stripped, 25, 1500, msg);
+  assert.ok(!/invoice|archive/.test(l2) && /footer line/.test(l2) && /tool output/.test(l2), l2);
+  // a draft sitting in the box with NO message known (Terminal-tab path) is masked too
+  const l3 = DS.lastLines("\u2500".repeat(30) + "\nmy secret draft text\n" + "\u2500".repeat(30) + "\nstatus", 25, 1500);
+  assert.ok(!/draft/.test(l3) && /status/.test(l3), l3);
+}
+// round 4 M1: an agent that merely PRINTS the phrases is not evidence (the CLI box / status follow it); a dead client's screen ends with them
+{
+  const printed = "I read the report: Session opened in another window and enter to return appear in it.\n" + "\u2500".repeat(40) + "\n\u276f \n" + "\u2500".repeat(40) + "\n  Haiku 4.5 \u00b7 status\n";
+  assert.strictEqual(DS.attachEvidence(printed), null);
+  assert.strictEqual(DS.attachEvidence("Session opened in another window\r\n" + "x ".repeat(200)), null); // more output after it: not the last thing on screen
+  assert.strictEqual(DS.attachEvidence("\rSession opened in another window\r\n"), "kicked");
 }
 console.log("deliveryScreen ok");

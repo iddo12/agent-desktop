@@ -325,13 +325,29 @@ function create(deps, opts) {
     a.reattaching = true; a.state = "restarting"; a.since = now(); a.reason = "re-attaching the terminal link";
     emit(a);
     (async () => {
-      let ok = false;
-      for (let i = 0; i < 2 && !ok; i++) {
-        try { ok = !!(await deps.reattachClient(p, reason)); } catch (e) { log(`dead-attach: ${p} re-attach #${i + 1} threw: ${e && e.message}`); }
-        if (!ok && i === 0) await new Promise((res) => unref(setT(res, 2000)));
+      // attempt 1: re-spawn the attach client. "busy" (another re-attach / a placeholder is in flight) is neither a success nor a
+      // failure: wait and look again, never escalate because of it. attempt 2: a fresh attach through the normal reconnect path.
+      let ok = false, busyGaveUp = false;
+      for (let attempt = 0; attempt < 2 && !ok && !busyGaveUp; attempt++) {
+        for (let busy = 0; ; busy++) {
+          let r = false;
+          try {
+            if (attempt === 0) r = await deps.reattachClient(p, reason);
+            else { await withTimeout(deps.reconnect(p, a.size), o.opTimeoutMs, "reconnect"); r = true; }
+          } catch (e) { log(`dead-attach: ${p} re-attach #${attempt + 1} failed: ${e && e.message}`); r = false; }
+          if (r === "busy") {
+            if (busy >= 5) { busyGaveUp = true; break; }
+            await new Promise((res) => unref(setT(res, 2000)));
+            continue;
+          }
+          ok = r === true;
+          break;
+        }
+        if (!ok && !busyGaveUp && attempt === 0) await new Promise((res) => unref(setT(res, 1000)));
       }
       a.reattaching = false;
       if (ok) { log(`dead-attach: ${p} re-attached OK`); onConnected(p); return; }
+      if (busyGaveUp) { log(`dead-attach: ${p} another re-attach is still running after 10 s: leaving it (no escalation)`); a.state = "connected"; emit(a); return; }
       let w = false;
       try { w = !!(deps.isWorking && deps.isWorking(p)); } catch (e) {}
       if (w) { log(`dead-attach: ${p} two re-attaches failed but the agent is working: no Restart Session, retrying with backoff`); a.state = "reconnecting"; a.attempts = 0; schedule(a); emit(a); return; }
