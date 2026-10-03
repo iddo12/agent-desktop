@@ -646,7 +646,47 @@ pauseAgentBtn.addEventListener("click", () => {
   if (agent) toggleAgentPaused(agent);
 });
 
+// Per-agent compose draft (v1.64.3): the compose box and its attachment chips belong to the agent you
+// were typing to. Switching agents parks the unsent text + attachments under the old agent and restores
+// the new agent's own (empty if none). In memory, plus localStorage (debounced) so a restart keeps them.
+const composeDrafts = new Map(); // agentPath -> { text, attachments }
+const COMPOSE_DRAFTS_KEY = "composeDrafts";
+try {
+  const saved = JSON.parse(localStorage.getItem(COMPOSE_DRAFTS_KEY) || "{}");
+  for (const k of Object.keys(saved)) if (saved[k]) composeDrafts.set(k, { text: String(saved[k]), attachments: [] });
+} catch (e) {}
+function persistComposeDrafts() {
+  try {
+    const o = {};
+    for (const [k, v] of composeDrafts) if (v.text) o[k] = v.text;
+    localStorage.setItem(COMPOSE_DRAFTS_KEY, JSON.stringify(o));
+  } catch (e) {}
+}
+function parkComposeDraft(path) {
+  if (!path) return;
+  const text = chatInputEl.value;
+  if (text || pendingAttachments.length) composeDrafts.set(path, { text, attachments: pendingAttachments });
+  else composeDrafts.delete(path);
+  persistComposeDrafts();
+}
+function restoreComposeDraft(path) {
+  const d = composeDrafts.get(path);
+  chatInputEl.value = d ? d.text : "";
+  pendingAttachments = d ? d.attachments : [];
+  renderAttachments();
+  autoGrowChatInput();
+}
+let composeDraftTimer = null;
+chatInputEl.addEventListener("input", () => {
+  clearTimeout(composeDraftTimer);
+  composeDraftTimer = setTimeout(() => parkComposeDraft(activeAgentPath), 600);
+});
+
 function selectAgent(agent) {
+  if (activeAgentPath !== agent.path) {
+    parkComposeDraft(activeAgentPath);
+    restoreComposeDraft(agent.path);
+  }
   activeAgentPath = agent.path;
   localStorage.setItem("lastSelectedAgentPath", agent.path);
   renderAgentList();
@@ -3277,8 +3317,7 @@ function autoGrowChatInput() {
 // Dropped or pasted images/files show up as small removable thumbnail chips
 // above the textarea, matching how a normal chat interface previews an
 // attachment before send, rather than sitting in the textarea as raw quoted
-// path text. Not scoped per-agent (same as chatInputEl's own text, which
-// already isn't cleared on agent switch) - one compose box, one draft.
+// path text. Per-agent since v1.64.3 (see composeDrafts in selectAgent).
 let pendingAttachments = []; // { path, previewUrl }
 
 function mimeToExt(mime) {
@@ -3552,6 +3591,8 @@ async function sendChatInput() {
 
   chatInputEl.value = "";
   clearAttachments();
+  clearTimeout(composeDraftTimer);
+  parkComposeDraft(activeAgentPath); // sent: drop this agent's saved draft (box is empty now)
   chatInputManualFloor = 0; // a fresh message starts from the default size again
   setChatInputHeight(CHAT_INPUT_DEFAULT_HEIGHT);
   chatInputEl.focus();
