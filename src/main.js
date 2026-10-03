@@ -3031,15 +3031,23 @@ const connHealth = require("./connectionHealth").create({
   screenState: (agentPath, snippet) => screenStateFor(agentPath, snippet),
 });
 // v1.69.4: what the agent's screen shows right now, for the ladder and the failure log
+// v1.69.4: null = the attach pty looks alive, else why not (deliveryScreen.attachHealth)
+function attachHealthFor(agentPath) {
+  const s = ptySessions.get(agentPath);
+  if (s && s.starting) return null;
+  return deliveryScreen.attachHealth({ alive: !!(s && s.proc), now: Date.now(), attachedAt: s && s.attachedAt, dataBytes: s && s.dataBytes });
+}
 function screenStateFor(agentPath, snippet) {
   const tail = dialogTails.get(agentPath) || "";
   const s = ptySessions.get(agentPath);
   const dead = !s || !s.proc;
+  const deadAttach = dead ? null : attachHealthFor(agentPath);
   let working = false;
   try { const act = getSessionActivity(sessionCwdFor(agentPath)); working = !!(act && act.working); } catch (e) {}
   const DS = deliveryScreen;
   return {
-    cause: DS.classify(tail, snippet, { deadPty: dead, working }),
+    cause: DS.classify(tail, snippet, { deadPty: dead, working, deadAttach }),
+    deadAttach, stacked: DS.stackedNewlines(tail, snippet),
     holds: !dead && inputHoldsUnsentText(agentPath, snippet),
     dialog: promptLikelyOpen(agentPath), queued: DS.isQueued(tail, snippet),
     working: working || DS.isWorkingScreen(tail, snippet),
@@ -3911,6 +3919,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
       mainWindow.webContents.send("terminal-data", { agentPath, data });
     }
     try { trackDialog(agentPath, data); } catch (e) { /* best effort */ }
+    { const ps = ptySessions.get(agentPath); if (ps && ps.proc === proc) ps.dataBytes = (ps.dataBytes || 0) + data.length; } // v1.69.4 liveness
     if (pendingInput && pendingInput.length) {
       clearTimeout(flushIdleTimer);
       flushIdleTimer = setTimeout(flushPendingInput, FLUSH_IDLE_MS);
@@ -3931,7 +3940,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     handlePtyExit(agentPath, isReattachAttempt);
   });
 
-  ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows });
+  ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows, attachedAt: Date.now(), dataBytes: peekBuffer ? peekBuffer.length : 0 });
   connHealth.onConnected(agentPath, { delayMs: pendingInput && pendingInput.length ? 5000 : 0 });
 }
 
@@ -4085,6 +4094,28 @@ ipcMain.handle("clear-stale-input", (event, { agentPath, text }) => {
     return true;
   } catch (e) { return false; }
 });
+// v1.69.4: the Terminal tab was opened and its xterm buffer is empty. If the pty is alive, nudge a redraw (resize probe);
+// no new output within 1.5 s and the agent is not working -> the attach is dead: re-attach (Restart Session path).
+const blankCheckAt = new Map();
+ipcMain.handle("terminal-blank-check", async (event, { agentPath }) => {
+  try {
+    const s = ptySessions.get(agentPath);
+    if (!s || !s.proc || s.starting) return "no-session";
+    if (connHealth.getState(agentPath).state !== "connected") return "reconnecting";
+    if (Date.now() - (blankCheckAt.get(agentPath) || 0) < 60000) return "recent";
+    blankCheckAt.set(agentPath, Date.now());
+    const before = s.dataBytes || 0;
+    const cols = s.cols || 120, rows = s.rows || 30;
+    try { s.proc.resize(cols, Math.max(5, rows - 1)); await new Promise((r) => setTimeout(r, 150)); s.proc.resize(cols, rows); } catch (e) {}
+    await new Promise((r) => setTimeout(r, 1500));
+    if ((s.dataBytes || 0) > before) return "redrawn";
+    let working = false;
+    try { const act = getSessionActivity(sessionCwdFor(agentPath)); working = !!(act && act.working); } catch (e) {}
+    if (working) return "working";
+    logStuckWatchdog(`dead-attach: ${agentPath} - blank Terminal tab and no redraw after a resize probe; re-attaching. screen: ${deliveryScreen.lastLines(dialogTails.get(agentPath) || "", 25, 1200)}`.slice(0, 2400));
+    return connHealth.deadAttach(agentPath, "blank Terminal tab, no redraw after a resize probe") ? "reattaching" : "not-restarted";
+  } catch (e) { return "error"; }
+});
 ipcMain.handle("agent-dialog-open", (event, { agentPath }) => promptLikelyOpen(agentPath)); // v1.65.0: mid-turn send must not type into a permission prompt
 ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents({ noAvatar: true }), sessionCwdFor, dialogOpenFor));
 // ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
@@ -4226,6 +4257,13 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text, info }) => {
       execFile(sess.shell, ["logs", id], { windowsHide: true, timeout: 8000, env: sess.spawnEnv, maxBuffer: 1024 * 1024 }, (err, stdout) => {
         const tail = stripTerminalCodes(String(stdout || "")).replace(/\s+/g, " ").trim().slice(-500);
         logStuckWatchdog(`notify-send-failed: ${agentPath} claude logs ${id} tail: ${err && !tail ? "(unavailable: " + err.message + ")" : tail}`);
+        // v1.69.4: the CLI itself shows the text (claude logs) but our attach screen does not = dead / blank attach
+        try {
+          const want = deliveryScreen.squash(String(text || "")).slice(-40);
+          if (want.length >= 3 && deliveryScreen.squash(tail).includes(want) && !deliveryScreen.hasSnippet(dialogTails.get(agentPath) || "", want)) {
+            logStuckWatchdog(`notify-send-failed: ${agentPath} cause=dead-attach (claude logs shows the message text, the attach screen does not) screen: ${deliveryScreen.lastLines(dialogTails.get(agentPath) || "", 25, 1000)}`.slice(0, 2400));
+          }
+        } catch (e) {}
       });
     }
   } catch (e) { /* diagnostics only */ }
@@ -4410,6 +4448,18 @@ ipcMain.on("terminal-input", (event, { agentPath, data, app: fromApp }) => {
   if (session.starting) {
     session.pendingInput.push(data);
     return;
+  }
+  // v1.69.4: liveness check BEFORE a message is typed: a dead / blank attach pty swallows it (live 2026-10-04). Re-attach first
+  // (Restart Session path); this message and its end marker / Enter are queued and replayed into the fresh session.
+  if (fromApp && String(data).indexOf("\x1b[200~") === 0 && String(data).length > 6) {
+    const why = attachHealthFor(agentPath);
+    if (why && connHealth.getState(agentPath).state === "connected") {
+      logStuckWatchdog(`dead-attach: ${agentPath} - before sending: ${why}; re-attaching first. screen: ${deliveryScreen.lastLines(dialogTails.get(agentPath) || "", 25, 1200)}`.slice(0, 2400));
+      if (!lateInputs.has(agentPath)) lateInputs.set(agentPath, []);
+      lateInputs.get(agentPath).push(data);
+      if (connHealth.deadAttach(agentPath, "before send: " + why)) return;
+      lateInputs.get(agentPath).pop(); // no restart started (cap reached / session not real): write it normally below
+    }
   }
   if (fromApp) connHealth.noteWrite(agentPath, data); // v1.68.1: only the app's own message writes, never Terminal-tab typing/pastes
   if (testMode.TEST_MODE && fs.existsSync(testFaultFile("mute-" + path.basename(agentPath)))) return; // sandbox: simulate a dead pty

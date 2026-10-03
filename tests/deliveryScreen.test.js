@@ -63,4 +63,26 @@ assert.strictEqual(DS.inputHolds("Press up to edit queued messages\n...\n> fresh
 assert.strictEqual(DS.fixTrailingBackslash("path C:\\temp\\"), "path C:\\temp\\ ");
 assert.strictEqual(DS.fixTrailingBackslash("no slash"), "no slash");
 assert.strictEqual(DS.fixTrailingBackslash("ends with space \\ "), "ends with space \\ ");
+
+// v1.69.4 dead attach: liveness decision with fakes
+{
+  const now = 1000000;
+  const base = { alive: true, now, attachedAt: now - 60000, dataBytes: 5000 };
+  assert.strictEqual(DS.attachHealth(base), null);
+  assert.strictEqual(DS.attachHealth(Object.assign({}, base, { alive: false })), "pty-gone");
+  assert.strictEqual(DS.attachHealth(Object.assign({}, base, { dataBytes: 0 })), "no-output-since-attach");
+  assert.strictEqual(DS.attachHealth(Object.assign({}, base, { dataBytes: 0, attachedAt: now - 3000 })), null); // fresh attach still drawing
+}
+// the stuck multi-line box fixture: Enter went in as a newline (text, blank line, rule)
+assert.strictEqual(DS.stackedNewlines(tailOf(F.stuck), SNIP), true);
+assert.strictEqual(DS.stackedNewlines(tailOf(F.empty), SNIP), false);
+assert.strictEqual(DS.stackedNewlines("> text here\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500", "text here"), false); // normal box: one newline only
+// dead attach: `claude logs` (the CLI is fine, text in its box) vs the attach screen being blank. The attach tail is empty,
+// the logs text is the stuck fixture; classification names it dead-attach
+{
+  const logsText = DS.stripTerminalCodes(F.stuck);
+  assert.ok(DS.hasSnippet(logsText, SNIP) && !DS.hasSnippet("", SNIP));
+  assert.strictEqual(DS.classify("", SNIP, { deadAttach: "no-output-since-attach" }), "dead-attach");
+  assert.strictEqual(DS.classify(tailOf(F.stuck), SNIP, { deadPty: true, deadAttach: "x" }), "dead-pty");
+}
 console.log("deliveryScreen ok");

@@ -260,7 +260,10 @@ function create(deps, opts) {
       return;
     }
     if (working || st.working || st.queued || st.dialog) { ladderLog(p, a, `stopped at step ${step}: agent is working, the CLI queued the message or a dialog is open`, st); return; }
+    if (st.deadAttach) { ladderLog(p, a, `dead-attach (${st.deadAttach}): re-attaching instead of typing keys`, st); deadAttach(p, st.deadAttach); return; }
     if (!st.holds) { ladderLog(p, a, `stopped at step ${step}: the text is no longer in the input box`, st); return; }
+    // Enters inserted as newlines even after step a and b: not a stuck paste, a dead link
+    if (step === 3 && st.stacked) { ladderLog(p, a, "dead-attach: Enter keys keep landing as newlines after steps a and b; re-attaching", st); deadAttach(p, "Enter keys insert newlines, text stays in the box"); return; }
     a.ladderRan = true;
     if (step === 1) {
       ladderLog(p, a, "step a: end-of-paste marker then Enter", st);
@@ -291,6 +294,19 @@ function create(deps, opts) {
     ladderLog(p, a, "box empty after Ctrl+C; re-sending the message", st);
     deps.sendKeys(p, [{ data: "\x1b[200~" + text, wait: 30 }, { data: "\x1b[201~", wait: 200 }, { data: "\r", wait: 0 }]);
     ladderNext(p, a, 4, o.ladderGapMs + 1500);
+  }
+
+  // v1.69.4: the attach pty itself is dead or blank (see deliveryScreen.attachHealth). Restart the session (same path as
+  // Session > Restart Session: the stuck input is discarded, the fresh CLI has an empty box). A message that was written
+  // and is not in the transcript is handed back to the renderer's queue by recover() (requeueSince), so it is sent once.
+  // Returns true when a restart is now running (the caller must queue, not write, further input).
+  function deadAttach(p, reason) {
+    const a = get(p);
+    if (a.state !== "connected") return false;
+    if (a.unackedSince != null && ackState(p, a) === true) return false; // it landed after all
+    log(`dead-attach: ${p} - ${String(reason).slice(0, 300)}`);
+    recover(p, "dead attach: " + reason);
+    return a.state === "restarting";
   }
 
   // Kept as a cheap hook: an idle CLI redraws its status line now and then, so "any output" proves nothing.
@@ -388,7 +404,7 @@ function create(deps, opts) {
   function getAll() { return Array.from(agents.values()).filter((a) => a.state !== "connected").map(snapshot); }
   function forget(p) { const a = agents.get(p); if (a) { clearT(a.timer); clearT(a.deadTimer); clearT(a.stuckTimer); clearT(a.ladderTimer); agents.delete(p); } }
 
-  return { onAttachFailed, onConnected, noteWrite, noteData, afterStuckRecovery, getState, getAll, forget, _recover: recover, NUDGE_TEXT };
+  return { deadAttach, onAttachFailed, onConnected, noteWrite, noteData, afterStuckRecovery, getState, getAll, forget, _recover: recover, NUDGE_TEXT };
 }
 
 module.exports = { create, DEFAULTS, NUDGE_TEXT };

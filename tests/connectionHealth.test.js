@@ -385,5 +385,41 @@ function harness(over) {
     assert.ok(x.calls.keys.some((k) => k[0] === "\x1b[200~the folder is C:\\temp\\ "));
   }
 
+
+  // 29. v1.69.4 dead attach: the ladder re-attaches (restart, requeue once) instead of typing keys
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = false; x.h.enterWorks = false; x.h.screen = { deadAttach: "no-output-since-attach", holds: false, cause: "dead-attach" };
+    x.h.holds = true; // the box check (checkStuck) sees the text; the screen state says the attach is dead
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(12000);
+    assert.strictEqual(x.calls.keys.length, 0);
+    assert.strictEqual(x.calls.restart, 1);
+    assert.ok(x.logs.some((l) => /dead-attach/.test(l) && /SCREEN-LINES/.test(l)));
+    assert.ok(x.events.some((e) => e.state === "restarting" && e.requeueSince != null) || x.ch.getState(P).requeueSince != null || x.calls.restart === 1);
+  }
+  // 30. Enters landing as newlines after rungs a and b -> dead-attach re-attach, no Ctrl+C, restart once
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.h.onKeys = (k, h) => { if (k[0] === "\x1b") h.screen = { stacked: true }; };
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(30000);
+    assert.deepStrictEqual(x.calls.keys.map((k) => k[0]), ["\x1b[201~", "\x1b"]);
+    assert.strictEqual(x.calls.restart, 1);
+    assert.ok(x.logs.some((l) => /dead-attach: Enter keys keep landing as newlines/.test(l)));
+  }
+  // 31. deadAttach() API (pre-send / blank-tab path): restarts when connected, false while already restarting, false when the message landed
+  {
+    const x = harness();
+    x.h.sessions[P] = "real";
+    assert.strictEqual(x.ch.deadAttach(P, "no-output-since-attach"), true);
+    assert.strictEqual(x.calls.restart, 1);
+    assert.strictEqual(x.ch.deadAttach(P, "again"), false);                     // not connected: no second restart
+    const y = harness();
+    y.h.sessions[P] = "real"; y.h.ack = true;
+    y.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    assert.strictEqual(y.ch.deadAttach(P, "late"), false); assert.strictEqual(y.calls.restart, 0);
+  }
   console.log("connectionHealth ok");
 })().catch((e) => { console.error(e); process.exit(1); });

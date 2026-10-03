@@ -44,9 +44,31 @@ function inputHolds(tail, snippet) {
   return !isDialog(tail, snippet) && !isQueued(tail, snippet) && !isWorkingScreen(tail, snippet);
 }
 
-// cause for the logs: queued / dialog / unsent-box / box-empty-no-ack / dead-pty
+// v1.69.4: is the `claude attach` pty itself alive and showing the CLI? Live case 2026-10-04 (SE + COO agents): the
+// Terminal tab was BLANK, typing did nothing, while `claude logs <id>` showed a healthy idle CLI with the message sitting
+// in its input box. Cheap signals only, all already known to main: pty object gone; no output at all since the attach
+// (a healthy attach always redraws the CLI). Returns null (looks alive) or a reason string.
+// o: { alive, now, attachedAt, dataBytes, graceMs }  (dataBytes is seeded with the attach peek buffer: an idle CLI draws once)
+function attachHealth(o) {
+  if (!o.alive) return "pty-gone";
+  if (o.now - (o.attachedAt || 0) < (o.graceMs == null ? 15000 : o.graceMs)) return null; // a fresh attach is still drawing
+  if (!o.dataBytes) return "no-output-since-attach";
+  return null;
+}
+// The typed text is followed by blank line(s) before the box's bottom rule: Enter keys went in as newlines.
+function stackedNewlines(tail, snippet) {
+  const t = stripTerminalCodes(tail);
+  const want = String(snippet || "").trim().slice(-20);
+  if (want.length < 3) return false;
+  const i = t.lastIndexOf(want);
+  if (i < 0) return false;
+  return /^[ \t]*(\r?\n[ \t]*){2,}\u2500{5}/.test(t.slice(i + want.length));
+}
+
+// cause for the logs: queued / dialog / unsent-box / box-empty-no-ack / dead-pty / dead-attach
 function classify(tail, snippet, o) {
   if (o && o.deadPty) return "dead-pty";
+  if (o && o.deadAttach) return "dead-attach";
   if (isDialog(tail, snippet)) return "dialog";
   if (isQueued(tail, snippet) || (o && o.working) || isWorkingScreen(tail, snippet)) return "queued";
   if (hasSnippet(tail, snippet)) return "unsent-box";
@@ -62,4 +84,4 @@ function lastLines(tail, n, maxChars) {
 // a message ending in a backslash would insert a newline instead of submitting
 const fixTrailingBackslash = (text) => (/\\$/.test(String(text)) ? text + " " : text);
 
-module.exports = { stripTerminalCodes, squash, isDialog, isQueued, isWorkingScreen, ctrlCAgainShown, hasSnippet, inputHolds, classify, lastLines, fixTrailingBackslash };
+module.exports = { attachHealth, stackedNewlines, stripTerminalCodes, squash, isDialog, isQueued, isWorkingScreen, ctrlCAgainShown, hasSnippet, inputHolds, classify, lastLines, fixTrailingBackslash };

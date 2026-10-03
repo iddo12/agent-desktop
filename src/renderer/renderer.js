@@ -905,6 +905,14 @@ function showTerminalFor(agent) {
     // itself is still directly focusable by clicking into it (e.g. for quick
     // menu/keystroke interactions like the theme picker or y/n prompts).
     chatInputEl.focus();
+    // v1.69.4: a blank Terminal for a live session = dead / stale attach: ask main to nudge a redraw or re-attach
+    setTimeout(() => {
+      try {
+        const b = session.term.buffer.active;
+        for (let y = 0; y < b.length; y++) { const l = b.getLine(y); if (l && l.translateToString(true).trim()) return; }
+        if (session.started) window.api.terminalBlankCheck(agent.path).catch(() => {});
+      } catch (e) { /* diagnostics only */ }
+    }, 2500);
   });
 }
 
