@@ -543,6 +543,7 @@ function readActivitySummary(sessionCwd) {
   return { lastHumanTs: best.lastHumanTs, lastEndTurnTs: best.lastEndTurnTs, last: best.last, lastSessionId: best.lastSessionId };
 }
 
+const pidCheckMemo = new Map(); // sessionId -> { t, alive } - the daemon pid-file probe, at most once per 3 s per session
 function finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId) {
   let working = !!last && !last.done;
 
@@ -565,7 +566,10 @@ function finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId) 
   // flips working from true to false, never the other way, and any error
   // reading/checking the pid file leaves the transcript's own answer alone
   // rather than risk a false "not working" for an agent that's actually fine.
-  if (working && lastSessionId) {
+  const pidHit = working && lastSessionId ? pidCheckMemo.get(lastSessionId) : null;
+  if (pidHit && Date.now() - pidHit.t < 3000) {
+    if (!pidHit.alive) working = false; // v1.68.0: checked within the last 3 s
+  } else if (working && lastSessionId) {
     try {
       const daemonShort = String(lastSessionId).split("-")[0];
       const pidFile = path.join(os.homedir(), ".claude", "daemon", "pty-pids", `${daemonShort}.pid`);
@@ -584,6 +588,7 @@ function finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId) 
     } catch (e) {
       // Leave the transcript-based answer as-is - see the conservative note above.
     }
+    pidCheckMemo.set(lastSessionId, { t: Date.now(), alive: working });
   }
 
   let startTs = null;
