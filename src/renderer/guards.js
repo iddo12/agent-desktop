@@ -306,6 +306,7 @@
         if (t && window.guardUsageIsStale(a.path, u)) t = 0;
         // v1.54.3: re-arm once the agent is back under the warning line (a real, finished reset).
         if (t && t < CONTEXT_WARN_TOKENS) { autoHandedOff.delete(a.path); forcedInterrupts.delete(a.path); attachFailedAt.delete(a.path); }
+        nearHandoff.set(a.path, t >= AUTO_HANDOFF_TOKENS);
         if (t >= AUTO_HANDOFF_TOKENS) eligible.push({ a, t });
         else if (raw >= AUTO_HANDOFF_TOKENS) glog(a.displayName, "stale", a.displayName + " " + Math.round(raw / 1000) + "K: skipped, usage predates our last reset (stale)");
       } catch (e) { /* one agent's hiccup must not stop the sweep */ }
@@ -389,6 +390,7 @@
   // had arrived. A working agent has the message; it is simply busy with it.
   const RESUME_MAX_WAIT_MS = 5 * 60 * 1000;
 
+  const nearHandoff = new Map(); // agentPath -> over AUTO_HANDOFF_TOKENS at the last sweep (v1.65.0: such agents keep user messages in the app queue so parkQueue can park them before the forced Esc)
   const flows = new Map(); // agentPath -> { phase, startedAt, error, quietPolls }
   const pendingResume = new Map(); // agentPath -> { text, path, readySince, sentAt, tries }
   const dismissedAt = new Map(); // agentPath -> token count when "Later" was clicked
@@ -996,7 +998,7 @@
   }
   // v1.58.0: read by app-update-overlay.js - Update & restart waits while a
   // handoff is mid-flight (a restart would cut it between reset and resume).
-  window.guardsAgentInFlow = (ap) => flows.has(ap) || pendingResume.has(ap) || !!(allRun && !allRun.finished); // v1.65.0
+  window.guardsAgentInFlow = (ap) => flows.has(ap) || pendingResume.has(ap) || !!nearHandoff.get(ap) || !!(allRun && !allRun.finished); // v1.65.0
   window.guardsBusyReason = () => {
     if (allRun && !allRun.finished) return "\"Handoff all\" is running";
     if (flows.size) return "a handoff is in progress";

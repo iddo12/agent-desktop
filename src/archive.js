@@ -249,8 +249,10 @@ function slimEntry(obj) {
   }
   // The CLI logs "enqueue" the moment it RECEIVES input (also mid-turn), long before the agent reads it.
   // That is proof of delivery for the pending bubble, so it is kept as a hidden "queued" entry.
-  if (obj.type === "queue-operation" && obj.operation === "enqueue" && typeof obj.content === "string") {
-    return { type: "queue-enqueue", timestamp: obj.timestamp, content: obj.content };
+  if (obj.type === "queue-operation" && (obj.operation === "enqueue" || obj.operation === "remove") && typeof obj.content === "string") {
+    // memory: keep head and tail only (receipt matching needs the exact short text or the last 80 chars)
+    const c = obj.content.length > 1500 ? obj.content.slice(0, 600) + " ... " + obj.content.slice(-600) : obj.content;
+    return { type: obj.operation === "remove" ? "queue-remove" : "queue-enqueue", timestamp: obj.timestamp, content: c };
   }
   return null; // other entry types never produce blocks
 }
@@ -342,7 +344,8 @@ function computeLiveTranscriptBlocks(sessionCwd) {
   // the History view is for. A manual, no-handoff Reset Session has no
   // role:"reset" first block and is untouched: it still wipes clean, because
   // that one *is* meant to read as a deliberate fresh start.
-  if (blocks.length && blocks[0].role === "reset" && files.length > 1) {
+  const firstReal = blocks.find((b) => b.role !== "queued" && b.role !== "queued-removed");
+  if (firstReal && firstReal.role === "reset" && files.length > 1) {
     blocks = blocksFromEntries(files[1].entries).concat(blocks);
   }
 
@@ -365,9 +368,9 @@ function blocksFromEntries(fileEntries) {
       if (text && text.startsWith(HANDOFF_RESUME_TAG)) {
         blocks.push({ role: "reset", lines: [lessonsForResume(text)], timestamp: obj.timestamp });
       } else if (text) blocks.push({ role: "user", lines: [text], timestamp: obj.timestamp });
-    } else if (obj.type === "queue-enqueue") {
+    } else if (obj.type === "queue-enqueue" || obj.type === "queue-remove") {
       const qt = String(obj.content || "").replace(/<\/?pasted_content[^>]*>/g, "").trim();
-      if (qt) blocks.push({ role: "queued", lines: [qt], timestamp: obj.timestamp });
+      if (qt) blocks.push({ role: obj.type === "queue-remove" ? "queued-removed" : "queued", lines: [qt], timestamp: obj.timestamp });
     } else if (obj.type === "assistant" && obj.message && Array.isArray(obj.message.content)) {
       // Caught live (2026-08-19): a `model:"<synthetic>"` entry is Claude
       // Code's own internal harness bookkeeping (seen once with the literal

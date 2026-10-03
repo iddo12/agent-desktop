@@ -1907,7 +1907,8 @@ async function rebuildChatView(agentPath, opts = {}) {
   if (agentPath !== activeAgentPath || terminals.get(agentPath) !== session) return; // stale by the time the IPC round-trip finished
   // v1.65.0: "queued" blocks are the CLI's receipt of input (see archive.js); they prove delivery, never drawn.
   const queuedBlocks = (allBlocks || []).filter((b) => b.role === "queued");
-  const blocks = (allBlocks || []).filter((b) => b.role !== "queued");
+  const removedBlocks = (allBlocks || []).filter((b) => b.role === "queued-removed");
+  const blocks = (allBlocks || []).filter((b) => b.role !== "queued" && b.role !== "queued-removed");
 
   // Authoritative "is the agent still working" signal, from the transcript
   // (see getSessionActivity in archive.js) - reliable through quiet stretches
@@ -1997,18 +1998,43 @@ async function rebuildChatView(agentPath, opts = {}) {
     // v1.65.0: the CLI logs a receipt the moment input reaches it, mid-turn included, long before the
     // agent reads it at its next step. A receipt is proof the message is safely queued: never call it
     // lost, never offer a Resend (which would duplicate it). Gives up only after MIDTURN_RECEIVED_MAX_MS.
-    if (!pending.received) {
+    const isSlash = pending.text.trim().startsWith("/");
+    if (!pending.received && !isSlash) {
       const sentAtR = pending.sentAt || pending.addedAt;
       const want = normalizeForMatch(pending.text);
       const fp = want.slice(-80).trim();
-      if (queuedBlocks.some((q) => {
-        if (!q.timestamp || new Date(q.timestamp).getTime() < sentAtR - 2000) return false;
+      // each receipt belongs to ONE pending message (two identical "yes" must not share one)
+      const usedReceipts = new Set(session.pendingSent.filter((p) => p !== pending && p.receiptTs).map((p) => p.receiptTs));
+      const hit = queuedBlocks.find((q) => {
+        if (!q.timestamp || usedReceipts.has(q.timestamp) || new Date(q.timestamp).getTime() < sentAtR - 2000) return false;
         const n = normalizeForMatch(q.lines.join(" "));
         return n === want || (fp.length >= 30 && n.includes(fp));
-      })) {
+      });
+      if (hit) {
         pending.received = true;
+        pending.receiptTs = hit.timestamp;
         pending.failed = false;
         pending.superseded = false;
+      }
+    }
+    // The CLI also logs "remove" - normally right before the agent reads the message (a user entry
+    // follows within a second), but a "remove" with no user entry after 15 s means the queued text was
+    // withdrawn (e.g. Esc popped it back into the input box): it was NOT delivered.
+    if (pending.received && pending.receiptTs) {
+      const want2 = normalizeForMatch(pending.text);
+      const fp2 = want2.slice(-80).trim();
+      const gone = removedBlocks.some((q) => {
+        if (!q.timestamp || new Date(q.timestamp).getTime() < new Date(pending.receiptTs).getTime()) return false;
+        if (now - new Date(q.timestamp).getTime() < 15000) return false;
+        const n = normalizeForMatch(q.lines.join(" "));
+        return n === want2 || (fp2.length >= 30 && n.includes(fp2));
+      });
+      if (gone) {
+        pending.received = false;
+        pending.receiptTs = null;
+        pending.failed = true;
+        window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+        return true;
       }
     }
     // v1.65.0: stuck Enter. 2026-10-03 the COO and Software Engineering agents never got three messages:
@@ -2017,17 +2043,21 @@ async function rebuildChatView(agentPath, opts = {}) {
     // within a second, so no receipt after 8 s / 20 s means the text is waiting for its Enter: press Enter
     // again, at most twice. Never at a permission prompt (Enter would accept it). An Enter into an empty
     // box does nothing, so a false alarm costs nothing.
-    if (!pending.received && pending.text.trim() !== "/clear") {
+    if (!pending.received && !pending.failed && !isSlash) {
       const ageN = now - (pending.sentAt || pending.addedAt);
       const stepN = pending.enterNudges || 0;
-      if ((stepN === 0 && ageN > ENTER_NUDGE_1_MS) || (stepN === 1 && ageN > ENTER_NUDGE_2_MS)) {
+      if ((stepN === 0 && ageN > ENTER_NUDGE_1_MS) || (stepN === 1 && ageN > ENTER_NUDGE_2_MS && now - (pending.nudgeAt || 0) > 12000)) {
         pending.enterNudges = stepN + 1;
+        pending.nudgeAt = now;
         window.api.agentInputHoldsText(agentPath, pending.text).then((holds) => {
-          if (holds) window.api.sendInput(agentPath, "\r");
+          if (holds) writeQueued(session, () => window.api.sendInput(agentPath, "\r"));
         }).catch(() => {});
       }
     }
-    if (pending.received) return now - (pending.sentAt || pending.addedAt) < MIDTURN_RECEIVED_MAX_MS;
+    if (pending.received) {
+      if (now - (pending.sentAt || pending.addedAt) >= MIDTURN_RECEIVED_MAX_MS) { pending.received = false; pending.failed = true; window.api.notifySendFailed(agentPath, pending.text).catch(() => {}); }
+      return true;
+    }
 
     // 2026-09-27: a later message that DID land proves this one was dropped.
     // Traced live on the Software Engineering agent: "yes" was sent at 04:13:34
@@ -2087,7 +2117,7 @@ async function rebuildChatView(agentPath, opts = {}) {
     // this app does not have. Manual-only from here: Resend is a real
     // click, one at a time, by a person who can see whether the last one
     // already went through before trying again.
-    if (pending.midTurn && !pending.failed && now - (pending.sentAt || pending.addedAt) > MIDTURN_NO_RECEIPT_FAIL_MS) {
+    if (pending.midTurn && !pending.failed && !isSlash && now - (pending.sentAt || pending.addedAt) > MIDTURN_NO_RECEIPT_FAIL_MS) {
       pending.failed = true;
       window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
       return true;
@@ -2714,7 +2744,7 @@ async function sendOrHold(agentPath, session, text) {
   if (!session.started) { session.sendQueue.push(text); renderQueue(agentPath); return "held"; }
   const working = () => session.busy || session.transcriptWorking;
   if (!working()) { submitToAgent(agentPath, text); return "sent"; }
-  let ok = midTurnAllowed() && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath));
+  let ok = midTurnAllowed() && session.sendQueue.length === 0 && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath));
   if (ok) { try { ok = !(await window.api.agentDialogOpen(agentPath)); } catch (e) { ok = false; } }
   if (!working()) { submitToAgent(agentPath, text); return "sent"; }
   if (ok) { submitToAgent(agentPath, text, { midTurn: true }); return "midturn"; }
@@ -3524,11 +3554,22 @@ function submitToAgent(agentPath, text, opts) {
   // sharing a single low-level write with a large content blob, then the
   // existing gap before "\r". Needs the same live-test confirmation this
   // caught the bug with before it's trusted further.
-  window.api.sendInput(agentPath, "\x1b[200~" + text);
-  setTimeout(() => {
-    window.api.sendInput(agentPath, "\x1b[201~");
-    setTimeout(() => window.api.sendInput(agentPath, "\r"), 200); // was 80: a slow CLI read the shorter gap as one chunk
-  }, 30);
+  // v1.65.0: one write sequence per session at a time (overlapping sends corrupt each other, v1.27.1)
+  writeQueued(session, () => new Promise((resolve) => {
+    window.api.sendInput(agentPath, "\x1b[200~" + text);
+    setTimeout(() => {
+      window.api.sendInput(agentPath, "\x1b[201~");
+      setTimeout(() => { window.api.sendInput(agentPath, "\r"); resolve(); }, 200); // was 80: a slow CLI read the shorter gap as one chunk
+    }, 30);
+  }));
+}
+
+function writeQueued(session, fn) {
+  const prev = (session && session.writeChain) || Promise.resolve();
+  const run = prev.then(fn);
+  const settled = run.catch(() => {});
+  if (session) session.writeChain = settled;
+  return run;
 }
 
 // 2026-09-20: Iddo's direct ask after the whole splitLongMessage() saga -
