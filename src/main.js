@@ -2918,6 +2918,103 @@ ipcMain.on("guard-log", (event, { line }) => {
   logStuckWatchdog("[autohandoff] " + String(line || "").replace(/\s+/g, " ").slice(0, 400));
 });
 
+// v1.67.0 connection health (reconnect with backoff, dead-link auto-restart, post-recovery nudge) - see
+// src/connectionHealth.js. Hook points elsewhere in this file: handlePtyExit, recoverStuckSession,
+// start-terminal's catch, startTerminalSession (noteData / onConnected), terminal-input (noteWrite).
+const lateInputs = new Map(); // agentPath -> input written while disconnected; replayed by the next attach (review M1)
+// v1.67.3: removing a failed "starting" placeholder must keep the input it queued (it is replayed by the next attach)
+function dropPlaceholder(agentPath) {
+  const ph = ptySessions.get(agentPath);
+  if (ph && ph.starting && ph.pendingInput && ph.pendingInput.length) lateInputs.set(agentPath, ph.pendingInput.concat(lateInputs.get(agentPath) || []));
+  if (ph && ph.starting) ptySessions.delete(agentPath);
+}
+const TEST_FAULT_DIR = () => app.getPath("userData");
+function testFaultFile(name) { return path.join(TEST_FAULT_DIR(), name); }
+async function restartAgentSession(agentPath) {
+  const sessionCwd = sessionCwdFor(agentPath);
+  const convos = listConversations(sessionCwd);
+  const cur = convos.find((c) => c.isCurrent) || convos[0];
+  if (!cur || !cur.sessionId) throw new Error("no conversation to resume");
+  const old = ptySessions.get(agentPath);
+  const size = { cols: old && old.cols, rows: old && old.rows };
+  const r = await switchConversationImpl(agentPath, { resumeSessionId: cur.sessionId, placeholder: true });
+  try {
+    await startTerminalSession(agentPath, sessionCwd, size.cols, size.rows, r.agentId);
+  } catch (e) {
+    dropPlaceholder(agentPath);
+    throw e;
+  }
+  if (testMode.TEST_MODE) { try { fs.unlinkSync(testFaultFile("mute-" + path.basename(agentPath))); } catch (e) {} }
+}
+function typeIntoPty(agentPath, text) {
+  const s = ptySessions.get(agentPath);
+  if (!s || !s.proc) return;
+  logSentInput(agentPath, text);
+  writeToPtyChunked(s.proc, agentPath, "\x1b[200~" + text);
+  setTimeout(() => writeToPtyChunked(s.proc, agentPath, "\x1b[201~"), 30);
+  setTimeout(() => writeToPtyChunked(s.proc, agentPath, "\r"), 230);
+}
+const connHealth = require("./connectionHealth").create({
+  log: (line) => logStuckWatchdog(line),
+  emit: (agentPath, snap) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("connection-state", snap);
+  },
+  shouldRetry: (agentPath) => {
+    if (heartbeatQuitting) return false;
+    if (testMode.TEST_MODE && !testMode.liveAgentsPermitted()) return false;
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(agentPath, "agent_config.json"), "utf-8"));
+      if (cfg && cfg.paused) return false;
+    } catch (e) { /* no config: fall through to the folder check */ }
+    return fs.existsSync(agentPath);
+  },
+  sessionKind: (agentPath) => {
+    const s = ptySessions.get(agentPath);
+    return !s ? null : s.starting ? "starting" : "real";
+  },
+  reconnect: async (agentPath, size) => {
+    if (ptySessions.has(agentPath)) return;
+    ptySessions.set(agentPath, { starting: true, pendingInput: lateInputs.get(agentPath) ? lateInputs.get(agentPath).splice(0) : [] });
+    try {
+      await startTerminalSession(agentPath, sessionCwdFor(agentPath), size && size.cols, size && size.rows);
+    } catch (e) {
+      // v1.67.3: a failed attempt must not swallow the input it was carrying - keep it for the next attempt
+      dropPlaceholder(agentPath);
+      throw e;
+    }
+  },
+  restartSession: (agentPath) => restartAgentSession(agentPath),
+  screenShows: (agentPath, snippet) => {
+    const strip = (x) => String(x).replace(/\s+/g, "");
+    const want = strip(snippet || "").slice(-30);
+    return want.length >= 3 && strip(dialogTails.get(agentPath) || "").includes(want);
+  },
+  isIdleAndQuiet: (agentPath, sinceMs) => {
+    const cwd = sessionCwdFor(agentPath);
+    const act = getSessionActivity(cwd);
+    if (act && act.working) return false;
+    const mt = getLatestTranscriptMtimeMs(cwd);
+    return mt == null || mt < sinceMs;
+  },
+  isWorking: (agentPath) => {
+    const act = getSessionActivity(sessionCwdFor(agentPath));
+    return !!(act && act.working);
+  },
+  wasInterrupted: (agentPath) => {
+    const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
+    if (!nt) return false;
+    const fd = fs.openSync(nt.jsonlPath, "r");
+    try {
+      const len = Math.min(16384, nt.size);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, nt.size - len);
+      return /Request interrupted/.test(buf.toString("utf-8"));
+    } finally { fs.closeSync(fd); }
+  },
+  nudge: (agentPath, text) => typeIntoPty(agentPath, text),
+});
+ipcMain.handle("get-connection-states", () => connHealth.getAll());
+
 async function recoverStuckSession(agentPath, session, recoveryCount) {
   const { sessionCwd, cols, rows } = session;
   logStuckWatchdog(
@@ -2934,6 +3031,7 @@ async function recoverStuckSession(agentPath, session, recoveryCount) {
   try {
     await startTerminalSession(agentPath, sessionCwd, cols, rows);
     logStuckWatchdog(`recovery dispatched OK for agentPath=${agentPath}`);
+    try { connHealth.afterStuckRecovery(agentPath, { wasWorking: true }); } catch (e) { /* best effort */ }
     if (mainWindow && !mainWindow.isDestroyed()) {
       const extra =
         recoveryCount > MAX_VISIBLE_RECOVERIES_BEFORE_WARNING
@@ -2951,6 +3049,8 @@ async function recoverStuckSession(agentPath, session, recoveryCount) {
   } catch (e) {
     ptySessions.delete(agentPath);
     logStuckWatchdog(`recovery dispatch FAILED for agentPath=${agentPath}: ${e.message}`);
+    // v1.67.0: this used to be the end of the line - no session, no retry, messages written into the void.
+    try { connHealth.onAttachFailed(agentPath, e.message, { cols, rows }); } catch (e2) { /* best effort */ }
   }
 }
 
@@ -3331,6 +3431,7 @@ async function handlePtyExit(agentPath, isReattachAttempt = false) {
   } catch (e) {}
   ptySessions.delete(agentPath);
 
+  let failReason = "the attach process ended";
   if (!isReattachAttempt && session.shell && session.spawnEnv) {
     const stillAlive = await findAliveBackgroundAgent(session.shell, session.spawnEnv, session.sessionCwd).catch(() => null);
     if (stillAlive) {
@@ -3338,10 +3439,17 @@ async function handlePtyExit(agentPath, isReattachAttempt = false) {
         await startTerminalSession(agentPath, session.sessionCwd, session.cols, session.rows, stillAlive.id, /* isReattach */ true);
         return; // reconnected silently, don't notify the renderer
       } catch (e) {
-        /* fall through to the normal "session ended" notice below */
+        failReason = e && e.message ? e.message : String(e);
+        /* fall through to the reconnect-with-backoff takeover / normal "session ended" notice below */
       }
     }
   }
+
+  // v1.67.0: keep trying instead of leaving a dead end. When the connection-health module takes over, the
+  // renderer is told through "connection-state" (not terminal-exit), so no misleading "restart the app" notice.
+  try {
+    if (connHealth.onAttachFailed(agentPath, failReason, { cols: session.cols, rows: session.rows })) return;
+  } catch (e) { /* fall through to the old notice */ }
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("terminal-exit", { agentPath });
@@ -3423,6 +3531,14 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
 
   let proc;
   try {
+    if (testMode.TEST_MODE) {
+      // Sandbox-only fault injection: a file holding N makes the next N attach attempts time out.
+      try {
+        const ff = testFaultFile("fail-attach");
+        const n = parseInt(fs.readFileSync(ff, "utf-8"), 10) || 0;
+        if (n > 0) { fs.writeFileSync(ff, String(n - 1)); throw new Error("Error launching WinPTY agent: agent timed out (injected by sandbox test)"); }
+      } catch (e) { if (/injected/.test(e.message)) throw e; }
+    }
     proc = await spawnPtyWithRetry(shell, ["attach", agentId], {
       name: "xterm-color",
       cols: cols || 80,
@@ -3568,15 +3684,37 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     // before this fix, visible as 53 near-identical entries in the
     // session's own JSONL transcript.
     const toSend = pendingInput.splice(0, pendingInput.length);
+    // v1.67.3: same gaps as the renderer's submitToAgent (30 ms before the paste end, 200 ms before Enter); the old
+    // flat 80 ms let a slow CLI read the replayed Enter as part of the paste, so the next message merged into it
+    let at = 0;
     toSend.forEach((data, i) => {
+      const myAt = at;
+      at += /^.?\[200~/.test(String(data)) || /\[200~/.test(String(data)) ? 30 : /\[201~/.test(String(data)) ? 200 : 80;
       // Still staggered, not blasted as one synchronous burst - see
       // submitToAgent() in renderer.js for why a composed message and its
       // trailing "\r" must land as two separately-timed writes. Each
       // individual item is itself now chunked if long - see
       // writeToPtyChunked()'s own comment for why a large single write can
       // arrive at the CLI garbled or truncated.
-      setTimeout(() => writeToPtyChunked(proc, agentPath, data), i * 80);
+      setTimeout(() => writeToPtyChunked(proc, agentPath, data), myAt);
     });
+    // v1.67.3: a replayed message whose Enter was swallowed (CLI still booting) would sit in the input box and
+    // merge with the next message. Two seconds after the replay: if the screen still shows the last message
+    // text and no prompt/dialog is open, press Enter once (an empty prompt ignores it).
+    const lastMsg = toSend.filter((d) => /\[200~/.test(String(d))).pop();
+    if (lastMsg) {
+      setTimeout(() => {
+        try {
+          const strip = (x) => String(x).replace(/\s+/g, "");
+          const want = strip(String(lastMsg).replace(/^.*\[200~/, "")).slice(-30);
+          const tail = strip(dialogTails.get(agentPath) || "");
+          if (want.length >= 3 && !promptLikelyOpen(agentPath) && tail.includes(want) && !/Presstoeditqueuedmessages/.test(tail)) {
+            logStuckWatchdog(`replay: ${agentPath} replayed message still shown in the input box - pressing Enter once`);
+            writeToPtyChunked(proc, agentPath, "\r");
+          }
+        } catch (e) { /* best effort */ }
+      }, at + 2000);
+    }
   }
 
   // Unconditionally arm one flush attempt up front, not just reactively
@@ -3625,6 +3763,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
   });
 
   ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows });
+  connHealth.onConnected(agentPath, { delayMs: pendingInput && pendingInput.length ? 5000 : 0 });
 }
 
 ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows, knownAgentId }) => {
@@ -3680,6 +3819,8 @@ ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows, knownAge
     await startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId || undefined);
   } catch (e) {
     ptySessions.delete(agentPath);
+    // v1.67.0: an attach timeout on a tab open is retried in the background too (find/dispatch failures are not).
+    if (/\[attach stage/.test(e && e.message)) { try { connHealth.onAttachFailed(agentPath, e.message, { cols, rows }); } catch (e2) {} }
     throw e;
   }
   return { alreadyRunning: false };
@@ -3837,6 +3978,18 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text }) => {
     /* a notification failure must never break anything else */
   }
   logStuckWatchdog(`notify-send-failed: ${agentPath} - message never landed in transcript, re-queued`);
+  // v1.67.0: the log never said WHY. Snapshot the agent's own screen (`claude logs <id>`) at failure time:
+  // idle + empty input box = dead link, text in the box = stuck Enter, a dialog = prompt waiting.
+  try {
+    const sess = ptySessions.get(agentPath);
+    const id = sess && sess.agentId ? String(sess.agentId).slice(0, 8) : null;
+    if (id && /^[0-9a-f]{8}$/i.test(id) && sess.shell) {
+      execFile(sess.shell, ["logs", id], { windowsHide: true, timeout: 8000, env: sess.spawnEnv, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+        const tail = stripTerminalCodes(String(stdout || "")).replace(/\s+/g, " ").trim().slice(-500);
+        logStuckWatchdog(`notify-send-failed: ${agentPath} claude logs ${id} tail: ${err && !tail ? "(unavailable: " + err.message + ")" : tail}`);
+      });
+    }
+  } catch (e) { /* diagnostics only */ }
   return { ok: true };
 });
 
@@ -3896,7 +4049,8 @@ ipcMain.handle("rename-conversation", (event, { agentPath, sessionId, title }) =
 // dispatch (`--bg --resume <id>` or `--bg` with no --continue) can change
 // that. Tear down the attach pty, stop the bg daemon, dispatch a new one;
 // the renderer then re-attaches through its normal start-terminal path.
-ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId, newConversation, initialPrompt }) => {
+ipcMain.handle("switch-conversation", (event, args) => switchConversationImpl(args.agentPath, args));
+async function switchConversationImpl(agentPath, { resumeSessionId, newConversation, initialPrompt, placeholder }) {
   const sessionCwd = sessionCwdFor(agentPath);
   // Drop the ptySessions entry BEFORE killing the pty: proc.onExit ->
   // handlePtyExit checks `if (!session) return` first, so removing it now
@@ -3913,15 +4067,28 @@ ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId
       if (live.proc) live.proc.kill();
     } catch (e) {}
   }
+  // review M1: claim the slot BEFORE the (slow) stop so input arriving meanwhile queues instead of being dropped
+  if (placeholder) ptySessions.set(agentPath, { starting: true, pendingInput: [] });
   // Stops the underlying `claude --bg` daemon for this cwd and polls until
   // its pid is actually gone (same helper delete-agent uses).
-  await stopBackgroundAgentForCwd(sessionCwd);
+  try {
+    await stopBackgroundAgentForCwd(sessionCwd);
+  } catch (e) {
+    if (placeholder) dropPlaceholder(agentPath);
+    throw e;
+  }
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
   const opts = newConversation ? { forceFresh: true, initialPrompt, urgent: true } : { resumeSessionId, urgent: true };
-  const newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
+  let newId;
+  try {
+    newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
+  } catch (e) {
+    if (placeholder) dropPlaceholder(agentPath);
+    throw e;
+  }
   return { ok: true, agentId: newId };
-});
+}
 
 // Caught live (2026-08-20): a real crash, not a hang. If the underlying
 // claude process has already died on its own (crashed, or one of the
@@ -3978,6 +4145,12 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
     // Root trigger for how ptySessions can lack an entry while the user is
     // still looking at this agent's chat isn't confirmed - flagging rather
     // than guessing further.
+    // v1.67.2: while the connection-health module is reconnecting, keep the input and replay it on attach.
+    if (connHealth.getState(agentPath).state !== "connected") {
+      if (!lateInputs.has(agentPath)) lateInputs.set(agentPath, []);
+      lateInputs.get(agentPath).push(data);
+      return;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("terminal-data", {
         agentPath,
@@ -3999,6 +4172,8 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
     session.pendingInput.push(data);
     return;
   }
+  connHealth.noteWrite(agentPath, data);
+  if (testMode.TEST_MODE && fs.existsSync(testFaultFile("mute-" + path.basename(agentPath)))) return; // sandbox: simulate a dead pty
   writeToPtyChunked(session.proc, agentPath, data);
 });
 
