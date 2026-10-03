@@ -905,6 +905,15 @@ function showTerminalFor(agent) {
     // itself is still directly focusable by clicking into it (e.g. for quick
     // menu/keystroke interactions like the theme picker or y/n prompts).
     chatInputEl.focus();
+    // v1.69.4: ask main whether this attach client is alive (kicked / detached / blank Terminal); main re-attaches the client
+    setTimeout(() => {
+      try {
+        let blank = true;
+        const b = session.term.buffer.active;
+        for (let y = 0; y < b.length; y++) { const l = b.getLine(y); if (l && l.translateToString(true).trim()) { blank = false; break; } }
+        if (session.started) window.api.terminalBlankCheck(agent.path, blank).catch(() => {});
+      } catch (e) { /* diagnostics only */ }
+    }, 2500);
   });
 }
 
@@ -3732,7 +3741,8 @@ function submitToAgent(agentPath, text, opts) {
   const sentEntry = session && session.pendingSent[session.pendingSent.length - 1];
   const entryRef = (opts && opts.entry) || sentEntry;
   writeQueued(session, () => new Promise((resolve) => {
-    window.api.sendInput(agentPath, "\x1b[200~" + text, { app: true }); // app: a message from this send path (arms the stuck-Enter check), not keystrokes typed in the Terminal tab
+    // v1.69.4: text ending in a backslash + Enter inserts a newline instead of submitting: one trailing space avoids it
+    window.api.sendInput(agentPath, "\x1b[200~" + (/\\$/.test(text) ? text + " " : text), { app: true }); // app: a message from this send path (arms the stuck-Enter check), not keystrokes typed in the Terminal tab
     setTimeout(() => {
       window.api.sendInput(agentPath, "\x1b[201~");
       setTimeout(() => {
@@ -3754,6 +3764,22 @@ try {
   window.api.onPressEnter(({ agentPath }) => {
     const s = terminals.get(agentPath);
     if (s) writeQueued(s, () => window.api.sendInput(agentPath, "\r"));
+  });
+} catch (e) { /* older preload */ }
+
+// v1.69.4: the stuck-message recovery ladder (connectionHealth.js) types its keys here, one chain with the messages
+try {
+  window.api.onSendKeys(({ agentPath, steps }) => {
+    const s = terminals.get(agentPath);
+    if (!s || !Array.isArray(steps)) return;
+    writeQueued(s, async () => {
+      for (const st of steps) {
+        // v1.69.4: Ctrl+C is asked from main right before it is typed (agent idle, text in the box, none in the last 10 s)
+        if (st.guard === "ctrlc") { let ok = false; try { ok = await window.api.canSendCtrlC(agentPath, st.snippet); } catch (e) {} if (!ok) break; }
+        window.api.sendInput(agentPath, String(st.data));
+        if (st.wait > 0) await new Promise((r) => setTimeout(r, st.wait));
+      }
+    });
   });
 } catch (e) { /* older preload */ }
 

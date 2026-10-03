@@ -1771,9 +1771,11 @@ function trackDialog(agentPath, data) {
 // v1.65.0: broader than DIALOG_RE (which drives the red badge): any screen that looks like a prompt
 // waiting for an answer. Used only to gate typing/Enter into a session.
 const PROMPT_RE = /Esc to cancel|Enter to confirm|Do you want to|\(y\/n\)|\[Y\/n\]|❯\s*1\.\s|Press Enter/i;
+const deliveryScreen = require("./deliveryScreen"); // v1.69.4: screen classifiers (dialog / queued / unsent box), tested on real CLI captures
 function promptLikelyOpen(agentPath) {
   if (dialogOpenFor(agentPath)) return true;
-  return PROMPT_RE.test((dialogTails.get(agentPath) || "").slice(-600));
+  const tail = dialogTails.get(agentPath) || "";
+  return PROMPT_RE.test(tail.slice(-600)) || deliveryScreen.isDialog(tail, ""); // v1.69.4: also matches when cursor moves ate the spaces ("Doyouwanttoproceed")
 }
 function dialogOpenFor(agentPath) {
   if (!ptySessions.get(agentPath) || !ptySessions.get(agentPath).proc) return false;
@@ -2905,8 +2907,10 @@ function killProcessTree(proc) {
 }
 
 const STUCK_WATCHDOG_LOG_PATH = path.join(app.getPath("userData"), "stuck-turn-watchdog.log");
+let watchdogLogLines = 0;
 function logStuckWatchdog(line) {
   try {
+    try { if (++watchdogLogLines % 50 === 1 && fs.statSync(STUCK_WATCHDOG_LOG_PATH).size > 2 * 1024 * 1024) fs.renameSync(STUCK_WATCHDOG_LOG_PATH, STUCK_WATCHDOG_LOG_PATH + ".old"); } catch (e) { /* no file yet */ }
     fs.appendFileSync(STUCK_WATCHDOG_LOG_PATH, `${new Date().toISOString()} ${line}\n`);
   } catch (e) {
     /* logging itself must never be why the watchdog fails */
@@ -2923,10 +2927,18 @@ ipcMain.on("guard-log", (event, { line }) => {
 // src/connectionHealth.js. Hook points elsewhere in this file: handlePtyExit, recoverStuckSession,
 // start-terminal's catch, startTerminalSession (noteData / onConnected), terminal-input (noteWrite).
 const lateInputs = new Map(); // agentPath -> input written while disconnected; replayed by the next attach (review M1)
+const lateInputsAt = new Map(); // v1.69.4: when it was queued; input older than 10 min is never replayed (a stale message must not appear hours later)
+function takeLateInputs(agentPath) {
+  const li = lateInputs.get(agentPath);
+  lateInputs.delete(agentPath);
+  if (!li || !li.length) return [];
+  if (Date.now() - (lateInputsAt.get(agentPath) || 0) > 10 * 60 * 1000) { logStuckWatchdog(`late-input: ${agentPath} - dropped ${li.length} queued input chunk(s) older than 10 min`); return []; }
+  return li;
+}
 // v1.67.3: removing a failed "starting" placeholder must keep the input it queued (it is replayed by the next attach)
 function dropPlaceholder(agentPath) {
   const ph = ptySessions.get(agentPath);
-  if (ph && ph.starting && ph.pendingInput && ph.pendingInput.length) lateInputs.set(agentPath, ph.pendingInput.concat(lateInputs.get(agentPath) || []));
+  if (ph && ph.starting && ph.pendingInput && ph.pendingInput.length) { lateInputs.set(agentPath, ph.pendingInput.concat(lateInputs.get(agentPath) || [])); lateInputsAt.set(agentPath, Date.now()); }
   if (ph && ph.starting) ptySessions.delete(agentPath);
 }
 const TEST_FAULT_DIR = () => app.getPath("userData");
@@ -2940,7 +2952,7 @@ async function restartAgentSession(agentPath) {
   const size = { cols: old && old.cols, rows: old && old.rows };
   const r = await switchConversationImpl(agentPath, { resumeSessionId: cur.sessionId, placeholder: true });
   try {
-    await startTerminalSession(agentPath, sessionCwd, size.cols, size.rows, r.agentId);
+    await startTerminalSession(agentPath, sessionCwd, size.cols, size.rows, r.agentId, false, false, "restart-session");
   } catch (e) {
     dropPlaceholder(agentPath);
     throw e;
@@ -2975,9 +2987,9 @@ const connHealth = require("./connectionHealth").create({
   },
   reconnect: async (agentPath, size) => {
     if (ptySessions.has(agentPath)) return;
-    ptySessions.set(agentPath, { starting: true, pendingInput: lateInputs.get(agentPath) ? lateInputs.get(agentPath).splice(0) : [] });
+    ptySessions.set(agentPath, { starting: true, pendingInput: takeLateInputs(agentPath) });
     try {
-      await startTerminalSession(agentPath, sessionCwdFor(agentPath), size && size.cols, size && size.rows);
+      await startTerminalSession(agentPath, sessionCwdFor(agentPath), size && size.cols, size && size.rows, undefined, false, false, "connhealth-reconnect");
     } catch (e) {
       // v1.67.3: a failed attempt must not swallow the input it was carrying - keep it for the next attempt
       dropPlaceholder(agentPath);
@@ -3021,7 +3033,107 @@ const connHealth = require("./connectionHealth").create({
   pressEnter: (agentPath) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("press-enter", { agentPath });
   },
+  // v1.69.4 recovery ladder: keys go through the renderer's per-session write chain, like every message
+  sendKeys: (agentPath, steps) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("send-keys", { agentPath, steps });
+  },
+  resetScreen: () => { /* the Ctrl+C gate (can-send-ctrlc) clears the screen text itself, after it has checked the box */ },
+  screenState: (agentPath, snippet, fullText) => screenStateFor(agentPath, snippet, fullText),
+  reattachClient: (agentPath, reason) => reattachClient(agentPath, reason),
 });
+// v1.69.4: what the agent's screen shows right now, for the ladder and the failure log.
+// Evidence the attach CLIENT is dead although the pty object exists (experiment 2026-10-04): another `claude attach` kicked it
+// ("Session opened in another window"), or two Ctrl+C detached it (the `claude agents` dashboard is on screen), or `claude logs`
+// shows a CLI screen while the attach screen is blank (probed in the background, only when the attach has been silent for 15 s
+// and the agent is not working). Silence alone is never evidence: a healthy idle CLI is silent.
+function claudeLogsTail(agentPath) {
+  return new Promise((resolve) => {
+    try {
+      const sess = ptySessions.get(agentPath);
+      const id = sess && sess.agentId ? String(sess.agentId).slice(0, 8) : null;
+      if (!id || !/^[0-9a-f]{8}$/i.test(id) || !sess.shell) return resolve(null);
+      execFile(sess.shell, ["logs", id], { windowsHide: true, timeout: 8000, env: sess.spawnEnv, maxBuffer: 1024 * 1024 }, (err, stdout) => resolve(err && !stdout ? null : stripTerminalCodes(String(stdout || ""))));
+    } catch (e) { resolve(null); }
+  });
+}
+function isWorkingNow(agentPath) {
+  try { const act = getSessionActivity(sessionCwdFor(agentPath)); return !!(act && act.working); } catch (e) { return false; }
+}
+function attachDeadEvidence(agentPath) {
+  const s = ptySessions.get(agentPath);
+  if (!s || !s.proc || s.starting) return null;
+  const ev = deliveryScreen.attachEvidence(dialogTails.get(agentPath) || "");
+  if (ev) return ev;
+  if (s.attachBlankAt && Date.now() - s.attachBlankAt < 120000) return "blank-attach";
+  // silent for a while: ask `claude logs` in the background (never blocks a send); a contradiction is remembered for 2 min
+  if (!isWorkingNow(agentPath) && deliveryScreen.attachHealth({ alive: true, now: Date.now(), attachedAt: s.attachedAt, dataBytes: s.dataBytes }) && Date.now() - (s.attachProbeAt || 0) > 60000) {
+    s.attachProbeAt = Date.now();
+    claudeLogsTail(agentPath).then((logs) => {
+      if (logs && ptySessions.get(agentPath) === s && deliveryScreen.screensDiffer(dialogTails.get(agentPath) || "", logs)) s.attachBlankAt = Date.now();
+    }).catch(() => {});
+  }
+  return null;
+}
+function screenStateFor(agentPath, snippet, fullText) {
+  const tail = dialogTails.get(agentPath) || "";
+  const s = ptySessions.get(agentPath);
+  const dead = !s || !s.proc;
+  const deadAttach = dead ? null : attachDeadEvidence(agentPath);
+  const working = isWorkingNow(agentPath);
+  const DS = deliveryScreen;
+  return {
+    cause: DS.classify(tail, snippet, { deadPty: dead, working, deadAttach }),
+    deadAttach, stacked: DS.stackedNewlines(tail, snippet),
+    holds: !dead && inputHoldsUnsentText(agentPath, snippet),
+    dialog: promptLikelyOpen(agentPath), queued: DS.isQueued(tail, snippet),
+    working: working || DS.isWorkingScreen(tail, snippet),
+    ctrlCAgain: DS.ctrlCAgainShown(tail), seen: tail.length > 0,
+    lines: DS.lastLines(tail, 25, 1500, fullText || snippet),
+  };
+}
+// v1.69.4: re-spawn ONLY the `claude attach` client of an agent (kicked / detached / dead), the bg agent keeps running. Input that
+// arrives meanwhile queues in the placeholder and is replayed into the new client once (the same mechanism as a fresh open).
+const reattaching = new Set();
+// Returns true (re-attached), "busy" (another re-attach or a starting placeholder is in flight: not a failure), "gone" (no live client
+// to replace) or false (the spawn failed; the placeholder is dropped so connection health can retry at once, and it is told).
+async function reattachClient(agentPath, reason) {
+  const live = ptySessions.get(agentPath);
+  if (reattaching.has(agentPath) || (live && live.starting)) return "busy";
+  if (!live || !live.proc || !live.agentId) return "gone";
+  reattaching.add(agentPath);
+  logStuckWatchdog(`attach: ${agentPath} path=reattach-client oldpid=${live.proc.pid} reason=${String(reason).slice(0, 200)}`);
+  try { clearInterval(live.archiveTimer); } catch (e) {}
+  ptySessions.set(agentPath, { starting: true, pendingInput: [] }); // the old client's exit then finds a placeholder and does nothing
+  killProcessTree(live.proc); // the winpty agent child too (a plain kill can leave it behind: live check on Windows)
+  dialogTails.set(agentPath, "");
+  try {
+    await startTerminalSession(agentPath, live.sessionCwd, live.cols, live.rows, live.agentId, true, false, "reattach-client");
+    return true;
+  } catch (e) {
+    dropPlaceholder(agentPath);
+    logStuckWatchdog(`attach: ${agentPath} path=reattach-client FAILED: ${e && e.message}; no session now, connection health retries`);
+    try { connHealth.onAttachFailed(agentPath, "re-attach failed: " + (e && e.message), { cols: live.cols, rows: live.rows }); } catch (e2) {}
+    return false;
+  } finally {
+    reattaching.delete(agentPath);
+  }
+}
+// Ctrl+C rule (v1.69.4): at most one per agent per 10 s, only when the CURRENT screen shows text in the input box (on an empty
+// box it prints "Press Ctrl-C again to detach" and a second one DETACHES the client), never with a dialog / working agent /
+// dashboard on screen. The gate clears the screen text so the next read shows only what the CLI repaints after the clear.
+const ctrlCAt = new Map();
+function ctrlCAllowed(agentPath, text) {
+  const s = ptySessions.get(agentPath);
+  if (!s || !s.proc || s.starting) return false;
+  if (Date.now() - (ctrlCAt.get(agentPath) || 0) < 10000) return false;
+  const tail = dialogTails.get(agentPath) || "";
+  if (deliveryScreen.attachEvidence(tail) || deliveryScreen.ctrlCAgainShown(tail) || promptLikelyOpen(agentPath) || isWorkingNow(agentPath)) return false;
+  if (!inputHoldsUnsentText(agentPath, text)) return false;
+  ctrlCAt.set(agentPath, Date.now());
+  dialogTails.set(agentPath, "");
+  return true;
+}
+ipcMain.handle("can-send-ctrlc", (event, { agentPath, text }) => ctrlCAllowed(agentPath, text));
 // true/false = the agent's newest transcript (last 1 MB) does / does not contain the message (via its longest plain
 // run of characters); null = cannot tell (nothing to look for, or no transcript). Only a transcript written since
 // `sinceMs` counts, so an identical older message does not read as delivered.
@@ -3173,7 +3285,7 @@ async function recoverStuckSession(agentPath, session, recoveryCount) {
   // dispatch actually landing.
   ptySessions.set(agentPath, { starting: true, pendingInput: [] });
   try {
-    await startTerminalSession(agentPath, sessionCwd, cols, rows);
+    await startTerminalSession(agentPath, sessionCwd, cols, rows, undefined, false, false, "stuck-turn-recovery");
     logStuckWatchdog(`recovery dispatched OK for agentPath=${agentPath}`);
     try { connHealth.afterStuckRecovery(agentPath, { wasWorking: true }); } catch (e) { /* best effort */ }
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -3580,7 +3692,7 @@ async function handlePtyExit(agentPath, isReattachAttempt = false) {
     const stillAlive = await findAliveBackgroundAgent(session.shell, session.spawnEnv, session.sessionCwd).catch(() => null);
     if (stillAlive) {
       try {
-        await startTerminalSession(agentPath, session.sessionCwd, session.cols, session.rows, stillAlive.id, /* isReattach */ true);
+        await startTerminalSession(agentPath, session.sessionCwd, session.cols, session.rows, stillAlive.id, /* isReattach */ true, false, "pty-exit-silent-reattach");
         return; // reconnected silently, don't notify the renderer
       } catch (e) {
         failReason = e && e.message ? e.message : String(e);
@@ -3653,7 +3765,19 @@ async function autoTitleFreshConversation(agentPath, sessionCwd) {
 // knownAgentId is omitted, finds or dispatches a background agent for this
 // cwd first; when provided (the reattach path), skips straight to attaching
 // since the caller already confirmed it's alive.
-async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt = false, isLoginRecoveryAttempt = false) {
+// v1.69.4: the ONE place that spawns `claude attach`. Two attaches to the same session kick each other (the older client exits and
+// later writes into it reach nothing), so a second concurrent spawn for the same agent is refused here; pathName says who asked.
+const attachSpawning = new Map(); // agentPath -> pathName of the attach being spawned
+async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt = false, isLoginRecoveryAttempt = false, pathName = "unnamed") {
+  if (attachSpawning.has(agentPath)) throw new Error("[attach stage] another attach for this agent is already starting (" + attachSpawning.get(agentPath) + ", asked by " + pathName + ")");
+  attachSpawning.set(agentPath, pathName);
+  try {
+    return await startTerminalSessionInner(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt, isLoginRecoveryAttempt, pathName);
+  } finally {
+    attachSpawning.delete(agentPath);
+  }
+}
+async function startTerminalSessionInner(agentPath, sessionCwd, cols, rows, knownAgentId, isReattachAttempt = false, isLoginRecoveryAttempt = false, pathName = "unnamed") {
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   // See the CLAUDE_CODE_FORCE_SESSION_PERSISTENCE comment further up this
   // file - same reasoning applies to background-dispatched agents.
@@ -3699,6 +3823,8 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
   // just one stale session) can't loop forever redispatching new sessions
   // - if the fresh session hits the same wall, the user sees the real
   // "Not logged in" prompt directly instead of this silently retrying.
+  let peekTail = ""; // what the attach drew during the peek: becomes the first screen text (tracked screen was empty after a re-attach)
+  let peekBytes = 0; // v1.69.4: size of what the attach drew during the peek (liveness seed); declared outside the block below
   if (!isLoginRecoveryAttempt) {
     let peekBuffer = "";
     let peekProcExited = false;
@@ -3738,7 +3864,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
         await stopClaudeAgent(shell, agentId, spawnEnv, { timeoutMs: 5000 });
       } catch (e) {}
       const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, { urgent: true });
-      return startTerminalSession(agentPath, sessionCwd, cols, rows, freshAgentId, isReattachAttempt, /* isLoginRecoveryAttempt */ true);
+      return startTerminalSessionInner(agentPath, sessionCwd, cols, rows, freshAgentId, isReattachAttempt, /* isLoginRecoveryAttempt */ true, pathName + "+login-recovery");
     }
 
     // See the RESUME_DIALOG_RE comment further up this file. Unlike the
@@ -3780,6 +3906,8 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     // lose the first couple seconds of output (the "Welcome back" banner,
     // etc.) that arrived while we were peeking at it instead of streaming
     // it through live.
+    peekBytes = peekBuffer.length;
+    peekTail = stripTerminalCodes(peekBuffer).slice(-1500);
     if (peekBuffer && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("terminal-data", { agentPath, data: peekBuffer });
     }
@@ -3886,6 +4014,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
       mainWindow.webContents.send("terminal-data", { agentPath, data });
     }
     try { trackDialog(agentPath, data); } catch (e) { /* best effort */ }
+    { const ps = ptySessions.get(agentPath); if (ps && ps.proc === proc) ps.dataBytes = (ps.dataBytes || 0) + data.length; } // v1.69.4 liveness
     if (pendingInput && pendingInput.length) {
       clearTimeout(flushIdleTimer);
       flushIdleTimer = setTimeout(flushPendingInput, FLUSH_IDLE_MS);
@@ -3903,10 +4032,17 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
 
   proc.onExit(() => {
     clearTimeout(flushIdleTimer);
+    const cur = ptySessions.get(agentPath);
+    if (cur && cur.proc && cur.proc !== proc) return; // replaced by a newer attach client: not this one's exit to handle
+    logStuckWatchdog(`attach: ${agentPath} client pid=${proc.pid} EXITED (path=${pathName})`);
     handlePtyExit(agentPath, isReattachAttempt);
   });
 
-  ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows });
+  // never two attach clients for one agent: a live older client is killed first (it would be kicked anyway)
+  { const ex = ptySessions.get(agentPath); if (ex && ex.proc && !ex.starting && ex.proc !== proc) { try { clearInterval(ex.archiveTimer); ex.proc.kill(); } catch (e) {} logStuckWatchdog(`attach: ${agentPath} path=${pathName} killed an older attach client pid=${ex.proc.pid}`); } }
+  dialogTails.set(agentPath, peekTail);
+  logStuckWatchdog(`attach: ${agentPath} path=${pathName} pid=${proc.pid} agentId=${agentId}`);
+  ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows, attachedAt: Date.now(), dataBytes: peekBytes });
   connHealth.onConnected(agentPath, { delayMs: pendingInput && pendingInput.length ? 5000 : 0 });
 }
 
@@ -3960,7 +4096,7 @@ ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows, knownAge
     // session and resuming the old conversation instead, never finding the
     // fresh one at all. Passing the id we already know we just created
     // removes the guessing entirely.
-    await startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId || undefined);
+    await startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgentId || undefined, false, false, "start-terminal");
   } catch (e) {
     ptySessions.delete(agentPath);
     // v1.67.0: an attach timeout on a tab open is retried in the background too (find/dispatch failures are not).
@@ -4027,6 +4163,9 @@ function inputHoldsUnsentText(agentPath, snippet) {
   const tail = strip((dialogTails.get(agentPath) || "").slice(-900));
   const want = strip(snippet || "").slice(-40);
   if (want.length < 3 || !tail.includes(want)) return false;
+  // v1.69.4: a message the CLI QUEUED behind a running turn (footer "Press up to edit queued messages") or already
+  // submitted (working indicator) also shows as "> text" - that is not an unsent box, never press Enter for it
+  if (!deliveryScreen.inputHolds(dialogTails.get(agentPath) || "", snippet)) return false;
   const after = tail.slice(tail.lastIndexOf(want) + want.length);
   return !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]|Doyouwant|Yes,|No,/i.test(after) && !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]/i.test(tail.slice(-250));
 }
@@ -4051,11 +4190,48 @@ ipcMain.handle("clear-stale-input", (event, { agentPath, text }) => {
     if (after.length > 120 || /Working|Thinking|esctointerrupt|tokens/i.test(after)) return false;
     const mt = getLatestTranscriptMtimeMs(sessionCwdFor(agentPath));
     if (mt != null && Date.now() - mt < 5000) return false; // the agent wrote very recently: do not touch its input
+    if (!ctrlCAllowed(agentPath, text)) return false; // v1.69.4: shared Ctrl+C rule (one per 10 s, never on an empty box)
     staleClearedAt.set(agentPath, Date.now());
     writeToPtyChunked(s.proc, agentPath, "\x03");
     logStuckWatchdog(`stale-input: ${agentPath} - the message was delivered another way but its text sat unsent in the input box; cleared it`);
     return true;
   } catch (e) { return false; }
+});
+// v1.69.4: the Terminal tab was opened (renderer reports whether its xterm buffer is empty). Evidence the attach client is dead
+// (kicked / dashboard) -> re-attach it. A blank buffer alone: first the cheap redraw (a resize probe makes the CLI repaint), twice,
+// and only if `claude logs` then shows a different screen is the client re-attached. The bg agent is never restarted from here and
+// nothing is touched while it works. Per-agent 60 s limit plus a global one (opening many tabs must not re-attach many agents).
+const blankCheckAt = new Map();
+let lastBlankReattachAt = 0;
+ipcMain.handle("terminal-blank-check", async (event, { agentPath, blank }) => {
+  try {
+    const s = ptySessions.get(agentPath);
+    if (!s || !s.proc || s.starting) return "no-session";
+    if (connHealth.getState(agentPath).state !== "connected") return "reconnecting";
+    const ev = deliveryScreen.attachEvidence(dialogTails.get(agentPath) || "");
+    if (!ev && !blank) return "ok";
+    if (Date.now() - (blankCheckAt.get(agentPath) || 0) < 60000) return "recent";
+    blankCheckAt.set(agentPath, Date.now());
+    const doReattach = (why) => {
+      if (Date.now() - lastBlankReattachAt < 10000) return "global-limit";
+      lastBlankReattachAt = Date.now();
+      logStuckWatchdog(`dead-attach: ${agentPath} - Terminal tab: ${why}. screen: ${deliveryScreen.lastLines(dialogTails.get(agentPath) || "", 25, 1200)}`.slice(0, 2400));
+      return connHealth.deadAttach(agentPath, "Terminal tab: " + why) ? "reattaching" : "not-reattached";
+    };
+    if (ev) return doReattach(ev);
+    if (isWorkingNow(agentPath)) return "working";
+    for (let i = 0; i < 2; i++) {
+      const before = s.dataBytes || 0;
+      const cols = s.cols || 120, rows = s.rows || 30;
+      try { s.proc.resize(cols, Math.max(5, rows - 1)); await new Promise((r) => setTimeout(r, 150)); s.proc.resize(cols, rows); } catch (e) {}
+      await new Promise((r) => setTimeout(r, i === 0 ? 1500 : 6000));
+      if ((s.dataBytes || 0) > before) return "redrawn";
+      if (ptySessions.get(agentPath) !== s || isWorkingNow(agentPath)) return "changed";
+    }
+    const logs = await claudeLogsTail(agentPath);
+    if (!logs || !deliveryScreen.screensDiffer(dialogTails.get(agentPath) || "", logs)) return "logs-same";
+    return doReattach("blank, no redraw after two resize probes and claude logs shows a different screen");
+  } catch (e) { return "error"; }
 });
 ipcMain.handle("agent-dialog-open", (event, { agentPath }) => promptLikelyOpen(agentPath)); // v1.65.0: mid-turn send must not type into a permission prompt
 ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents({ noAvatar: true }), sessionCwdFor, dialogOpenFor));
@@ -4155,12 +4331,17 @@ function classifySendFailure(agentPath, info) {
   if (st !== "connected") return "dead-link(" + st + ")";
   if (!s || !s.proc) return "dead-link(no-pty)";
   if (inputHoldsUnsentText(agentPath, i.text || "")) return "stuck-enter";
+  if (deliveryScreen.isQueued(dialogTails.get(agentPath) || "", i.text || "")) return "queued-mid-turn";
   if (i.received || (i.midTurn && i.working) || i.busyWait) return "queued-mid-turn";
   return "unknown";
 }
 ipcMain.handle("notify-send-failed", (event, { agentPath, text, info }) => {
+  // v1.69.4: the message sits in the CLI's own queue (screen shows the queued-messages footer): it is not lost, so no
+  // "not confirmed" alarm - the transcript receipt arrives when the turn ends. Still logged below.
+  let scr = null;
+  try { scr = screenStateFor(agentPath, String(text || "").slice(-40), text); } catch (e) {}
   try {
-    if (Notification.isSupported()) {
+    if (Notification.isSupported() && !(scr && scr.cause === "queued")) {
       const agentName = path.basename(agentPath);
       const preview = (text || "").replace(/\s+/g, " ").trim().slice(0, 120);
       const n = new Notification({
@@ -4182,6 +4363,7 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text, info }) => {
   let cause = "unknown";
   try { cause = classifySendFailure(agentPath, Object.assign({}, info, { text })); } catch (e) {}
   const inf = info || {};
+  if (scr) logStuckWatchdog(`notify-send-failed: ${agentPath} screen-cause=${scr.cause}${scr.cause === "queued" ? " (notification suppressed)" : ""} screen: ${scr.lines}`.slice(0, 2400));
   logStuckWatchdog(`notify-send-failed: ${agentPath} - message never landed in transcript, re-queued [cause=${cause} why=${inf.why || "?"} age=${inf.ageSec != null ? inf.ageSec + "s" : "?"} midTurn=${inf.midTurn ? 1 : 0} received=${inf.received ? 1 : 0} nudges=${inf.nudges || 0} working=${inf.working ? 1 : 0}]`);
   // v1.67.0: the log never said WHY. Snapshot the agent's own screen (`claude logs <id>`) at failure time:
   // idle + empty input box = dead link, text in the box = stuck Enter, a dialog = prompt waiting.
@@ -4191,7 +4373,14 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text, info }) => {
     if (id && /^[0-9a-f]{8}$/i.test(id) && sess.shell) {
       execFile(sess.shell, ["logs", id], { windowsHide: true, timeout: 8000, env: sess.spawnEnv, maxBuffer: 1024 * 1024 }, (err, stdout) => {
         const tail = stripTerminalCodes(String(stdout || "")).replace(/\s+/g, " ").trim().slice(-500);
-        logStuckWatchdog(`notify-send-failed: ${agentPath} claude logs ${id} tail: ${err && !tail ? "(unavailable: " + err.message + ")" : tail}`);
+        logStuckWatchdog(`notify-send-failed: ${agentPath} claude logs ${id} tail: ${err && !tail ? "(unavailable: " + err.message + ")" : deliveryScreen.lastLines(stdout, 12, 500, text)}`);
+        // v1.69.4: the CLI itself shows the text (claude logs) but our attach screen does not = dead / blank attach
+        try {
+          const want = deliveryScreen.squash(String(text || "")).slice(-40);
+          if (want.length >= 3 && deliveryScreen.squash(tail).includes(want) && !deliveryScreen.hasSnippet(dialogTails.get(agentPath) || "", want)) {
+            logStuckWatchdog(`notify-send-failed: ${agentPath} cause=dead-attach (claude logs shows the message text, the attach screen does not) screen: ${deliveryScreen.lastLines(dialogTails.get(agentPath) || "", 25, 1000, text)}`.slice(0, 2400));
+          }
+        } catch (e) {}
       });
     }
   } catch (e) { /* diagnostics only */ }
@@ -4354,6 +4543,7 @@ ipcMain.on("terminal-input", (event, { agentPath, data, app: fromApp }) => {
     if (connHealth.getState(agentPath).state !== "connected") {
       if (!lateInputs.has(agentPath)) lateInputs.set(agentPath, []);
       lateInputs.get(agentPath).push(data);
+      lateInputsAt.set(agentPath, Date.now());
       return;
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4376,6 +4566,27 @@ ipcMain.on("terminal-input", (event, { agentPath, data, app: fromApp }) => {
   if (session.starting) {
     session.pendingInput.push(data);
     return;
+  }
+  // v1.69.4: liveness check by EVIDENCE before a message is typed (attachDeadEvidence: kicked client, detached client / dashboard,
+  // blank attach confirmed by `claude logs`): re-spawn only the attach client, wait for its screen (the placeholder queue replays
+  // after the CLI has drawn), then the message is typed ONCE. The message and its end marker / Enter go into the placeholder queue.
+  if (fromApp && String(data).indexOf("\x1b[200~") === 0 && String(data).length > 6 && !reattaching.has(agentPath) && !isWorkingNow(agentPath)) {
+    const why = attachDeadEvidence(agentPath);
+    if (why) {
+      logStuckWatchdog(`dead-attach: ${agentPath} - before sending: ${why}; re-attaching the client first. screen: ${deliveryScreen.lastLines(dialogTails.get(agentPath) || "", 25, 1200, String(data).replace(/^\x1b\[200~/, ""))}`.slice(0, 2400));
+      const pr = reattachClient(agentPath, "before send: " + why);
+      const ph = ptySessions.get(agentPath);
+      if (ph && ph.starting) {
+        ph.pendingInput.push(data);
+        pr.then((ok) => {
+          if (ok === true) { setTimeout(() => { try { connHealth.noteWrite(agentPath, data); } catch (e) {} }, 1500); return; } // replayed by the new client: track it for stuck-Enter / ladder
+          // not delivered: remove ONLY this message's chunks from the replay queue; the renderer's Not-confirmed notice offers Resend
+          const li = lateInputs.get(agentPath);
+          if (li) { const i = li.indexOf(data); if (i >= 0) { let n = 1; while (i + n < li.length && (li[i + n] === "\x1b[201~" || li[i + n] === "\r") && n < 3) n++; li.splice(i, n); } if (!li.length) lateInputs.delete(agentPath); }
+        });
+        return;
+      }
+    }
   }
   if (fromApp) connHealth.noteWrite(agentPath, data); // v1.68.1: only the app's own message writes, never Terminal-tab typing/pastes
   if (testMode.TEST_MODE && fs.existsSync(testFaultFile("mute-" + path.basename(agentPath)))) return; // sandbox: simulate a dead pty
@@ -4448,6 +4659,7 @@ ipcMain.on("terminal-resize", (event, { agentPath, cols, rows }) => {
   if (session) {
     try {
       session.proc.resize(cols, rows);
+      session.cols = cols; session.rows = rows; // v1.69.4: the blank-tab resize probe uses the current size
     } catch (e) {
       handlePtyExit(agentPath);
     }
