@@ -35,10 +35,11 @@ function harness(over) {
   // v1.69.4 recovery ladder deps (only when the test asks for them)
   if (h.ladder) {
     calls.keys = []; calls.resets = 0;
-    deps.sendKeys = (p, steps) => { calls.keys.push(steps.map((x) => x.data)); if (h.onKeys) h.onKeys(steps.map((x) => x.data), h); };
+    deps.sendKeys = (p, steps) => { (calls.guards = calls.guards || []).push(...steps.filter((x) => x.guard).map((x) => x.guard)); calls.keys.push(steps.map((x) => x.data)); if (h.onKeys) h.onKeys(steps.map((x) => x.data), h); };
     deps.resetScreen = () => { calls.resets++; if (h.onReset) h.onReset(h); };
     deps.screenState = () => Object.assign({ cause: "unsent-box", holds: true, dialog: false, queued: false, working: false, ctrlCAgain: false, seen: true, lines: "SCREEN-LINES" }, h.screen || {});
   }
+  if (h.reattach) { calls.reattach = 0; deps.reattachClient = async (p) => { calls.reattach++; if (h.reattachFails > 0) { h.reattachFails--; return false; } return true; }; }
   const ch = create(deps);
   async function advance(ms) {
     const end = t + ms;
@@ -421,5 +422,68 @@ function harness(over) {
     y.ch.noteWrite(P, "\x1b[200~please read the status report now");
     assert.strictEqual(y.ch.deadAttach(P, "late"), false); assert.strictEqual(y.calls.restart, 0);
   }
+
+  // 32. v1.69.4 round 3: a kicked / detached client is re-attached (client only), the message is requeued once, no Restart Session
+  {
+    const x = harness({ reattach: true });
+    x.h.sessions[P] = "real";
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    assert.strictEqual(x.ch.deadAttach(P, "kicked"), true);
+    assert.strictEqual(x.ch.getState(P).state, "restarting");
+    assert.ok(x.ch.getState(P).requeueSince != null);                          // the message typed into the dead client goes back to the queue
+    await x.advance(100);
+    assert.strictEqual(x.calls.reattach, 1); assert.strictEqual(x.calls.restart, 0);
+    assert.strictEqual(x.ch.getState(P).state, "connected");
+    assert.strictEqual(x.ch.deadAttach(P, "kicked"), true);                      // a later problem can be repaired again
+  }
+  // 33. two failed re-attaches: Restart Session as the LAST resort, never while the agent works
+  {
+    const x = harness({ reattach: true, reattachFails: 2 });
+    x.h.sessions[P] = "real";
+    x.ch.deadAttach(P, "dashboard"); for (let i = 0; i < 20; i++) await Promise.resolve(); await x.advance(5000);
+    assert.strictEqual(x.calls.reattach, 2); assert.strictEqual(x.calls.restart, 1);
+    const y = harness({ reattach: true, reattachFails: 2, working: true });
+    y.h.sessions[P] = "real";
+    y.ch.deadAttach(P, "dashboard"); for (let i = 0; i < 20; i++) await Promise.resolve(); await y.advance(5000);
+    assert.strictEqual(y.calls.reattach, 2); assert.strictEqual(y.calls.restart, 0);
+    assert.strictEqual(y.ch.getState(P).state, "reconnecting");
+    assert.ok(y.logs.some((l) => /agent is working: no Restart Session/.test(l)));
+  }
+  // 34. legacy restart path (no reattachClient) refuses while working
+  {
+    const x = harness({ working: true });
+    x.h.sessions[P] = "real";
+    assert.strictEqual(x.ch.deadAttach(P, "x"), false); assert.strictEqual(x.calls.restart, 0);
+  }
+  // 35. ladder rung c: a second message written while the first is unacked -> no Ctrl+C, re-attach instead
+  {
+    const x = harness({ ladder: true, reattach: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(2000);
+    x.ch.noteWrite(P, "\x1b[200~and a second message right behind it");
+    await x.advance(30000);
+    assert.ok(!x.calls.keys.some((k) => k[0] === "\x03"));
+    assert.strictEqual(x.calls.reattach, 1);
+    assert.ok(x.logs.some((l) => /two messages are pending/.test(l)));
+  }
+  // 36. screen evidence (kicked / dashboard) in the ladder -> re-attach, no keys
+  {
+    const x = harness({ ladder: true, reattach: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.enterWorks = false; x.h.screen = { deadAttach: "kicked", cause: "dead-attach" };
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(12000);
+    assert.strictEqual(x.calls.keys.length, 0); assert.strictEqual(x.calls.reattach, 1); assert.strictEqual(x.calls.restart, 0);
+  }
+  // 37. the Ctrl+C step carries the guard that main checks right before it is typed (idle, text in the box, none in the last 10 s)
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.h.onKeys = (k, h) => { if (k[0] === "\x03") h.screen = { holds: false }; };
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(30000);
+    assert.deepStrictEqual(x.calls.guards, ["ctrlc"]);
+  }
+
   console.log("connectionHealth ok");
 })().catch((e) => { console.error(e); process.exit(1); });

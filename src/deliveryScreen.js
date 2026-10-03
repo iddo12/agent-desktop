@@ -29,7 +29,9 @@ function afterSnippet(tail, snippet) {
   return t.slice(-600);
 }
 const isDialog = (tail, snippet) => DIALOG_SQ.test(afterSnippet(tail, snippet)) || DIALOG_SQ.test(squash(tail).slice(-250));
-const isQueued = (tail, snippet) => QUEUED_SQ.test(afterSnippet(tail, snippet));
+// the footer must be in the CURRENT screen: within the last 500 characters after the typed text (a stale footer left in the
+// stream, followed by later output, does not count)
+const isQueued = (tail, snippet) => QUEUED_SQ.test(afterSnippet(tail, snippet).slice(-500));
 const isWorkingScreen = (tail, snippet) => WORKING_SQ.test(afterSnippet(tail, snippet));
 const ctrlCAgainShown = (tail) => CTRLC_AGAIN_SQ.test(squash(tail).slice(-400));
 const hasSnippet = (tail, snippet) => {
@@ -65,23 +67,58 @@ function stackedNewlines(tail, snippet) {
   return /^[ \t]*(\r?\n[ \t]*){2,}\u2500{5}/.test(t.slice(i + want.length));
 }
 
-// cause for the logs: queued / dialog / unsent-box / box-empty-no-ack / dead-pty / dead-attach
+// cause for the logs: queued (footer on the CURRENT screen only) / working / dialog / unsent-box / box-empty-no-ack / dead-pty / dead-attach
 function classify(tail, snippet, o) {
   if (o && o.deadPty) return "dead-pty";
   if (o && o.deadAttach) return "dead-attach";
   if (isDialog(tail, snippet)) return "dialog";
-  if (isQueued(tail, snippet) || (o && o.working) || isWorkingScreen(tail, snippet)) return "queued";
+  if (isQueued(tail, snippet)) return "queued";
+  if ((o && o.working) || isWorkingScreen(tail, snippet)) return "working";
   if (hasSnippet(tail, snippet)) return "unsent-box";
   return "box-empty-no-ack";
 }
 
-// last ~n lines of the screen text, ANSI-free and bounded, for the watchdog log
-function lastLines(tail, n, maxChars) {
-  const lines = stripTerminalCodes(tail).replace(/\r/g, "\n").split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim());
-  return lines.slice(-(n || 25)).join(" | ").slice(-(maxChars || 1500));
+// Same secret shapes logSentInput redacts (API keys / bearer tokens / key=value secrets).
+function redactSecrets(text) {
+  return String(text)
+    .replace(/\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})/g, "[REDACTED]")
+    .replace(/(bearer\s+)[A-Za-z0-9._~+\/=-]{16,}/gi, "$1[REDACTED]")
+    .replace(/((?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*)\S+/gi, "$1[REDACTED]");
+}
+// last ~n lines of the screen text, ANSI-free, secrets redacted, bounded, for the watchdog log. `omit` = the user's own message
+// text (what sits in the unsent box): every line of it is replaced by [msg], so a log line never holds what Iddo typed.
+function lastLines(tail, n, maxChars, omit) {
+  let t = stripTerminalCodes(tail).replace(/\r/g, "\n");
+  if (omit) {
+    for (const ln of String(omit).split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length >= 3).sort((a, b) => b.length - a.length)) {
+      t = t.split(ln).join("[msg]");
+    }
+  }
+  const lines = t.split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim());
+  return redactSecrets(lines.slice(-(n || 25)).join(" | ").slice(-(maxChars || 1500)));
+}
+
+// v1.69.4 (experiment 2026-10-04, real `claude --bg` + `claude attach`): the attach client can be dead without any error.
+//  - kicked: a second `claude attach` to the same session makes the older client print "Session opened in another window" and exit
+//  - detached: two Ctrl+C in a few seconds on an empty box detach the client; the screen goes blank, input then goes to the
+//    `claude agents` dashboard ("describe a task for a new session", "enter to return")
+// Evidence on the CURRENT screen (last 800 chars, whitespace squashed): "kicked" | "dashboard" | null.
+function attachEvidence(tail) {
+  const t = squash(tail).slice(-800);
+  if (/Sessionopenedinanotherwindow/i.test(t)) return "kicked";
+  if (/describeataskforanewsession|entertoreturn/i.test(t)) return "dashboard";
+  return null;
+}
+// Do two screens show different CLI content? (attach tail vs `claude logs` text): most of the logs' substantial lines are missing from the attach screen
+function screensDiffer(attachTail, logsText) {
+  const a = squash(stripTerminalCodes(attachTail));
+  const lines = String(logsText || "").split(/\r?\n/).map(squash).filter((l) => l.length >= 15 && !/^[\u2500-]+$/.test(l));
+  if (lines.length < 2) return false; // logs show nothing to compare against
+  const missing = lines.filter((l) => !a.includes(l)).length;
+  return missing >= Math.max(2, Math.ceil(lines.length / 2));
 }
 
 // a message ending in a backslash would insert a newline instead of submitting
 const fixTrailingBackslash = (text) => (/\\$/.test(String(text)) ? text + " " : text);
 
-module.exports = { attachHealth, stackedNewlines, stripTerminalCodes, squash, isDialog, isQueued, isWorkingScreen, ctrlCAgainShown, hasSnippet, inputHolds, classify, lastLines, fixTrailingBackslash };
+module.exports = { redactSecrets, attachEvidence, screensDiffer, attachHealth, stackedNewlines, stripTerminalCodes, squash, isDialog, isQueued, isWorkingScreen, ctrlCAgainShown, hasSnippet, inputHolds, classify, lastLines, fixTrailingBackslash };

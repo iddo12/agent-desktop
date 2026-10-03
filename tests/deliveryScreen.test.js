@@ -48,7 +48,7 @@ const QSNIP = "reply with the single word TWO";
 }
 // dead pty and working agent
 assert.strictEqual(DS.classify(tailOf(F.stuck), SNIP, { deadPty: true }), "dead-pty");
-assert.strictEqual(DS.classify(tailOf(F.empty), SNIP, { working: true }), "queued");
+assert.strictEqual(DS.classify(tailOf(F.empty), SNIP, { working: true }), "working"); // working is not "queued": a message that never landed must still raise the notice
 assert.strictEqual(DS.inputHolds("my text here\n esc to interrupt", "my text here"), false);
 // a stale queued footer BEFORE the typed text does not hide a fresh unsent box
 assert.strictEqual(DS.inputHolds("Press up to edit queued messages\n...\n> fresh text typed", "fresh text typed"), true);
@@ -84,5 +84,28 @@ assert.strictEqual(DS.stackedNewlines("> text here\n\u2500\u2500\u2500\u2500\u25
   assert.ok(DS.hasSnippet(logsText, SNIP) && !DS.hasSnippet("", SNIP));
   assert.strictEqual(DS.classify("", SNIP, { deadAttach: "no-output-since-attach" }), "dead-attach");
   assert.strictEqual(DS.classify(tailOf(F.stuck), SNIP, { deadPty: true, deadAttach: "x" }), "dead-pty");
+}
+
+// v1.69.4 round 3: the queued footer counts only on the CURRENT screen
+assert.strictEqual(DS.isQueued("> hello there\nPress up to edit queued messages", "hello there"), true);
+assert.strictEqual(DS.isQueued("> hello there\nPress up to edit queued messages" + "\nmore output line\n".repeat(60), "hello there"), false); // stale footer, later output
+// attach client evidence (experiment 2026-10-04): kicked = real capture, dashboard = synthesized from the observed strings
+assert.strictEqual(DS.attachEvidence(tailOf(F.kicked)), "kicked");
+assert.strictEqual(DS.attachEvidence(tailOf(F.dashboard)), "dashboard");
+assert.strictEqual(DS.attachEvidence(tailOf(F.attachIdle)), null);   // a healthy idle attach screen is not evidence
+assert.strictEqual(DS.attachEvidence(tailOf(F.stuck)), null);
+assert.strictEqual(DS.attachEvidence(tailOf(F.ctrlCAgain)), null);   // "Press Ctrl-C again" alone is not a dead client
+// blank attach vs `claude logs`: differ only when the logs show real content the attach screen lacks
+{
+  const logs = DS.stripTerminalCodes(F.attachIdle);
+  assert.strictEqual(DS.screensDiffer("", logs), true);
+  assert.strictEqual(DS.screensDiffer(tailOf(F.attachIdle), logs), false);
+  assert.strictEqual(DS.screensDiffer("", "short\n"), false);
+}
+// logs: secrets redacted, the user's own text omitted
+{
+  const l = DS.lastLines("token=abc123supersecret\n> please read the status report now\nand then summarise it\nfooter", 25, 1500, "please read the status report now\nand then summarise it");
+  assert.ok(!/abc123supersecret/.test(l) && !/status report/.test(l) && !/summarise it/.test(l) && /\[msg\]/.test(l) && /footer/.test(l), l);
+  assert.ok(!/sk-[A-Za-z0-9]{20}/.test(DS.redactSecrets("key sk-ABCDEFGHIJKLMNOPQRST here")));
 }
 console.log("deliveryScreen ok");

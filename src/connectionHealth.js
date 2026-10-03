@@ -60,7 +60,8 @@ const NUDGE_TEXT =
 //   wasInterrupted(agentPath) -> bool
 //   nudge(agentPath, text) -> void
 //   sendKeys(agentPath, [{ data, wait }]) -> void   (optional, v1.69.4; written in order through the renderer's per-session chain, wait ms after each)
-//   screenState(agentPath, snippet) -> { cause, holds, dialog, queued, working, ctrlCAgain, seen, lines } (optional, v1.69.4)
+//   reattachClient(agentPath, reason) -> Promise<bool>  (optional, v1.69.4; kill + re-spawn ONLY the `claude attach` client, not the bg agent)
+//   screenState(agentPath, snippet, fullText) -> { cause, holds, dialog, queued, working, ctrlCAgain, seen, lines } (optional, v1.69.4)
 //   resetScreen(agentPath) -> void             (optional; forget the screen text seen so far, so the next read is only what came after) }
 function create(deps, opts) {
   const o = Object.assign({}, DEFAULTS, opts || {});
@@ -74,7 +75,7 @@ function create(deps, opts) {
     let a = agents.get(p);
     if (!a) {
       a = { agentPath: p, state: "connected", attempts: 0, timer: null, nextRetryAt: 0, reason: "", since: 0,
-            unackedSince: null, deadTimer: null, stuckTimer: null, enterPresses: 0, ladderRan: false, ladderTimer: null, fullText: true, text: "", restarts: [], lastNudgeAt: 0, requeueSince: null, recovering: false, size: null };
+            unackedSince: null, deadTimer: null, stuckTimer: null, enterPresses: 0, extraWrites: 0, reattaching: false, ladderRan: false, ladderTimer: null, fullText: true, text: "", restarts: [], lastNudgeAt: 0, requeueSince: null, recovering: false, size: null };
       agents.set(p, a);
     }
     return a;
@@ -182,7 +183,9 @@ function create(deps, opts) {
   function noteWrite(p, data) {
     if (!isMessageWrite(data)) return; // keystrokes, arrow keys, focus/mouse reports are not messages (review H2)
     const a = get(p);
-    if ((a.state !== "connected" && a.state !== "degraded") || a.unackedSince != null) return;
+    if ((a.state !== "connected" && a.state !== "degraded")) return;
+    if (a.unackedSince != null) { a.extraWrites++; return; } // v1.69.4: a second message while the first is unacked (ladder rung c must not Ctrl+C then)
+    a.extraWrites = 0;
     a.unackedSince = now();
     a.text = String(data).replace(/^\u001b\[200~/, "").slice(0, 4000);
     a.snippet = String(data).replace(/^\u001b\[200~/, "").slice(-40);
@@ -237,7 +240,7 @@ function create(deps, opts) {
 
   // ---- v1.69.4 recovery ladder -------------------------------------------------------------------------------
   function screen(p, a) {
-    try { return deps.screenState(p, a.snippet) || {}; } catch (e) { return {}; }
+    try { return deps.screenState(p, a.snippet, a.text) || {}; } catch (e) { return {}; }
   }
   function ladderLog(p, a, msg, st) {
     log(`stuck-ladder: ${p} - ${msg} [cause=${(st && st.cause) || "?"}] screen: ${(st && st.lines) || "(none)"}`.slice(0, 2400));
@@ -263,6 +266,7 @@ function create(deps, opts) {
     if (st.deadAttach) { ladderLog(p, a, `dead-attach (${st.deadAttach}): re-attaching instead of typing keys`, st); deadAttach(p, st.deadAttach); return; }
     if (!st.holds) { ladderLog(p, a, `stopped at step ${step}: the text is no longer in the input box`, st); return; }
     // Enters inserted as newlines even after step a and b: not a stuck paste, a dead link
+    if (step === 3 && a.extraWrites > 0) { ladderLog(p, a, "two messages are pending: no Ctrl+C (it would drop both); re-attaching instead", st); deadAttach(p, "two unacked messages, Enter does not submit"); return; }
     if (step === 3 && st.stacked) { ladderLog(p, a, "dead-attach: Enter keys keep landing as newlines after steps a and b; re-attaching", st); deadAttach(p, "Enter keys insert newlines, text stays in the box"); return; }
     a.ladderRan = true;
     if (step === 1) {
@@ -278,7 +282,7 @@ function create(deps, opts) {
       if (st.ctrlCAgain) { ladderLog(p, a, "step c refused: the CLI is showing 'Press Ctrl-C again'", st); return; }
       ladderLog(p, a, "step c: one Ctrl+C (clears the box), then re-send", st);
       try { deps.resetScreen && deps.resetScreen(p); } catch (e) {}
-      deps.sendKeys(p, [{ data: "\x03", wait: 0 }]);
+      deps.sendKeys(p, [{ data: "\x03", wait: 0, guard: "ctrlc", snippet: a.snippet }]); // the renderer asks main right before typing it (idle, box holds text, none in the last 10 s)
       a.ccTries = 0;
       ladderNext(p, a, 3.5, o.ctrlCWaitMs);
     }
@@ -296,17 +300,46 @@ function create(deps, opts) {
     ladderNext(p, a, 4, o.ladderGapMs + 1500);
   }
 
-  // v1.69.4: the attach pty itself is dead or blank (see deliveryScreen.attachHealth). Restart the session (same path as
-  // Session > Restart Session: the stuck input is discarded, the fresh CLI has an empty box). A message that was written
-  // and is not in the transcript is handed back to the renderer's queue by recover() (requeueSince), so it is sent once.
-  // Returns true when a restart is now running (the caller must queue, not write, further input).
+  // v1.69.4: the `claude attach` client is dead, kicked by another attach, or detached (see deliveryScreen.attachEvidence).
+  // The light fix: kill and re-spawn ONLY the attach client (deps.reattachClient); the bg agent keeps running. The message that
+  // was typed into the dead client is handed back to the renderer queue (requeueSince) and sent once when we are connected again.
+  // Restart Session (recover) only as a last resort after two failed re-attaches, and never while the agent works.
+  // Returns true when a repair was started.
   function deadAttach(p, reason) {
     const a = get(p);
-    if (a.state !== "connected") return false;
+    if (a.state !== "connected" || a.recovering || a.reattaching) return false;
     if (a.unackedSince != null && ackState(p, a) === true) return false; // it landed after all
-    log(`dead-attach: ${p} - ${String(reason).slice(0, 300)}`);
-    recover(p, "dead attach: " + reason);
-    return a.state === "restarting";
+    let working = false;
+    try { working = !!(deps.isWorking && deps.isWorking(p)); } catch (e) {}
+    if (!deps.reattachClient) { // legacy: restart only
+      if (working) { log(`dead-attach: ${p} - ${reason}; the agent is working, not restarting it`); return false; }
+      log(`dead-attach: ${p} - ${String(reason).slice(0, 300)}`);
+      recover(p, "dead attach: " + reason);
+      return a.state === "restarting";
+    }
+    log(`dead-attach: ${p} - ${String(reason).slice(0, 300)}; re-attaching the terminal link (the agent itself is not restarted)`);
+    const since = a.unackedSince;
+    a.requeueSince = since;
+    a.unackedSince = null;
+    clearT(a.stuckTimer); a.stuckTimer = null; clearT(a.deadTimer); a.deadTimer = null; clearT(a.ladderTimer); a.ladderTimer = null;
+    a.reattaching = true; a.state = "restarting"; a.since = now(); a.reason = "re-attaching the terminal link";
+    emit(a);
+    (async () => {
+      let ok = false;
+      for (let i = 0; i < 2 && !ok; i++) {
+        try { ok = !!(await deps.reattachClient(p, reason)); } catch (e) { log(`dead-attach: ${p} re-attach #${i + 1} threw: ${e && e.message}`); }
+        if (!ok && i === 0) await new Promise((res) => unref(setT(res, 2000)));
+      }
+      a.reattaching = false;
+      if (ok) { log(`dead-attach: ${p} re-attached OK`); onConnected(p); return; }
+      let w = false;
+      try { w = !!(deps.isWorking && deps.isWorking(p)); } catch (e) {}
+      if (w) { log(`dead-attach: ${p} two re-attaches failed but the agent is working: no Restart Session, retrying with backoff`); a.state = "reconnecting"; a.attempts = 0; schedule(a); emit(a); return; }
+      log(`dead-attach: ${p} two re-attaches failed: last resort, Restart Session`);
+      a.state = "connected"; a.unackedSince = since; // recover() expects a live link state and requeues from unackedSince
+      recover(p, "dead attach, two re-attaches failed: " + reason);
+    })();
+    return true;
   }
 
   // Kept as a cheap hook: an idle CLI redraws its status line now and then, so "any output" proves nothing.

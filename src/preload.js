@@ -28,7 +28,8 @@ contextBridge.exposeInMainWorld("api", {
   logGuard: (line) => ipcRenderer.send("guard-log", { line }),
   sendInput: (agentPath, data, opts) => ipcRenderer.send("terminal-input", { agentPath, data, app: !!(opts && opts.app) }),
   onPressEnter: (callback) => { ipcRenderer.on("press-enter", (event, payload) => callback(payload)); },
-  terminalBlankCheck: (agentPath) => ipcRenderer.invoke("terminal-blank-check", { agentPath }), // v1.69.4
+  terminalBlankCheck: (agentPath, blank) => ipcRenderer.invoke("terminal-blank-check", { agentPath, blank: !!blank }), // v1.69.4
+  canSendCtrlC: (agentPath, snippet) => ipcRenderer.invoke("can-send-ctrlc", { agentPath, text: snippet }), // v1.69.4
   onSendKeys: (callback) => { ipcRenderer.on("send-keys", (event, payload) => callback(payload)); }, // v1.69.4 recovery ladder
   resizeTerminal: (agentPath, cols, rows) => ipcRenderer.send("terminal-resize", { agentPath, cols, rows }),
 

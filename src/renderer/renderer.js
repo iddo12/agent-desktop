@@ -905,12 +905,13 @@ function showTerminalFor(agent) {
     // itself is still directly focusable by clicking into it (e.g. for quick
     // menu/keystroke interactions like the theme picker or y/n prompts).
     chatInputEl.focus();
-    // v1.69.4: a blank Terminal for a live session = dead / stale attach: ask main to nudge a redraw or re-attach
+    // v1.69.4: ask main whether this attach client is alive (kicked / detached / blank Terminal); main re-attaches the client
     setTimeout(() => {
       try {
+        let blank = true;
         const b = session.term.buffer.active;
-        for (let y = 0; y < b.length; y++) { const l = b.getLine(y); if (l && l.translateToString(true).trim()) return; }
-        if (session.started) window.api.terminalBlankCheck(agent.path).catch(() => {});
+        for (let y = 0; y < b.length; y++) { const l = b.getLine(y); if (l && l.translateToString(true).trim()) { blank = false; break; } }
+        if (session.started) window.api.terminalBlankCheck(agent.path, blank).catch(() => {});
       } catch (e) { /* diagnostics only */ }
     }, 2500);
   });
@@ -3773,6 +3774,8 @@ try {
     if (!s || !Array.isArray(steps)) return;
     writeQueued(s, async () => {
       for (const st of steps) {
+        // v1.69.4: Ctrl+C is asked from main right before it is typed (agent idle, text in the box, none in the last 10 s)
+        if (st.guard === "ctrlc") { let ok = false; try { ok = await window.api.canSendCtrlC(agentPath, st.snippet); } catch (e) {} if (!ok) break; }
         window.api.sendInput(agentPath, String(st.data));
         if (st.wait > 0) await new Promise((r) => setTimeout(r, st.wait));
       }
