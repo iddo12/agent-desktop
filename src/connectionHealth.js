@@ -159,6 +159,7 @@ function create(deps, opts) {
     a.text = String(data).replace(/^\u001b\[200~/, "").slice(0, 4000);
     a.snippet = String(data).replace(/^\u001b\[200~/, "").slice(-40);
     a.enterPresses = 0;
+    a.verified2 = false;
     a.deadTimer = unref(setT(() => checkDead(p), o.deadLinkMs));
     if (deps.inputHoldsText && deps.pressEnter) { clearT(a.stuckTimer); a.stuckTimer = unref(setT(() => checkStuck(p), o.stuckEnterMs)); }
   }
@@ -192,6 +193,8 @@ function create(deps, opts) {
     if (ack === true) { log(`stuck-enter: ${p} - delivered after the automatic Enter`); return; }
     if (ack === null) return;                            // cannot verify (very short text): one Enter was all we do
     if (!holds(p, a)) return;                            // left the box (submitted or cleared): the receipt may just be late
+    // v1.68.1: a slow transcript must read as "wait and look again", never as a reason to restart and re-send. One more round.
+    if (!a.verified2) { a.verified2 = true; a.stuckTimer = unref(setT(() => verifyStuck(p), o.stuckVerifyMs)); return; }
     let working = false;
     try { working = !!(deps.isWorking && deps.isWorking(p)); } catch (e) {}
     if (working) { log(`stuck-enter: ${p} - text still in the input box after Enter but the agent is working; leaving it to the Not-confirmed notice`); return; }

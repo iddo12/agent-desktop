@@ -2935,9 +2935,10 @@ const connHealth = require("./connectionHealth").create({
   // v1.68.0 stuck Enter (see connectionHealth.js)
   inputHoldsText: (agentPath, snippet) => inputHoldsUnsentText(agentPath, snippet),
   transcriptHas: (agentPath, text, sinceMs) => transcriptTailHasText(agentPath, text, sinceMs),
+  // v1.68.1: the renderer presses it, through the same per-session write chain as every message (a bare write from
+  // here could land inside the next message's bracketed paste)
   pressEnter: (agentPath) => {
-    const s = ptySessions.get(agentPath);
-    if (s && s.proc) writeToPtyChunked(s.proc, agentPath, "\r");
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("press-enter", { agentPath });
   },
 });
 // true/false = the agent's newest transcript (last 1 MB) does / does not contain the message (via its longest plain
@@ -3824,6 +3825,14 @@ ipcMain.handle("clear-stale-input", (event, { agentPath, text }) => {
     const act = getSessionActivity(sessionCwdFor(agentPath));
     if (act && act.working) return false;
     if (!inputHoldsUnsentText(agentPath, text)) return false;
+    // the text must be the LAST thing on the screen (the live input line), not an older echo with output after it
+    const strip = (x) => String(x).replace(/\s+/g, "");
+    const tailS = strip((dialogTails.get(agentPath) || "").slice(-900));
+    const wantS = strip(text || "").slice(-40);
+    const after = tailS.slice(tailS.lastIndexOf(wantS) + wantS.length);
+    if (after.length > 120 || /Working|Thinking|esctointerrupt|tokens/i.test(after)) return false;
+    const mt = getLatestTranscriptMtimeMs(sessionCwdFor(agentPath));
+    if (mt != null && Date.now() - mt < 5000) return false; // the agent wrote very recently: do not touch its input
     staleClearedAt.set(agentPath, Date.now());
     writeToPtyChunked(s.proc, agentPath, "\x03");
     logStuckWatchdog(`stale-input: ${agentPath} - the message was delivered another way but its text sat unsent in the input box; cleared it`);
@@ -4109,7 +4118,7 @@ function logSentInput(agentPath, data) {
   } catch (e) {}
 }
 
-ipcMain.on("terminal-input", (event, { agentPath, data }) => {
+ipcMain.on("terminal-input", (event, { agentPath, data, app: fromApp }) => {
   logSentInput(agentPath, data);
   const session = ptySessions.get(agentPath);
   if (!session) {
@@ -4150,7 +4159,7 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
     session.pendingInput.push(data);
     return;
   }
-  connHealth.noteWrite(agentPath, data);
+  if (fromApp) connHealth.noteWrite(agentPath, data); // v1.68.1: only the app's own message writes, never Terminal-tab typing/pastes
   if (testMode.TEST_MODE && fs.existsSync(testFaultFile("mute-" + path.basename(agentPath)))) return; // sandbox: simulate a dead pty
   writeToPtyChunked(session.proc, agentPath, data);
 });

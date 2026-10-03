@@ -233,6 +233,8 @@ function harness(over) {
     x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false; x.h.working = false;
     x.ch.noteWrite(P, "\x1b[200~please read the status report now");
     await x.advance(8000 + 6000 + 1000);
+    assert.strictEqual(x.calls.restart, 0);                                    // first verify only re-checks (slow transcript)
+    await x.advance(6000);
     assert.strictEqual(x.calls.enter, 1);
     assert.strictEqual(x.calls.restart, 1);
     assert.ok(x.logs.some((l) => /stuck Enter/.test(l)));

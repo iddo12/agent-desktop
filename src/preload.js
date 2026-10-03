@@ -26,7 +26,8 @@ contextBridge.exposeInMainWorld("api", {
   voiceWarm: () => ipcRenderer.invoke("voice-warm"),
   voiceSave: (wavBase64) => ipcRenderer.invoke("voice-save", { wavBase64 }),
   logGuard: (line) => ipcRenderer.send("guard-log", { line }),
-  sendInput: (agentPath, data) => ipcRenderer.send("terminal-input", { agentPath, data }),
+  sendInput: (agentPath, data, opts) => ipcRenderer.send("terminal-input", { agentPath, data, app: !!(opts && opts.app) }),
+  onPressEnter: (callback) => { ipcRenderer.on("press-enter", (event, payload) => callback(payload)); },
   resizeTerminal: (agentPath, cols, rows) => ipcRenderer.send("terminal-resize", { agentPath, cols, rows }),
 
   listArchivedDays: (agentPath) => ipcRenderer.invoke("list-archived-days", { agentPath }),

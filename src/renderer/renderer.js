@@ -711,6 +711,8 @@ chatInputEl.addEventListener("input", () => {
 
 function selectAgent(agent) {
   if (activeAgentPath !== agent.path) {
+    const leaving = activeAgentPath && terminals.get(activeAgentPath);
+    if (leaving) leaving.lastAllBlocks = null; // v1.68.1: do not keep a second copy of every visited transcript
     parkComposeDraft(activeAgentPath);
     restoreComposeDraft(agent.path);
   }
@@ -1659,8 +1661,10 @@ function handoffLabelFor(text) {
 }
 
 // What a pending bubble looks like depends on these fields only; an unchanged key keeps the existing element.
+let pendingSeq = 0;
 function pendingKey(p) {
-  return p.text + "\x00" + (p.failed ? "failed" + (p.superseded ? "S" : "") + (p.waitedOnBusyAgent ? "B" : "") : p.received ? "recv" : p.written ? "sent" : "send");
+  if (!p._id) p._id = ++pendingSeq; // identity: two failed "yes" bubbles must not share one DOM node / Resend closure
+  return p._id + "\x00" + p.text + "\x00" + (p.failed ? "failed" + (p.superseded ? "S" : "") + (p.waitedOnBusyAgent ? "B" : "") : p.received ? "recv" : p.written ? "sent" : "send");
 }
 
 function renderChatBlocks(blocks, pendingSent, opts = {}) {
@@ -2092,21 +2096,27 @@ async function rebuildChatView(agentPath, opts = {}) {
         stillUnmatched = false;
       }
     }
-    // v1.68.0 (Iddo, LensVid Talk 2026-10-03): a bubble must never keep waiting after the agent has RESPONDED. The text
-    // may have reached the agent another way (message channel, a different wrapping), so (a) the text found in ANY
-    // transcript block, receipt included, or (b) an agent reply newer than the send of a message sent to an idle
-    // agent, settles it as delivered. A leftover unsent copy in the CLI input box is then cleared.
+    // v1.68.1 (Iddo, LensVid Talk 2026-10-03; review H1/H2): the text reached the agent in another wording or by another
+    // route (message channel) when a USER block that is newer than this send contains it. Only user blocks count: an
+    // agent reply never proves THIS message arrived (the 2026-09-27 "yes" incident), and a CLI receipt only means
+    // "queued" (it keeps its calm "queued in the agent" mark and the withdrawn-from-queue check below).
+    let settledByUserBlock = false;
     if (stillUnmatched && !pending.failed) {
       const fpS = normalizeForMatch(pending.text).slice(-80).trim();
       const sentS = pending.sentAt || pending.addedAt;
-      const anywhere = fpS.length >= 20 && (blocks.some((b) => normalizeForMatch(b.lines.join(" ")).includes(fpS)) ||
-        queuedBlocks.some((q) => q.timestamp && new Date(q.timestamp).getTime() >= sentS - 2000 && normalizeForMatch(q.lines.join(" ")).includes(fpS)));
-      const answered = !pending.midTurn && blocks.some((b) => b.role === "agent" && b.timestamp && new Date(b.timestamp).getTime() > sentS + 1500);
-      if (anywhere || answered) {
+      if (fpS.length >= 20 && blocks.some((b) => b.role === "user" && b.timestamp && new Date(b.timestamp).getTime() >= sentS - 2000 &&
+          normalizeForMatch(b.lines.join(" ")).includes(fpS))) {
         stillUnmatched = false;
+        settledByUserBlock = true;
         perfCount("pendingSettled");
-        window.api.clearStaleInput(agentPath, pending.text).catch(() => {});
       }
+    }
+    // The exact-text match above did not fire, so this copy may still sit unsent in the CLI input box (delivered via the
+    // channel). Clear it - through the same write chain as every message so Ctrl+C can never land inside a paste.
+    if (settledByUserBlock && pending.written && now - (pending.sentAt || pending.addedAt) > 8000 && !pending.staleClearTried) {
+      pending.staleClearTried = true;
+      const ptxt = pending.text;
+      writeQueued(session, () => window.api.clearStaleInput(agentPath, ptxt).catch(() => {}));
     }
     // v1.23.0: the handoff-resume message is shown as a red "reset" block (archive.js), and
     // "/clear" never appears as a user block at all - neither would ever match above, so they
@@ -3708,7 +3718,7 @@ function submitToAgent(agentPath, text, opts) {
   const sentEntry = session && session.pendingSent[session.pendingSent.length - 1];
   const entryRef = (opts && opts.entry) || sentEntry;
   writeQueued(session, () => new Promise((resolve) => {
-    window.api.sendInput(agentPath, "\x1b[200~" + text);
+    window.api.sendInput(agentPath, "\x1b[200~" + text, { app: true }); // app: a message from this send path (arms the stuck-Enter check), not keystrokes typed in the Terminal tab
     setTimeout(() => {
       window.api.sendInput(agentPath, "\x1b[201~");
       setTimeout(() => {
@@ -3724,6 +3734,14 @@ function submitToAgent(agentPath, text, opts) {
     }, 30);
   }));
 }
+
+// v1.68.1: main's stuck-Enter check asks the renderer to press Enter so it goes through the per-session write chain
+try {
+  window.api.onPressEnter(({ agentPath }) => {
+    const s = terminals.get(agentPath);
+    if (s) writeQueued(s, () => window.api.sendInput(agentPath, "\r"));
+  });
+} catch (e) { /* older preload */ }
 
 function writeQueued(session, fn) {
   const prev = (session && session.writeChain) || Promise.resolve();
@@ -3818,7 +3836,8 @@ async function sendChatInput() {
   // clear the compose box. Saving a long message to a file and the permission-prompt check are IPC round trips that
   // can wait behind a busy main process; they now run behind the instant frame, in the same order as before.
   let entry = null;
-  if (session && session.started && session.sendQueue.length === 0 && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath))) {
+  if (session && session.started && session.sendQueue.length === 0 && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath)) &&
+      !(window.connHealth && window.connHealth.holding && window.connHealth.holding(agentPath))) {
     const nowP = Date.now();
     entry = { text: combined, addedAt: nowP, sentAt: nowP, midTurn: false, provisional: true };
     session.pendingSent.push(entry);
@@ -3860,7 +3879,12 @@ async function sendChatInput() {
       if (entry && session.pendingSent.includes(entry)) { // never leave a bubble for a message that was not sent
         session.pendingSent = session.pendingSent.filter((p) => p !== entry);
         if (agentPath === activeAgentPath) renderChatBlocks(session.lastBlocks || [], session.pendingSent, {});
-        if (!chatInputEl.value) chatInputEl.value = combined; // give him his text back
+        // give him his text back - in the box of the agent it was typed for, and never when it was already written
+        // to the pty (that would invite a duplicate)
+        if (!entry.written) {
+          if (agentPath === activeAgentPath) { if (!chatInputEl.value) chatInputEl.value = combined; }
+          else composeDrafts.set(agentPath, { text: combined, attachments: [] });
+        }
       }
     });
     session.sendChain = mine;
