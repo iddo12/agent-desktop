@@ -103,12 +103,18 @@ function create(deps) {
     // counters: a GENUINE person's new message (origin human; not this app's, not a task notification / hook / relay) resets everything;
     // real work (a non-read tool call) after a nudge resets the streak
     if (h && !h.systemish && h.ts > c.humanTs) {
-      c.humanTs = h.ts; c.consecutive = 0; c.hashes = []; dirty = true;
+      c.humanTs = h.ts; c.consecutive = 0; c.hashes = []; r.failures = 0; dirty = true;
       clearStopped(p, "new message from a person");
     } else if (h && h.isNudge && parsed.workToolUses > 0 && c.consecutive > 0) {
       c.consecutive = 0; dirty = true;
       clearStopped(p, "progress after a nudge");
       log("keepgoing: " + p + " made progress after the nudge (" + parsed.workToolUses + " work tool call(s)) - streak reset");
+    }
+    // a nudge whose delivery was reported "not confirmed" landed late after all: count it, never send a second copy
+    if (r.failures > 0 && h && h.isNudge && h.ts >= (r.lastTryAt || 0) - 1000) {
+      r.failures = 0; r.retryAfter = 0;
+      c.consecutive = (c.consecutive || 0) + 1; c.lastNudgeAt = h.ts; c.hashes.push(K.hashText(r.lastTryText || "")); c.hashes = c.hashes.slice(-10); c.recent.push(h.ts); dirty = true;
+      log("keepgoing: the nudge to " + p + " landed late - counted, not retried");
     }
     const m = P.mission[p];
     if (m && m.active) {
@@ -145,7 +151,7 @@ function create(deps) {
 
     const prev = { consecutive: c.consecutive, lastNudgeAt: c.lastNudgeAt, hashes: c.hashes.slice() };
     c.consecutive++; c.lastNudgeAt = t; c.hashes.push(hash); c.hashes = c.hashes.slice(-10); c.recent.push(t);
-    lastGlobalNudgeAt = t; done(); r.inflight = true; save();
+    lastGlobalNudgeAt = t; done(); r.inflight = true; r.lastTryAt = t; r.lastTryText = text; save();
     log("keepgoing: NUDGE #" + c.consecutive + " to " + p + " - " + d.reason);
     emit(p);
     Promise.resolve()
@@ -155,6 +161,11 @@ function create(deps) {
         if (res && res.delivered) { r.failures = 0; log("keepgoing: nudge to " + p + " delivered via " + res.via); return; }
         if (res && res.dry) { log("keepgoing: nudge to " + p + " not delivered (dry run)"); return; }
         // M1: a nudge that never landed does not count: undo it, retry later (twice), then tell Iddo
+        if (res && res.aborted) { // a handoff started meanwhile: not a delivery failure, nothing to retry on a timer
+          c.consecutive = prev.consecutive; c.lastNudgeAt = prev.lastNudgeAt; c.hashes = prev.hashes; c.recent.pop(); dirty = true; r.deferred = true; save();
+          log("keepgoing: nudge to " + p + " cancelled (a handoff started) - not counted as a failure");
+          return;
+        }
         r.failures = (r.failures || 0) + 1;
         log("keepgoing: nudge to " + p + " NOT confirmed in the transcript (" + ((res && res.attempts) || 0) + " attempts), failure " + r.failures);
         c.consecutive = prev.consecutive; c.lastNudgeAt = prev.lastNudgeAt; c.hashes = prev.hashes; c.recent.pop(); dirty = true;

@@ -3046,7 +3046,7 @@ function transcriptTailHasText(agentPath, text, sinceMs) {
 // (src/keepGoing.js decides, src/keepGoingGlue.js holds the safety rails). Rides on the 30 s tick above; reads a
 // transcript tail only when the transcript changed. Also: the fresh session after a handoff is told to continue at once.
 let keepGoing = null;
-const kgHandoffActive = new Set(); // agents with a handoff flow running in the renderer (M4)
+const kgHandoffActive = new Map(); // agent -> flagged-at ms: handoff flow running in the renderer (M4); entries expire after 50 min
 const norm_kg = (p) => String(p || "").replace(/[\\/]+$/, "").toLowerCase();
 // L4: only known agent folders, and a handoff file that lives inside that agent's own folder
 function kgKnownAgent(agentPath) {
@@ -3069,7 +3069,7 @@ try {
     },
     // M5: stat-only signature (the glue reads the tail only when it changed)
     sig: (agentPath) => { const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath)); return nt ? nt.mtimeMs + ":" + nt.size : null; },
-    handoffActive: (agentPath) => kgHandoffActive.has(norm_kg(agentPath)),
+    handoffActive: (agentPath) => { const at = kgHandoffActive.get(norm_kg(agentPath)); return !!at && Date.now() - at < 50 * 60 * 1000; },
     readTail: (agentPath) => {
       const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
       if (!nt) return null;
@@ -3111,7 +3111,7 @@ try {
         channelCancel: (id) => require("./agentChannel").cancel(id),
         ptySend: (t) => typeIntoPty(agentPath, t),
         ptyQueued: () => false,
-        aborted: () => kgHandoffActive.has(norm_kg(agentPath)), // a handoff started meanwhile: never land the nudge in the old session
+        aborted: () => { const at = kgHandoffActive.get(norm_kg(agentPath)); return !!at && Date.now() - at < 50 * 60 * 1000; }, // a handoff started meanwhile: never land the nudge in the old session
         transcriptHas: (m) => contains(m),
         log: (line) => logStuckWatchdog("keepgoing: " + line),
       }, { ttlSec: 180 });
@@ -3123,9 +3123,10 @@ try {
     return keepGoing.setEnabled(agentPath || null, !!enabled);
   });
   // M4: the renderer lists the agents whose handoff flow is saving / resetting / resuming; no nudges for them
-  ipcMain.on("keepgoing-handoff-active", (event, { agents }) => {
+  ipcMain.on("keepgoing-handoff-active", (event, payload) => {
+    const agents = payload && payload.agents;
     kgHandoffActive.clear();
-    for (const a of Array.isArray(agents) ? agents : []) if (typeof a === "string") kgHandoffActive.add(norm_kg(a));
+    for (const a of Array.isArray(agents) ? agents : []) if (typeof a === "string") kgHandoffActive.set(norm_kg(a), Date.now());
   });
   // The renderer asks for the resume message of a fresh session after a handoff reset; this also sets the persisted
   // "mission in progress" marker (the nudge counters are NOT touched by a handoff).

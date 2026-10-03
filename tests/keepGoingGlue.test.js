@@ -226,6 +226,27 @@ const tick = async (w, advance) => { w.t += advance == null ? 0 : advance; w.g.t
     t("H1: nudge text does not claim nothing blocks the agent and mentions approval", () => { assert.ok(!/Nothing has blocked you/.test(K.NUDGE_TEXT)); assert.ok(/approval/.test(K.NUDGE_TEXT) && /BLOCKED:/.test(K.NUDGE_TEXT)); });
   }
 
+  // second review: a delivery cancelled by a handoff is not a failure; a late-landing nudge is counted, never duplicated
+  {
+    const w = world();
+    let mode = "abort", deliveries = 0;
+    w.g = G.create({ now: () => w.t, log: (l) => w.logs.push(l), emit: () => {}, agents: () => ["A"], limits: { warmupMs: 0 },
+      readTail: () => ({ text: w.lines.join("\n"), sig: "s" + w.sigN }), isWorking: () => false, readThrottle: () => null,
+      deliver: async () => { deliveries++; return mode === "abort" ? { delivered: false, aborted: true } : { delivered: false, attempts: 3 }; },
+      storage: { load: () => null, save: () => {} } });
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, END)]);
+    await tick(w);
+    t("cancelled-by-handoff delivery: rolled back, no failure count", () => { assert.strictEqual(w.g._state().counters.A.consecutive, 0); assert.ok(!/failure/.test(w.logs.join("\n"))); });
+    mode = "fail";
+    await tick(w, 1000); // retry (deferred), delivery reported not confirmed
+    const sentAt = w.t;
+    // ...but the nudge really landed late: the transcript now ends with the nudge entry
+    w.set(w.lines.concat([usr(sentAt + 5000, "[hid:z] " + K.NUDGE_TEXT)]));
+    const before = deliveries;
+    await tick(w, 200000);
+    t("late-landing nudge is counted and not retried", () => { assert.strictEqual(deliveries, before); assert.strictEqual(w.g._state().counters.A.consecutive, 1); assert.ok(w.logs.some((l) => /landed late/.test(l))); });
+  }
+
   console.log((n - fails) + "/" + n + " keepGoingGlue tests passed");
   process.exit(fails ? 1 : 0);
 })();

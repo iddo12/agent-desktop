@@ -642,7 +642,7 @@
   // attaches once the agent is opened), give it a few seconds to settle, send, then confirm the
   // marker landed in the transcript. Resend once if not; after that tell the user what to do.
   // v1.69.0 (M4): tell main which agents have a handoff running so keep-going never nudges them (only sent when the list changes)
-  let kgActiveKey = "";
+  let kgActiveKey = null; // null: the first tick after a (re)load always sends the list, so main never keeps a stale flag
   function syncKeepGoing() {
     try {
       const act = [];

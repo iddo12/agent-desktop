@@ -38,6 +38,11 @@ const TABLE = [
   ["nudge", "Registry updated. Now running module B."],
   ["nudge", "Starting the migration of the second site."],
   ["nudge", "Cleanup finished. Next, update the registry entry."],
+  // --- second review: innocent words no longer read as waiting
+  ["nudge", "Tests pass. Next: I'll wire up the monitor module."],
+  ["nudge", "Tests pass. Next: I'll fix the approval dialog layout."],
+  ["nudge", "Parser done. Next: I'll rename the later variable."],
+  ["blocked", "Deployed to staging. I'll monitor the job and report."],
   ["nudge", "Cleanup done on D:. Proceeding with the E: drive now."],
   ["nudge", "I've reviewed the three candidates. I'm about to compare their output formats."],
   ["nudge", "The build succeeded. Moving on to the installer packaging."],
@@ -219,6 +224,9 @@ t("resumePromptText: mission text vs old text, marker kept", () => {
   assert.ok(/two short lines/.test(b));
 });
 
+t("parseHandoff: 'wait for Iddo to say go' is not a mission", () => {
+  assert.strictEqual(K.parseHandoff("## LESSONS\n- a\n## OPEN NOW\n- x\n## STATE\nExact next step: wait for Iddo to say go, then push\n## KEY FACTS\nz").mission, false);
+});
 t("hashText stable + differs", () => {
   assert.strictEqual(K.hashText("abc"), K.hashText("abc"));
   assert.notStrictEqual(K.hashText("abc"), K.hashText("abd"));
