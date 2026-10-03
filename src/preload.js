@@ -98,6 +98,10 @@ contextBridge.exposeInMainWorld("api", {
   onTerminalData: (callback) => {
     ipcRenderer.on("terminal-data", (event, payload) => callback(payload));
   },
+  onConnectionState: (callback) => {
+    ipcRenderer.on("connection-state", (event, payload) => callback(payload));
+  },
+  getConnectionStates: () => ipcRenderer.invoke("get-connection-states"),
   onTerminalExit: (callback) => {
     ipcRenderer.on("terminal-exit", (event, payload) => callback(payload));
   },

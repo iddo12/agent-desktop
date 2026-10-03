@@ -1924,6 +1924,7 @@ async function rebuildChatView(agentPath, opts = {}) {
       setBusy(agentPath, session, false);
     }
     if (!activity.working) session.turnStartedAt = null; // real "turn done" - clear the optimistic timer too
+    if (window.connHealth) window.connHealth.onActivity(agentPath, session, activity); // v1.67.0: long foreground command banner
     updateThinkingIndicator();
   }
 
@@ -2629,7 +2630,7 @@ function setBusy(agentPath, session, busy) {
   // for the next stray byte of pty output to get going.
   // NOTE: this guards the drain only. The compose-availability and thinking
   // indicator updates at the end of this function must still run.
-  if (!busy && !session.transcriptWorking && session.sendQueue.length > 0) {
+  if (!busy && !session.transcriptWorking && session.sendQueue.length > 0 && !(window.connHealth && window.connHealth.holding(agentPath))) {
     // Dequeue exactly one - sending it will make the session busy again
     // once its own response starts streaming, which naturally serializes
     // the rest of the queue through this same idle-transition path rather
@@ -2686,6 +2687,7 @@ function setBusy(agentPath, session, busy) {
 const THINKING_INDICATOR_QUIET_MS = 60000;
 let thinkingIndicatorInterval = null;
 function updateThinkingIndicator() {
+  if (window.connHealth && window.connHealth.paint(activeAgentPath, chatThinkingIndicatorEl)) return; // v1.67.0: "not connected" replaces a stale Working timer
   const session = activeAgentPath && terminals.get(activeAgentPath);
   const working = !!session && (session.turnStartedAt || session.transcriptWorking);
   if (!working) {
@@ -2742,6 +2744,7 @@ function midTurnAllowed() {
 async function sendOrHold(agentPath, session, text) {
   if (!session) { submitToAgent(agentPath, text); return "sent"; }
   if (!session.started) { session.sendQueue.push(text); renderQueue(agentPath); return "held"; }
+  { const held = window.connHealth && window.connHealth.interceptSend(agentPath, session, text); if (held) return held; } // v1.67.0: link down -> queue visibly
   const working = () => session.busy || session.transcriptWorking;
   if (!working()) { submitToAgent(agentPath, text); return "sent"; }
   let ok = midTurnAllowed() && session.sendQueue.length === 0 && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath));

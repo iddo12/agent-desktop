@@ -471,8 +471,9 @@ function foldActivityLine(st, line) {
     const done = obj.message.stop_reason === "end_turn" || obj.message.stop_reason === "stop_sequence";
     if (done && (st.lastEndTurnTs == null || ts > st.lastEndTurnTs)) st.lastEndTurnTs = ts;
     const c = obj.message.content;
-    const toolUse = Array.isArray(c) && c.some((b) => b && b.type === "tool_use");
-    if (st.last == null || ts >= st.last.ts) st.last = { ts, done, toolUse };
+    const toolBlock = Array.isArray(c) ? c.find((b) => b && b.type === "tool_use") : null;
+    const toolUse = !!toolBlock;
+    if (st.last == null || ts >= st.last.ts) st.last = { ts, done, toolUse, toolName: toolBlock ? String(toolBlock.name || "") : "" };
   } else if (obj.type === "user") {
     if (obj.origin && obj.origin.kind === "human" && !obj.isMeta) {
       if (st.lastHumanTs == null || ts > st.lastHumanTs) st.lastHumanTs = ts;
@@ -591,7 +592,11 @@ function finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId) 
     if (startTs == null || (lastEndTurnTs != null && lastEndTurnTs > startTs)) startTs = lastEndTurnTs;
     if (startTs == null) startTs = last.ts;
   }
-  return { working, sinceMs: working ? Math.max(0, Date.now() - startTs) : 0, pendingToolUse: !!(working && last && last.toolUse) };
+  const pendingToolUse = !!(working && last && last.toolUse);
+  // v1.67.0: how long the still-unanswered tool call has been running (a long foreground Bash/PowerShell
+  // command holds every queued message until it ends). Additive fields; nothing else reads them.
+  return { working, sinceMs: working ? Math.max(0, Date.now() - startTs) : 0, pendingToolUse,
+    pendingToolName: pendingToolUse ? last.toolName || "" : "", pendingToolAgeMs: pendingToolUse ? Math.max(0, Date.now() - last.ts) : 0 };
 }
 
 // Cheap companion to getSessionActivity() for the stuck-turn watchdog in
