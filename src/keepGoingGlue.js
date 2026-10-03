@@ -24,6 +24,16 @@ function create(deps) {
   P.counters = P.counters || {}; // path -> { consecutive, lastNudgeAt, hashes[], recent[], humanTs, stopped, stoppedAt, stoppedReason }
   const rt = new Map();          // path -> { lastSig, deferred, inflight }
   let lastGlobalNudgeAt = 0;
+  const bornAt = now();
+  // L3: forget agents that have not been seen for 30 days (keeps keepgoing.json small)
+  (function prune() {
+    const cut = now() - 30 * 24 * 3600 * 1000;
+    for (const k of Object.keys(P.counters)) {
+      const c = P.counters[k];
+      if (!c.stopped && Math.max(c.lastNudgeAt || 0, c.humanTs || 0, c.stoppedAt || 0) < cut) delete P.counters[k];
+    }
+    for (const k of Object.keys(P.mission)) if (!(P.mission[k] && P.mission[k].since > cut)) delete P.mission[k];
+  })();
   let dirty = false;
 
   function save() { dirty = false; try { store.save(P); } catch (e) { log("keepgoing: could not persist settings: " + e.message); } }
@@ -68,33 +78,44 @@ function create(deps) {
     const r = R(p);
     if (r.inflight) return;
     if (P.agents[p] && P.agents[p].enabled === false) return; // this agent is switched off: nothing to track
+    // L5: after an app start every idle agent looks "stopped"; wait a few minutes before judging anybody
+    if (L.warmupMs > 0 && now() - bornAt < L.warmupMs) return;
+    // M4: a handoff flow is running for this agent (the renderer tells main): the handoff prompt / resume own the conversation
+    try { if (deps.handoffActive && deps.handoffActive(p)) { r.deferred = true; return; } } catch (e) {}
     // working agents cost nothing here: activity comes from the existing incremental transcript summary, no tail read
     let working = false;
     try { working = !!deps.isWorking(p); } catch (e) {}
     if (working) { if (P.counters[p] && P.counters[p].stopped) clearStopped(p, "agent is working again"); return; }
+    const thrNow = throttle();
+    // M5: cheap stat-based signature first; the 128 KB tail is read only when the transcript changed (or a re-check is due)
+    let sigNow = null;
+    try { sigNow = deps.sig ? deps.sig(p) : null; } catch (e) {}
+    if (sigNow != null && sigNow === r.lastSig && !r.deferred && r.thr === thrNow) return;
     const tail = deps.readTail(p);
     if (!tail) return;
-    if (tail.sig === r.lastSig && !r.deferred) return;
+    if (tail.sig === r.lastSig && !r.deferred && r.thr === thrNow) return;
     r.deferred = false;
     const t = now();
+    const done = () => { r.lastSig = tail.sig; r.thr = thrNow; };
     const parsed = K.parseTail(tail.text, tail.partialFirst);
     const c = C(p);
     const h = parsed.lastHuman;
-    // counters: a new human message (not one this app sent) resets everything; progress after a nudge resets the streak
+    // counters: a GENUINE person's new message (origin human; not this app's, not a task notification / hook / relay) resets everything;
+    // real work (a non-read tool call) after a nudge resets the streak
     if (h && !h.systemish && h.ts > c.humanTs) {
       c.humanTs = h.ts; c.consecutive = 0; c.hashes = []; dirty = true;
       clearStopped(p, "new message from a person");
-    } else if (h && h.isNudge && parsed.turnToolUses > 0 && c.consecutive > 0) {
+    } else if (h && h.isNudge && parsed.workToolUses > 0 && c.consecutive > 0) {
       c.consecutive = 0; dirty = true;
       clearStopped(p, "progress after a nudge");
-      log("keepgoing: " + p + " made progress after the nudge (" + parsed.turnToolUses + " tool call(s)) - streak reset");
+      log("keepgoing: " + p + " made progress after the nudge (" + parsed.workToolUses + " work tool call(s)) - streak reset");
     }
     const m = P.mission[p];
     if (m && m.active) {
       if (t - (m.since || 0) > L.missionMaxAgeMs) { m.active = false; dirty = true; }
-      else if (h && h.isResume && parsed.turnToolUses > 0 && !m.firstTurnDone) { m.firstTurnDone = true; dirty = true; log("keepgoing: " + p + " started working after the handoff"); }
+      else if (h && h.isResume && parsed.workToolUses > 0 && !m.firstTurnDone) { m.firstTurnDone = true; dirty = true; log("keepgoing: " + p + " started working after the handoff"); }
     }
-    const base = { now: t, enabled: true, paused: !!(deps.isPaused && deps.isPaused(p)), working, halt: null, parsed, throttle: throttle(), mission: P.mission[p] || null };
+    const base = { now: t, enabled: true, paused: !!(deps.isPaused && deps.isPaused(p)), working, halt: null, parsed, throttle: thrNow, mission: P.mission[p] || null };
     let d = K.decide(base);
     if (d.verdict === "nudge") { // only now pay for the halt check (rate limit / auth / server error own their own recovery)
       let halt = null;
@@ -102,30 +123,45 @@ function create(deps) {
       if (halt) d = K.decide(Object.assign({}, base, { halt }));
     }
     if (d.defer) r.deferred = true;
+    const isHold = d.verdict === "blocked" && /throttle is HOLD/.test(d.reason);
     if (d.verdict === "done" || d.verdict === "blocked") {
-      if (m && m.active) { m.active = false; dirty = true; }
-      log("keepgoing: " + p + " - no nudge, " + d.verdict + ": " + d.reason);
+      if (!isHold && m && m.active) { m.active = false; dirty = true; }
+      const hk = K.hashText(parsed.last && parsed.last.text) + d.reason;
+      if (!isHold || r.holdLogged !== hk) { log("keepgoing: " + p + " - no nudge, " + d.verdict + ": " + d.reason); if (isHold) r.holdLogged = hk; }
     }
-    if (d.verdict !== "nudge") { if (!r.deferred) r.lastSig = tail.sig; if (dirty) save(); return; }
+    // H2: the signature is remembered together with the throttle value it was judged under, so an unchanged transcript is
+    // judged again the moment the throttle leaves HOLD
+    if (d.verdict !== "nudge") { if (!r.deferred) done(); if (dirty) save(); return; }
 
     // a nudge is warranted; the rails
     const text = parsed.last.text;
     const hash = K.hashText(text);
-    if (c.hashes.indexOf(hash) !== -1) { log("keepgoing: " + p + " - not nudging again for the same message"); r.lastSig = tail.sig; if (dirty) save(); return; }
-    if (c.stopped) { r.lastSig = tail.sig; if (dirty) save(); return; }
+    if (c.hashes.indexOf(hash) !== -1) { log("keepgoing: " + p + " - not nudging again for the same message"); done(); if (dirty) save(); return; }
+    if (c.stopped) { done(); if (dirty) save(); return; }
     c.recent = (c.recent || []).filter((x) => t - x < L.windowMs);
-    if (c.consecutive >= L.maxConsecutive) { markStopped(p, c.consecutive + " nudges in a row did not help"); r.lastSig = tail.sig; save(); return; }
-    if (c.recent.length >= L.maxPerWindow) { markStopped(p, c.recent.length + " nudges in " + Math.round(L.windowMs / 3600000) + " h"); r.lastSig = tail.sig; save(); return; }
-    if (t - (c.lastNudgeAt || 0) < L.minGapMs || t - lastGlobalNudgeAt < L.globalGapMs) { r.deferred = true; if (dirty) save(); return; }
+    if (c.consecutive >= L.maxConsecutive) { markStopped(p, c.consecutive + " nudges in a row did not help"); done(); save(); return; }
+    if (c.recent.length >= L.maxPerWindow) { markStopped(p, c.recent.length + " nudges in " + Math.round(L.windowMs / 3600000) + " h"); done(); save(); return; }
+    if (t < (r.retryAfter || 0) || t - (c.lastNudgeAt || 0) < L.minGapMs || t - lastGlobalNudgeAt < L.globalGapMs) { r.deferred = true; if (dirty) save(); return; }
 
+    const prev = { consecutive: c.consecutive, lastNudgeAt: c.lastNudgeAt, hashes: c.hashes.slice() };
     c.consecutive++; c.lastNudgeAt = t; c.hashes.push(hash); c.hashes = c.hashes.slice(-10); c.recent.push(t);
-    lastGlobalNudgeAt = t; r.lastSig = tail.sig; r.inflight = true; save();
+    lastGlobalNudgeAt = t; done(); r.inflight = true; save();
     log("keepgoing: NUDGE #" + c.consecutive + " to " + p + " - " + d.reason);
     emit(p);
     Promise.resolve()
       .then(() => deps.deliver(p, K.NUDGE_TEXT))
-      .then((res) => log("keepgoing: nudge to " + p + (res && res.delivered ? " delivered via " + res.via : " NOT confirmed in the transcript (" + ((res && res.attempts) || 0) + " attempts)")))
-      .catch((e) => log("keepgoing: nudge delivery to " + p + " failed: " + (e && e.message)))
+      .catch((e) => { log("keepgoing: nudge delivery to " + p + " failed: " + (e && e.message)); return { delivered: false, attempts: 0, error: true }; })
+      .then((res) => {
+        if (res && res.delivered) { r.failures = 0; log("keepgoing: nudge to " + p + " delivered via " + res.via); return; }
+        if (res && res.dry) { log("keepgoing: nudge to " + p + " not delivered (dry run)"); return; }
+        // M1: a nudge that never landed does not count: undo it, retry later (twice), then tell Iddo
+        r.failures = (r.failures || 0) + 1;
+        log("keepgoing: nudge to " + p + " NOT confirmed in the transcript (" + ((res && res.attempts) || 0) + " attempts), failure " + r.failures);
+        c.consecutive = prev.consecutive; c.lastNudgeAt = prev.lastNudgeAt; c.hashes = prev.hashes; c.recent.pop(); dirty = true;
+        if (r.failures >= 3) { markStopped(p, "the nudge could not be delivered (3 attempts)"); r.failures = 0; }
+        else { r.retryAfter = now() + L.retryAfterMs; r.deferred = true; }
+        save();
+      })
       .then(() => { r.inflight = false; });
   }
 

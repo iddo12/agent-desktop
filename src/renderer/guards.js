@@ -641,8 +641,20 @@
   // Runs every 2s. For each pending resume: wait until the fresh session is attached (it only
   // attaches once the agent is opened), give it a few seconds to settle, send, then confirm the
   // marker landed in the transcript. Resend once if not; after that tell the user what to do.
+  // v1.69.0 (M4): tell main which agents have a handoff running so keep-going never nudges them (only sent when the list changes)
+  let kgActiveKey = "";
+  function syncKeepGoing() {
+    try {
+      const act = [];
+      for (const [ap, f] of flows.entries()) if (f && (f.phase === "saving" || f.phase === "resetting" || f.phase === "resuming")) act.push(ap);
+      for (const ap of pendingResume.keys()) if (!act.includes(ap)) act.push(ap);
+      const key = act.slice().sort().join("|");
+      if (key !== kgActiveKey) { kgActiveKey = key; window.api.keepGoingHandoffActive(act); }
+    } catch (e) { /* never break the handoff */ }
+  }
   async function tickResume() {
     restoreParkedQueues();
+    syncKeepGoing();
     for (const [ap, r] of Array.from(pendingResume.entries())) {
       try {
         const flow = flows.get(ap);

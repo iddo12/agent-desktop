@@ -3046,6 +3046,12 @@ function transcriptTailHasText(agentPath, text, sinceMs) {
 // (src/keepGoing.js decides, src/keepGoingGlue.js holds the safety rails). Rides on the 30 s tick above; reads a
 // transcript tail only when the transcript changed. Also: the fresh session after a handoff is told to continue at once.
 let keepGoing = null;
+const kgHandoffActive = new Set(); // agents with a handoff flow running in the renderer (M4)
+const norm_kg = (p) => String(p || "").replace(/[\\/]+$/, "").toLowerCase();
+// L4: only known agent folders, and a handoff file that lives inside that agent's own folder
+function kgKnownAgent(agentPath) {
+  try { return listAgents().some((a) => norm_kg(a.path) === norm_kg(agentPath)); } catch (e) { return false; }
+}
 try {
   const keepGoingFile = () => path.join(app.getPath("userData"), "keepgoing.json");
   const throttleFile = () => process.env.AGENT_DESKTOP_THROTTLE_FILE ||
@@ -3061,6 +3067,9 @@ try {
       for (const p of kgTestPaths()) if (!out.includes(p)) out.push(p);
       return out;
     },
+    // M5: stat-only signature (the glue reads the tail only when it changed)
+    sig: (agentPath) => { const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath)); return nt ? nt.mtimeMs + ":" + nt.size : null; },
+    handoffActive: (agentPath) => kgHandoffActive.has(norm_kg(agentPath)),
     readTail: (agentPath) => {
       const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
       if (!nt) return null;
@@ -3093,7 +3102,7 @@ try {
       const contains = (needle) => {
         const nt = require("./archive").newestTranscript(sessionCwdFor(agentPath));
         if (!nt) return false;
-        const len = Math.min(1024 * 1024, nt.size);
+        const len = Math.min(64 * 1024, nt.size); // M5: the marker is in the newest entries
         const fd = fs.openSync(nt.jsonlPath, "r");
         try { const buf = Buffer.alloc(len); fs.readSync(fd, buf, 0, len, nt.size - len); return buf.toString("utf-8").includes(needle); } finally { fs.closeSync(fd); }
       };
@@ -3102,17 +3111,30 @@ try {
         channelCancel: (id) => require("./agentChannel").cancel(id),
         ptySend: (t) => typeIntoPty(agentPath, t),
         ptyQueued: () => false,
+        aborted: () => kgHandoffActive.has(norm_kg(agentPath)), // a handoff started meanwhile: never land the nudge in the old session
         transcriptHas: (m) => contains(m),
         log: (line) => logStuckWatchdog("keepgoing: " + line),
       }, { ttlSec: 180 });
     },
   });
   ipcMain.handle("keepgoing-get", () => keepGoing.getSettings());
-  ipcMain.handle("keepgoing-set", (event, { agentPath, enabled }) => keepGoing.setEnabled(agentPath || null, !!enabled));
+  ipcMain.handle("keepgoing-set", (event, { agentPath, enabled }) => {
+    if (agentPath && !kgKnownAgent(agentPath)) return keepGoing.getSettings();
+    return keepGoing.setEnabled(agentPath || null, !!enabled);
+  });
+  // M4: the renderer lists the agents whose handoff flow is saving / resetting / resuming; no nudges for them
+  ipcMain.on("keepgoing-handoff-active", (event, { agents }) => {
+    kgHandoffActive.clear();
+    for (const a of Array.isArray(agents) ? agents : []) if (typeof a === "string") kgHandoffActive.add(norm_kg(a));
+  });
   // The renderer asks for the resume message of a fresh session after a handoff reset; this also sets the persisted
   // "mission in progress" marker (the nudge counters are NOT touched by a handoff).
   ipcMain.handle("keepgoing-resume-prompt", (event, { agentPath, archivedPath }) => {
-    try { return keepGoing.resumeText(agentPath, archivedPath); } catch (e) { return { text: null, mission: false, error: e.message }; }
+    try {
+      const ap = norm_kg(agentPath), fp = norm_kg(archivedPath);
+      if (!kgKnownAgent(agentPath) || !fp.startsWith(ap + "\\") && !fp.startsWith(ap + "/")) return { text: null, mission: false, error: "unknown agent or file outside the agent folder" };
+      return keepGoing.resumeText(agentPath, archivedPath);
+    } catch (e) { return { text: null, mission: false, error: e.message }; }
   });
 } catch (e) {
   console.error("keep-going failed to load:", e);
