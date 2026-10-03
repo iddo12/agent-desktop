@@ -92,7 +92,7 @@
           // v1.68.2: typed but not in the transcript yet: if it sits unsent in the input box, press Enter (at most every 6 s)
           if ((ptySent || via === "pty") && deps.nudgeSubmit && now() - t0 >= 5000 && now() - lastSubmitLook >= 6000) {
             lastSubmitLook = now();
-            try { if (await deps.nudgeSubmit()) log("handoff-delivery attempt " + attempt + ": prompt was unsent in the input box - pressed Enter"); } catch (e) {}
+            try { if (await deps.nudgeSubmit(body)) log("handoff-delivery attempt " + attempt + ": prompt was unsent in the input box - pressed Enter"); } catch (e) {}
           }
           if (now() - t0 >= waitMs) break;
           await sleep(Math.min(o.pollMs, Math.max(0, waitMs - (now() - t0))) || 1);

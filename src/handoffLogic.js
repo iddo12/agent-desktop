@@ -94,11 +94,30 @@
   // like a normal send; an idle one drains through its queue; a dialog on screen or mid-turn delivery switched off
   // keeps the old queue behaviour.
   function restoreRoute(s) {
-    if (!s || !s.working) return "queue";
+    if (!s) return "queue";
+    if (!s.working) {
+      // v1.69.2 (B-L1): an idle agent with an empty app queue and a live link: send now (first one normal, the rest
+      // mid-turn) instead of leaving items in the queue, where a message typed in the next second waited for the whole turn
+      return s.midTurnOk && !s.dialogOpen && s.queueLen === 0 && !s.linkHeld ? "direct" : "queue";
+    }
     return s.midTurnOk && !s.dialogOpen ? "midturn" : "queue";
   }
+  // v1.69.2 (B-N1): does the CLI input box (the last prompt line of the screen tail, escape codes already removed)
+  // hold text a person typed? A keep-going nudge is never typed on top of a draft. Best effort: fails towards "draft".
+  function draftInInputBox(tail) {
+    const lines = String(tail || "").split(/[\r\n]+/).filter((l) => l.trim());
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) {
+      const m = /^[\s\u2502|]*[>\u276f]\s?(.*?)\s*[\u2502|]?\s*$/.exec(lines[i]);
+      if (!m) continue;
+      const c = m[1].trim();
+      if (!c) return false;
+      if (/^Try "/.test(c) || /^\? for shortcuts/.test(c)) return false;   // the CLI's own placeholder
+      return true;
+    }
+    return false;
+  }
 
-  const api = { REQUIRED_SECTIONS, flowHoldsMessages, mayNudge, restoreRoute, handoffPrompt, nudgePrompt, fileReady, estimateSecs, progressText, serializeHeld, parseHeld };
+  const api = { REQUIRED_SECTIONS, flowHoldsMessages, mayNudge, restoreRoute, draftInInputBox, handoffPrompt, nudgePrompt, fileReady, estimateSecs, progressText, serializeHeld, parseHeld };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HandoffLogic = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

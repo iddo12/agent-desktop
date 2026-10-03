@@ -187,9 +187,10 @@
         parkedQueues.delete(ap);
         persistHeld();
         const stillWorking = !!(se.started && (se.busy || se.transcriptWorking));
-        if (window.HandoffLogic.restoreRoute({ working: working && stillWorking, midTurnOk: midTurnAllowed(), dialogOpen }) === "midturn") {
-          for (const text of cur.items) submitToAgent(ap, text, { midTurn: true });
-          try { window.autoHandoffLog("sent " + cur.items.length + " restored user message(s) to " + agentName(ap) + " mid-turn (agent working)"); } catch (e) {}
+        const route = window.HandoffLogic.restoreRoute({ working: working && stillWorking, midTurnOk: midTurnAllowed(), dialogOpen, queueLen: se.sendQueue.length, linkHeld: !!(window.connHealth && window.connHealth.holding(ap)) });
+        if (route === "midturn" || route === "direct") {
+          cur.items.forEach((text, i) => submitToAgent(ap, text, route === "midturn" || i > 0 ? { midTurn: true } : undefined));
+          try { window.autoHandoffLog("sent " + cur.items.length + " restored user message(s) to " + agentName(ap) + " (" + route + ")"); } catch (e) {}
           continue;
         }
         pk.items = cur.items;

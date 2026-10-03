@@ -103,3 +103,23 @@ assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen:
   assert.ok(/syncKeepGoing\(\)/.test(g.slice(g.indexOf("async function startFlow"), g.indexOf("async function advanceFlow"))), "L3");
 }
 console.log("handoffLogic v1.69.1 ok");
+
+// 8. v1.69.2 B-N1: the keep-going nudge typed into the pty must be submitted, once, and never over a draft
+assert.strictEqual(L.draftInInputBox("x\n\u2502 > \n? for shortcuts"), false, "empty box");
+assert.strictEqual(L.draftInInputBox("x\n\u2502 > fix the thing please \u2502\n"), true, "a draft");
+assert.strictEqual(L.draftInInputBox("\u2502 > Try \"edit foo\" \u2502"), false, "placeholder");
+assert.strictEqual(L.draftInInputBox("no input box on screen"), false);
+// B-L1: idle agent, empty queue, live link -> send directly; anything else keeps the queue path
+assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen: false, queueLen: 0, linkHeld: false }), "direct");
+assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen: false, queueLen: 2, linkHeld: false }), "queue");
+assert.strictEqual(L.restoreRoute({ working: false, midTurnOk: true, dialogOpen: false, queueLen: 0, linkHeld: true }), "queue");
+{
+  const fs2 = require("fs"), p2 = require("path");
+  const m = fs2.readFileSync(p2.join(__dirname, "..", "src", "main.js"), "utf-8");
+  const d = m.slice(m.indexOf("deliver: (agentPath, text) => {"));
+  const body = d.slice(0, d.indexOf("ipcMain.handle(\"keepgoing-get\""));
+  assert.ok(/nudgeSubmit:/.test(body) && /press-enter/.test(body), "nudge delivery presses Enter when the text sits in the input box");
+  assert.ok(/draftInInputBox/.test(body) && /promptLikelyOpen/.test(body), "never typed over a draft or into a prompt");
+  assert.ok(body.indexOf("draftInInputBox") < body.indexOf("typeIntoPty(agentPath, t)"), "draft check before typing");
+}
+console.log("handoffLogic v1.69.2 ok");

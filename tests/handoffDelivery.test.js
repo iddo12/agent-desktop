@@ -225,6 +225,19 @@ test("nudgeSubmit is not used before the prompt was typed (channel path)", async
   assert.strictEqual(presses, 0);
 });
 
+test("keep-going style nudge: typed once, left unsent in the box, Enter pressed by nudgeSubmit with the body, then lands", async () => {
+  t = 0; let pty = 0, sent = false; const bodies = [];
+  const r = await deliver("keep going", { ...base(), ptySend: () => pty++, nudgeSubmit: async (b) => { bodies.push(b); sent = true; return true; }, transcriptHas: async () => sent }, { marker: "[hid:kg1]" });
+  assert.deepStrictEqual([r.delivered, pty], [true, 1]);
+  assert.ok(bodies.length >= 1 && bodies[0] === "[hid:kg1] keep going", "nudgeSubmit gets the typed body");
+});
+test("a ptySend that refuses (user draft) never types and is never retried with the same marker", async () => {
+  t = 0; let tries = 0;
+  const r = await deliver("keep going", { ...base(), ptySend: () => { tries++; throw new Error("draft"); }, transcriptHas: async () => false }, { marker: "[hid:kg2]" });
+  assert.strictEqual(r.delivered, false);
+  assert.strictEqual(tries, 1);
+});
+
 (async () => {
   let fail = 0;
   for (const [n, f] of tests) {

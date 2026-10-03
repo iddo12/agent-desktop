@@ -3109,8 +3109,23 @@ try {
       return HD.deliver(text, {
         channelSend: (t, o) => require("./agentChannel").send(agentPath, t, undefined, o),
         channelCancel: (id) => require("./agentChannel").cancel(id),
-        ptySend: (t) => typeIntoPty(agentPath, t),
+        // v1.69.2 (B-N1): typed ONCE (deliver's marker rule), never on top of a person's draft, and submitted: nudgeSubmit presses
+        // Enter (through the renderer's write chain) when the screen shows exactly this text sitting in the input box.
+        ptySend: (t) => {
+          if (require("./handoffLogic").draftInInputBox((dialogTails.get(agentPath) || "").slice(-600))) throw new Error("the input box holds text - not typing the nudge over it");
+          if (promptLikelyOpen(agentPath)) throw new Error("a prompt is waiting for an answer - not typing the nudge");
+          typeIntoPty(agentPath, t);
+        },
         ptyQueued: () => false,
+        nudgeSubmit: async (body) => {
+          try {
+            const act = getSessionActivity(sessionCwdFor(agentPath));
+            if (act && act.working) return false;
+            if (!inputHoldsUnsentText(agentPath, body)) return false;
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("press-enter", { agentPath });
+            return true;
+          } catch (e) { return false; }
+        },
         aborted: () => { const at = kgHandoffActive.get(norm_kg(agentPath)); return !!at && Date.now() - at < 50 * 60 * 1000; }, // a handoff started meanwhile: never land the nudge in the old session
         transcriptHas: (m) => contains(m),
         log: (line) => logStuckWatchdog("keepgoing: " + line),
