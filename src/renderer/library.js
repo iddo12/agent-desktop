@@ -124,7 +124,7 @@
     docFilterBtns.set(key, b);
     docBar.appendChild(b);
   });
-  docBar.appendChild(el("span", "library-doclegend", "Red = unread, green = read. Opening a document here turns it green; the dot on a card toggles it."));
+  docBar.appendChild(el("span", "library-doclegend", "Solid red dot = unread, green ring with a check = read. Opening a document here marks it read; the dot on a card toggles it."));
   const status = el("div", "library-status");
   const body = el("div", "library-body");
   // Stage buttons sit at the bottom of the Projects tab (Iddo's layout choice).
@@ -213,7 +213,18 @@
   const vfolder = el("button", "library-btn", "Show in folder");
   const vread = el("button", "library-btn library-vread");
   const vsend = el("button", "library-btn library-btn-primary", "Comment / send");
-  vbar.append(vback, vtitle, vread, vsend, vext, vfolder);
+  // One-line legend in viewer mode: still clickable, returns to the list filtered that way.
+  const vcount = el("span", "library-vcount");
+  const vcU = el("button", "library-docfilter");
+  const vcR = el("button", "library-docfilter");
+  vcU.append(el("span", "library-read-dot is-unread"), el("span", "library-docfilter-text", "Unread"));
+  vcR.append(el("span", "library-read-dot is-read"), el("span", "library-docfilter-text", "Read"));
+  vcU.title = "Back to the list, unread only";
+  vcR.title = "Back to the list, read only";
+  vcU.addEventListener("click", () => { readFilter = "unread"; closeViewer(); });
+  vcR.addEventListener("click", () => { readFilter = "read"; closeViewer(); });
+  vcount.append(vcU, vcR);
+  vbar.append(vback, vtitle, vcount, vread, vsend, vext, vfolder);
   const vframe = el("iframe", "library-viewer-frame");
   const vbody = el("div", "library-viewer-body");
   const panel = el("div", "library-send-panel hidden");
@@ -315,7 +326,12 @@
     let chip = "";
     let sending = false;
 
-    panel.appendChild(el("div", "library-send-title", "Comment / send"));
+    const head2 = el("div", "library-send-head");
+    head2.appendChild(el("div", "library-send-title", "Comment / send"));
+    const closeP = el("button", "library-btn library-send-close", "Close");
+    closeP.addEventListener("click", () => { stopRec(); panel.classList.add("hidden"); });
+    head2.appendChild(closeP);
+    panel.appendChild(head2);
     panel.appendChild(el("div", "library-send-doc", e.title));
     panel.appendChild(el("div", "library-send-path", e.path || "(no local file path)"));
 
@@ -637,6 +653,8 @@
     const dc = docCounts();
     const ub = navBtns.get("document").querySelector(".library-nav-unread");
     ub.textContent = String(dc.unread);
+    vcU.querySelector(".library-docfilter-text").textContent = `Unread ${dc.unread}`;
+    vcR.querySelector(".library-docfilter-text").textContent = `Read ${dc.read}`;
     ub.classList.toggle("hidden", dc.unread === 0);
     // the red pill replaces the grey total while anything is unread (the Documents tab shows the total)
     navBtns.get("document").querySelector(".library-nav-count").classList.toggle("hidden", dc.unread > 0);
