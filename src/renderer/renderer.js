@@ -3732,7 +3732,8 @@ function submitToAgent(agentPath, text, opts) {
   const sentEntry = session && session.pendingSent[session.pendingSent.length - 1];
   const entryRef = (opts && opts.entry) || sentEntry;
   writeQueued(session, () => new Promise((resolve) => {
-    window.api.sendInput(agentPath, "\x1b[200~" + text, { app: true }); // app: a message from this send path (arms the stuck-Enter check), not keystrokes typed in the Terminal tab
+    // v1.69.4: text ending in a backslash + Enter inserts a newline instead of submitting: one trailing space avoids it
+    window.api.sendInput(agentPath, "\x1b[200~" + (/\\$/.test(text) ? text + " " : text), { app: true }); // app: a message from this send path (arms the stuck-Enter check), not keystrokes typed in the Terminal tab
     setTimeout(() => {
       window.api.sendInput(agentPath, "\x1b[201~");
       setTimeout(() => {
@@ -3754,6 +3755,20 @@ try {
   window.api.onPressEnter(({ agentPath }) => {
     const s = terminals.get(agentPath);
     if (s) writeQueued(s, () => window.api.sendInput(agentPath, "\r"));
+  });
+} catch (e) { /* older preload */ }
+
+// v1.69.4: the stuck-message recovery ladder (connectionHealth.js) types its keys here, one chain with the messages
+try {
+  window.api.onSendKeys(({ agentPath, steps }) => {
+    const s = terminals.get(agentPath);
+    if (!s || !Array.isArray(steps)) return;
+    writeQueued(s, async () => {
+      for (const st of steps) {
+        window.api.sendInput(agentPath, String(st.data));
+        if (st.wait > 0) await new Promise((r) => setTimeout(r, st.wait));
+      }
+    });
   });
 } catch (e) { /* older preload */ }
 

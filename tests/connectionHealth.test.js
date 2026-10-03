@@ -32,6 +32,13 @@ function harness(over) {
     transcriptHas: () => (h.ack === undefined ? false : h.ack),
     pressEnter: (p) => { calls.enter = (calls.enter || 0) + 1; if (h.enterWorks) { h.holds = false; h.ack = true; } },
   };
+  // v1.69.4 recovery ladder deps (only when the test asks for them)
+  if (h.ladder) {
+    calls.keys = []; calls.resets = 0;
+    deps.sendKeys = (p, steps) => { calls.keys.push(steps.map((x) => x.data)); if (h.onKeys) h.onKeys(steps.map((x) => x.data), h); };
+    deps.resetScreen = () => { calls.resets++; if (h.onReset) h.onReset(h); };
+    deps.screenState = () => Object.assign({ cause: "unsent-box", holds: true, dialog: false, queued: false, working: false, ctrlCAgain: false, seen: true, lines: "SCREEN-LINES" }, h.screen || {});
+  }
   const ch = create(deps);
   async function advance(ms) {
     const end = t + ms;
@@ -291,6 +298,91 @@ function harness(over) {
     await x.advance(3000);
     x.ch.onAttachFailed(P, "attach exited");
     assert.strictEqual(x.events[x.events.length - 1].requeueSince, null);
+  }
+
+
+  // 22. v1.69.4 ladder: Enter did not help -> a) end marker + CR; works -> stops there
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.h.onKeys = (k, h) => { if (k[0] === "\x1b[201~") { h.ack = true; } };
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(8000 + 1000); assert.strictEqual(x.calls.enter, 1);        // the existing single Enter
+    await x.advance(1500);                                                      // ~1.5 s later: step a
+    assert.deepStrictEqual(x.calls.keys, [["\x1b[201~", "\r"]]);
+    await x.advance(60000);
+    assert.strictEqual(x.calls.keys.length, 1); assert.strictEqual(x.calls.restart, 0);
+    assert.ok(x.logs.some((l) => /stuck-ladder/.test(l) && /step a/.test(l) && /SCREEN-LINES/.test(l)));
+    assert.ok(x.logs.some((l) => /delivered \(after ladder step 1\)/.test(l)));
+  }
+  // 23. ladder: a) and b) fail -> c) ONE Ctrl+C, box confirmed empty, message re-sent with the normal paste sequence
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.h.onKeys = (k, h) => { if (k[0] === "\x03") { h.screen = { holds: false }; } if (k[0].startsWith("\x1b[200~")) { h.ack = true; } };
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(30000);
+    assert.deepStrictEqual(x.calls.keys.map((k) => k[0]), ["\x1b[201~", "\x1b", "\x03", "\x1b[200~please read the status report now"]);
+    assert.deepStrictEqual(x.calls.keys[3], ["\x1b[200~please read the status report now", "\x1b[201~", "\r"]);
+    assert.strictEqual(x.calls.keys.filter((k) => k[0] === "\x03").length, 1);   // never two Ctrl+C
+    assert.strictEqual(x.calls.resets, 1);
+    assert.strictEqual(x.calls.restart, 0);
+    await x.advance(10 * 60 * 1000); assert.strictEqual(x.calls.keys.length, 4);  // one run per message
+  }
+  // 24. ladder: Ctrl+C but the box still holds the text -> no re-send, no second Ctrl+C; FAILED is logged with the screen
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(30000);
+    assert.strictEqual(x.calls.keys.filter((k) => k[0] === "\x03").length, 1);
+    assert.ok(!x.calls.keys.some((k) => k[0].startsWith("\x1b[200~")));
+    assert.ok(x.logs.some((l) => /step c aborted: the box is not empty/.test(l) && /SCREEN-LINES/.test(l)));
+    assert.strictEqual(x.calls.restart, 0);
+  }
+  // 25. ladder never starts on a dialog / queued message / working agent
+  for (const scr of [{ dialog: true, cause: "dialog" }, { queued: true, cause: "queued" }, { working: true, cause: "queued" }]) {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false; x.h.screen = scr;
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(60000);
+    assert.strictEqual(x.calls.keys.length, 0, JSON.stringify(scr));
+    assert.ok(x.logs.some((l) => /stuck-ladder/.test(l) && /stopped at step 1/.test(l)));
+  }
+  // 26. Ctrl+C step is refused when the screen already says "Press Ctrl-C again" (box was empty) and when the text is too long to re-send
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.h.onKeys = (k, h) => { if (k[0] === "\x1b") h.screen = { ctrlCAgain: true }; };
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(30000);
+    assert.ok(!x.calls.keys.some((k) => k[0] === "\x03"));
+    assert.ok(x.logs.some((l) => /step c refused/.test(l)));
+    const y = harness({ ladder: true });
+    y.h.sessions[P] = "real"; y.h.holds = true; y.h.screenShows = true; y.h.enterWorks = false;
+    y.ch.noteWrite(P, "\x1b[200~" + "long message ".repeat(400));
+    await y.advance(30000);
+    assert.ok(!y.calls.keys.some((k) => k[0] === "\x03"));
+    assert.ok(y.logs.some((l) => /step c skipped/.test(l)));
+  }
+  // 27. no Ctrl+C output seen at all: waits once more, then gives up without re-sending
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.h.onKeys = (k, h) => { if (k[0] === "\x03") h.screen = { holds: false, seen: false }; };
+    x.ch.noteWrite(P, "\x1b[200~please read the status report now");
+    await x.advance(30000);
+    assert.ok(!x.calls.keys.some((k) => k[0].startsWith("\x1b[200~")));
+    assert.ok(x.logs.some((l) => /cannot confirm the box is empty/.test(l)));
+  }
+  // 28. a message ending in a backslash is re-sent with a trailing space
+  {
+    const x = harness({ ladder: true });
+    x.h.sessions[P] = "real"; x.h.holds = true; x.h.screenShows = true; x.h.enterWorks = false;
+    x.h.onKeys = (k, h) => { if (k[0] === "\x03") h.screen = { holds: false }; };
+    x.ch.noteWrite(P, "\x1b[200~the folder is C:\\temp\\");
+    await x.advance(30000);
+    assert.ok(x.calls.keys.some((k) => k[0] === "\x1b[200~the folder is C:\\temp\\ "));
   }
 
   console.log("connectionHealth ok");

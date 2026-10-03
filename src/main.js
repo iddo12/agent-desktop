@@ -1771,9 +1771,11 @@ function trackDialog(agentPath, data) {
 // v1.65.0: broader than DIALOG_RE (which drives the red badge): any screen that looks like a prompt
 // waiting for an answer. Used only to gate typing/Enter into a session.
 const PROMPT_RE = /Esc to cancel|Enter to confirm|Do you want to|\(y\/n\)|\[Y\/n\]|❯\s*1\.\s|Press Enter/i;
+const deliveryScreen = require("./deliveryScreen"); // v1.69.4: screen classifiers (dialog / queued / unsent box), tested on real CLI captures
 function promptLikelyOpen(agentPath) {
   if (dialogOpenFor(agentPath)) return true;
-  return PROMPT_RE.test((dialogTails.get(agentPath) || "").slice(-600));
+  const tail = dialogTails.get(agentPath) || "";
+  return PROMPT_RE.test(tail.slice(-600)) || deliveryScreen.isDialog(tail, ""); // v1.69.4: also matches when cursor moves ate the spaces ("Doyouwanttoproceed")
 }
 function dialogOpenFor(agentPath) {
   if (!ptySessions.get(agentPath) || !ptySessions.get(agentPath).proc) return false;
@@ -3021,7 +3023,30 @@ const connHealth = require("./connectionHealth").create({
   pressEnter: (agentPath) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("press-enter", { agentPath });
   },
+  // v1.69.4 recovery ladder: keys go through the renderer's per-session write chain, like every message
+  sendKeys: (agentPath, steps) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("send-keys", { agentPath, steps });
+  },
+  resetScreen: (agentPath) => { dialogTails.set(agentPath, ""); },
+  screenState: (agentPath, snippet) => screenStateFor(agentPath, snippet),
 });
+// v1.69.4: what the agent's screen shows right now, for the ladder and the failure log
+function screenStateFor(agentPath, snippet) {
+  const tail = dialogTails.get(agentPath) || "";
+  const s = ptySessions.get(agentPath);
+  const dead = !s || !s.proc;
+  let working = false;
+  try { const act = getSessionActivity(sessionCwdFor(agentPath)); working = !!(act && act.working); } catch (e) {}
+  const DS = deliveryScreen;
+  return {
+    cause: DS.classify(tail, snippet, { deadPty: dead, working }),
+    holds: !dead && inputHoldsUnsentText(agentPath, snippet),
+    dialog: promptLikelyOpen(agentPath), queued: DS.isQueued(tail, snippet),
+    working: working || DS.isWorkingScreen(tail, snippet),
+    ctrlCAgain: DS.ctrlCAgainShown(tail), seen: tail.length > 0,
+    lines: DS.lastLines(tail, 25, 1500),
+  };
+}
 // true/false = the agent's newest transcript (last 1 MB) does / does not contain the message (via its longest plain
 // run of characters); null = cannot tell (nothing to look for, or no transcript). Only a transcript written since
 // `sinceMs` counts, so an identical older message does not read as delivered.
@@ -4027,6 +4052,9 @@ function inputHoldsUnsentText(agentPath, snippet) {
   const tail = strip((dialogTails.get(agentPath) || "").slice(-900));
   const want = strip(snippet || "").slice(-40);
   if (want.length < 3 || !tail.includes(want)) return false;
+  // v1.69.4: a message the CLI QUEUED behind a running turn (footer "Press up to edit queued messages") or already
+  // submitted (working indicator) also shows as "> text" - that is not an unsent box, never press Enter for it
+  if (!deliveryScreen.inputHolds(dialogTails.get(agentPath) || "", snippet)) return false;
   const after = tail.slice(tail.lastIndexOf(want) + want.length);
   return !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]|Doyouwant|Yes,|No,/i.test(after) && !/Esctocancel|Entertoconfirm|\(y\/n\)|\[Y\/n\]/i.test(tail.slice(-250));
 }
@@ -4155,12 +4183,17 @@ function classifySendFailure(agentPath, info) {
   if (st !== "connected") return "dead-link(" + st + ")";
   if (!s || !s.proc) return "dead-link(no-pty)";
   if (inputHoldsUnsentText(agentPath, i.text || "")) return "stuck-enter";
+  if (deliveryScreen.isQueued(dialogTails.get(agentPath) || "", i.text || "")) return "queued-mid-turn";
   if (i.received || (i.midTurn && i.working) || i.busyWait) return "queued-mid-turn";
   return "unknown";
 }
 ipcMain.handle("notify-send-failed", (event, { agentPath, text, info }) => {
+  // v1.69.4: the message sits in the CLI's own queue (screen shows the queued-messages footer): it is not lost, so no
+  // "not confirmed" alarm - the transcript receipt arrives when the turn ends. Still logged below.
+  let scr = null;
+  try { scr = screenStateFor(agentPath, String(text || "").slice(-40)); } catch (e) {}
   try {
-    if (Notification.isSupported()) {
+    if (Notification.isSupported() && !(scr && scr.cause === "queued")) {
       const agentName = path.basename(agentPath);
       const preview = (text || "").replace(/\s+/g, " ").trim().slice(0, 120);
       const n = new Notification({
@@ -4182,6 +4215,7 @@ ipcMain.handle("notify-send-failed", (event, { agentPath, text, info }) => {
   let cause = "unknown";
   try { cause = classifySendFailure(agentPath, Object.assign({}, info, { text })); } catch (e) {}
   const inf = info || {};
+  if (scr) logStuckWatchdog(`notify-send-failed: ${agentPath} screen-cause=${scr.cause}${scr.cause === "queued" ? " (notification suppressed)" : ""} screen: ${scr.lines}`.slice(0, 2400));
   logStuckWatchdog(`notify-send-failed: ${agentPath} - message never landed in transcript, re-queued [cause=${cause} why=${inf.why || "?"} age=${inf.ageSec != null ? inf.ageSec + "s" : "?"} midTurn=${inf.midTurn ? 1 : 0} received=${inf.received ? 1 : 0} nudges=${inf.nudges || 0} working=${inf.working ? 1 : 0}]`);
   // v1.67.0: the log never said WHY. Snapshot the agent's own screen (`claude logs <id>`) at failure time:
   // idle + empty input box = dead link, text in the box = stuck Enter, a dialog = prompt waiting.
