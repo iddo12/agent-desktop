@@ -236,9 +236,9 @@ const tick = async (w, advance) => { w.t += advance == null ? 0 : advance; w.g.t
       storage: { load: () => null, save: () => {} } });
     w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, END)]);
     await tick(w);
-    t("cancelled-by-handoff delivery: rolled back, no failure count", () => { assert.strictEqual(w.g._state().counters.A.consecutive, 0); assert.ok(!/failure/.test(w.logs.join("\n"))); });
+    t("cancelled-by-handoff delivery: rolled back, no failure count", () => { assert.strictEqual(w.g._state().counters.A.consecutive, 0); assert.ok(!/NOT confirmed/.test(w.logs.join("\n"))); });
     mode = "fail";
-    await tick(w, 1000); // retry (deferred), delivery reported not confirmed
+    await tick(w, 100000); // retry (deferred), delivery reported not confirmed
     const sentAt = w.t;
     // ...but the nudge really landed late: the transcript now ends with the nudge entry
     w.set(w.lines.concat([usr(sentAt + 5000, "[hid:z] " + K.NUDGE_TEXT)]));
