@@ -198,5 +198,16 @@ function harness(over) {
     assert.ok(y.logs.some((l) => /skipped/.test(l)));
   }
 
+  // 13. (v1.67.3) a delayed "connected" (input replay in progress) is not overtaken by a plain onConnected
+  {
+    const x = harness();
+    x.ch.onAttachFailed(P, "x");
+    x.ch.onConnected(P, { delayMs: 5000 });
+    x.ch.onConnected(P);
+    assert.strictEqual(x.ch.getState(P).state, "reconnecting");
+    await x.advance(5100);
+    assert.strictEqual(x.ch.getState(P).state, "connected");
+  }
+
   console.log("connectionHealth ok");
 })().catch((e) => { console.error(e); process.exit(1); });

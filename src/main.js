@@ -2849,6 +2849,12 @@ ipcMain.on("guard-log", (event, { line }) => {
 // src/connectionHealth.js. Hook points elsewhere in this file: handlePtyExit, recoverStuckSession,
 // start-terminal's catch, startTerminalSession (noteData / onConnected), terminal-input (noteWrite).
 const lateInputs = new Map(); // agentPath -> input written while disconnected; replayed by the next attach (review M1)
+// v1.67.3: removing a failed "starting" placeholder must keep the input it queued (it is replayed by the next attach)
+function dropPlaceholder(agentPath) {
+  const ph = ptySessions.get(agentPath);
+  if (ph && ph.starting && ph.pendingInput && ph.pendingInput.length) lateInputs.set(agentPath, ph.pendingInput.concat(lateInputs.get(agentPath) || []));
+  if (ph && ph.starting) ptySessions.delete(agentPath);
+}
 const TEST_FAULT_DIR = () => app.getPath("userData");
 function testFaultFile(name) { return path.join(TEST_FAULT_DIR(), name); }
 async function restartAgentSession(agentPath) {
@@ -2862,7 +2868,7 @@ async function restartAgentSession(agentPath) {
   try {
     await startTerminalSession(agentPath, sessionCwd, size.cols, size.rows, r.agentId);
   } catch (e) {
-    ptySessions.delete(agentPath);
+    dropPlaceholder(agentPath);
     throw e;
   }
   if (testMode.TEST_MODE) { try { fs.unlinkSync(testFaultFile("mute-" + path.basename(agentPath))); } catch (e) {} }
@@ -2899,7 +2905,8 @@ const connHealth = require("./connectionHealth").create({
     try {
       await startTerminalSession(agentPath, sessionCwdFor(agentPath), size && size.cols, size && size.rows);
     } catch (e) {
-      ptySessions.delete(agentPath);
+      // v1.67.3: a failed attempt must not swallow the input it was carrying - keep it for the next attempt
+      dropPlaceholder(agentPath);
       throw e;
     }
   },
@@ -3604,15 +3611,37 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
     // before this fix, visible as 53 near-identical entries in the
     // session's own JSONL transcript.
     const toSend = pendingInput.splice(0, pendingInput.length);
+    // v1.67.3: same gaps as the renderer's submitToAgent (30 ms before the paste end, 200 ms before Enter); the old
+    // flat 80 ms let a slow CLI read the replayed Enter as part of the paste, so the next message merged into it
+    let at = 0;
     toSend.forEach((data, i) => {
+      const myAt = at;
+      at += /^.?\[200~/.test(String(data)) || /\[200~/.test(String(data)) ? 30 : /\[201~/.test(String(data)) ? 200 : 80;
       // Still staggered, not blasted as one synchronous burst - see
       // submitToAgent() in renderer.js for why a composed message and its
       // trailing "\r" must land as two separately-timed writes. Each
       // individual item is itself now chunked if long - see
       // writeToPtyChunked()'s own comment for why a large single write can
       // arrive at the CLI garbled or truncated.
-      setTimeout(() => writeToPtyChunked(proc, agentPath, data), i * 80);
+      setTimeout(() => writeToPtyChunked(proc, agentPath, data), myAt);
     });
+    // v1.67.3: a replayed message whose Enter was swallowed (CLI still booting) would sit in the input box and
+    // merge with the next message. Two seconds after the replay: if the screen still shows the last message
+    // text and no prompt/dialog is open, press Enter once (an empty prompt ignores it).
+    const lastMsg = toSend.filter((d) => /\[200~/.test(String(d))).pop();
+    if (lastMsg) {
+      setTimeout(() => {
+        try {
+          const strip = (x) => String(x).replace(/\s+/g, "");
+          const want = strip(String(lastMsg).replace(/^.*\[200~/, "")).slice(-30);
+          const tail = strip(dialogTails.get(agentPath) || "");
+          if (want.length >= 3 && !promptLikelyOpen(agentPath) && tail.includes(want) && !/Presstoeditqueuedmessages/.test(tail)) {
+            logStuckWatchdog(`replay: ${agentPath} replayed message still shown in the input box - pressing Enter once`);
+            writeToPtyChunked(proc, agentPath, "\r");
+          }
+        } catch (e) { /* best effort */ }
+      }, at + 2000);
+    }
   }
 
   // Unconditionally arm one flush attempt up front, not just reactively
@@ -3661,7 +3690,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
   });
 
   ptySessions.set(agentPath, { proc, sessionCwd, archiveTimer, shell, spawnEnv, agentId, cols, rows });
-  connHealth.onConnected(agentPath);
+  connHealth.onConnected(agentPath, { delayMs: pendingInput && pendingInput.length ? 5000 : 0 });
 }
 
 ipcMain.handle("start-terminal", async (event, { agentPath, cols, rows, knownAgentId }) => {
@@ -3972,7 +4001,7 @@ async function switchConversationImpl(agentPath, { resumeSessionId, newConversat
   try {
     await stopBackgroundAgentForCwd(sessionCwd);
   } catch (e) {
-    if (placeholder) ptySessions.delete(agentPath);
+    if (placeholder) dropPlaceholder(agentPath);
     throw e;
   }
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
@@ -3982,7 +4011,7 @@ async function switchConversationImpl(agentPath, { resumeSessionId, newConversat
   try {
     newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
   } catch (e) {
-    if (placeholder) ptySessions.delete(agentPath);
+    if (placeholder) dropPlaceholder(agentPath);
     throw e;
   }
   return { ok: true, agentId: newId };

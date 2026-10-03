@@ -107,9 +107,17 @@ function create(deps, opts) {
   }
 
   // Called when a session object really exists again (end of startTerminalSession).
-  function onConnected(p) {
+  // opts.delayMs: input typed while disconnected is being replayed into the fresh session by main.js; tell the
+  // renderer "connected" only after that finished, or its own queue drain writes into the same input box at the
+  // same time and two messages merge (seen in the sandbox: "TWOReply with exactly: WINDOW" sent with one Enter).
+  function onConnected(p, opts) {
     const a = agents.get(p);
     if (!a || a.state === "connected") return;
+    if (a.connectTimer) return; // a delayed "connected" is already pending (input replay in progress)
+    if (opts && opts.delayMs > 0) {
+      if (!a.connectTimer) a.connectTimer = unref(setT(() => { a.connectTimer = null; onConnected(p); }, opts.delayMs));
+      return;
+    }
     const was = a.state;
     log(`connection: ${p} connected again (was ${was}, after ${a.attempts} failed attempt(s))`);
     settle(a, false);
