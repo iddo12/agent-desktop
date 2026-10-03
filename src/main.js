@@ -424,6 +424,24 @@ ipcMain.handle("ui-flag-set", (event, { key, value }) => {
   }
 });
 
+// v1.66.0: start limiter + CPU guard install/consent + banner state (src/cpuGuardGlue.js).
+const cpuGuard = require("./cpuGuardGlue").init({
+  app,
+  ipcMain,
+  dialog,
+  testMode,
+  getMainWindow: () => mainWindow,
+  readUiFlags,
+  setUiFlag: (key, value) => {
+    try {
+      const f = readUiFlags();
+      f[key] = value;
+      fs.writeFileSync(UI_FLAGS_PATH, JSON.stringify(f, null, 2));
+    } catch (e) {}
+  },
+  log: (m) => logStuckWatchdog(m),
+});
+
 ipcMain.handle("check-claude-code-update", async () => {
   const current = getInstalledClaudeCodeVersion();
   const latest = await getLatestClaudeCodeVersion();
@@ -1087,6 +1105,7 @@ if (!gotSingleInstanceLock) {
     }, ENSURE_AGENTS_ALIVE_INTERVAL_MS);
     setInterval(repinAllAgentNames, REPIN_AGENT_NAMES_INTERVAL_MS);
     writeRuntimeStamp();
+    setTimeout(() => cpuGuard.ensure().catch(() => {}), 45000); // first-time consent dialog, after the startup rush
     logStuckWatchdog(`started v${app.getVersion()} pid=${process.pid} (${testMode.describe()})`);
     if (testMode.TEST_MODE) {
       enforceTestTokenBudget();
@@ -2061,12 +2080,18 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   // (no 90 s timeout) and rejects with err.untrusted = true.
   let output;
   try {
-    output = await runClaudeCommand(shell, args, {
-      cwd: sessionCwd,
-      env: spawnEnv,
-      timeoutMs: CLAUDE_CLI_TIMEOUT_MS,
-      abortPattern: workspaceTrust.TRUST_PROMPT_RE,
-    });
+    // v1.66.0: start limiter (max 3 starts in flight, 4 s apart, holds while the CPU guard says overloaded).
+    // opts.urgent = one explicit user action (or a reconnect): never queued behind the crowd.
+    output = await cpuGuard.limiter.run(
+      () =>
+        runClaudeCommand(shell, args, {
+          cwd: sessionCwd,
+          env: spawnEnv,
+          timeoutMs: CLAUDE_CLI_TIMEOUT_MS,
+          abortPattern: workspaceTrust.TRUST_PROMPT_RE,
+        }),
+      { label: path.basename(path.dirname(sessionCwd)), urgent: !!opts.urgent }
+    );
   } catch (e) {
     if (e.aborted) {
       const err = new Error(
@@ -2488,7 +2513,7 @@ async function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
     existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
   }
   if (existing) return { id: existing.id, freshlyDispatched: false };
-  const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+  const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, { urgent: true }); // opening one agent's tab
   return { id, freshlyDispatched: true };
 }
 
@@ -3404,7 +3429,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
         // fix (the alternative - hanging forever - is strictly worse).
         await stopClaudeAgent(shell, agentId, spawnEnv, { timeoutMs: 5000 });
       } catch (e) {}
-      const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+      const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, { urgent: true });
       return startTerminalSession(agentPath, sessionCwd, cols, rows, freshAgentId, isReattachAttempt, /* isLoginRecoveryAttempt */ true);
     }
 
@@ -3845,7 +3870,7 @@ ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId
   await stopBackgroundAgentForCwd(sessionCwd);
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
-  const opts = newConversation ? { forceFresh: true, initialPrompt } : { resumeSessionId };
+  const opts = newConversation ? { forceFresh: true, initialPrompt, urgent: true } : { resumeSessionId, urgent: true };
   const newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
   return { ok: true, agentId: newId };
 });
