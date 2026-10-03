@@ -996,6 +996,7 @@
   }
   // v1.58.0: read by app-update-overlay.js - Update & restart waits while a
   // handoff is mid-flight (a restart would cut it between reset and resume).
+  window.guardsAgentInFlow = (ap) => flows.has(ap) || pendingResume.has(ap) || !!(allRun && !allRun.finished); // v1.65.0
   window.guardsBusyReason = () => {
     if (allRun && !allRun.finished) return "\"Handoff all\" is running";
     if (flows.size) return "a handoff is in progress";

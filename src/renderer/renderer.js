@@ -1859,6 +1859,14 @@ function normalizeForMatch(s) {
 // exists - a safety net against a pending bubble that never finds a
 // matching transcript entry and would otherwise pulse "sending" forever.
 const PENDING_SENT_TIMEOUT_MS = 45000;
+// v1.65.0 mid-turn delivery. A receipt in the transcript means the message waits safely in the CLI's
+// own queue (delivered at the agent's next step), so the pending bubble may live this long.
+const MIDTURN_RECEIVED_MAX_MS = 30 * 60 * 1000;
+// Without a receipt this soon after a mid-turn send, the CLI never got it (the receipt is written on
+// arrival): offer Resend early instead of after the long busy-agent wait.
+const MIDTURN_NO_RECEIPT_FAIL_MS = 25000;
+const ENTER_NUDGE_1_MS = 8000;
+const ENTER_NUDGE_2_MS = 20000;
 // How long a later message must be on record, with this one still unmatched, before 'superseded'.
 const SUPERSEDED_GRACE_MS = 20000;
 // How long an agent's transcript must go WITHOUT being written to before an
@@ -1892,11 +1900,14 @@ const PENDING_SENT_BUSY_TIMEOUT_MS = 6 * 60 * 1000;
 async function rebuildChatView(agentPath, opts = {}) {
   const session = terminals.get(agentPath);
   if (!session) return;
-  const [blocks, activity] = await Promise.all([
+  const [allBlocks, activity] = await Promise.all([
     window.api.getLiveTranscript(agentPath),
     window.api.getSessionActivity(agentPath).catch(() => null),
   ]);
   if (agentPath !== activeAgentPath || terminals.get(agentPath) !== session) return; // stale by the time the IPC round-trip finished
+  // v1.65.0: "queued" blocks are the CLI's receipt of input (see archive.js); they prove delivery, never drawn.
+  const queuedBlocks = (allBlocks || []).filter((b) => b.role === "queued");
+  const blocks = (allBlocks || []).filter((b) => b.role !== "queued");
 
   // Authoritative "is the agent still working" signal, from the transcript
   // (see getSessionActivity in archive.js) - reliable through quiet stretches
@@ -1983,6 +1994,41 @@ async function rebuildChatView(agentPath, opts = {}) {
     if (stillUnmatched && pending.text.trim() === "/clear" && now - pending.addedAt > 3000) stillUnmatched = false;
     if (!stillUnmatched) return false; // matched - a real transcript entry now carries it, drop the optimistic copy
 
+    // v1.65.0: the CLI logs a receipt the moment input reaches it, mid-turn included, long before the
+    // agent reads it at its next step. A receipt is proof the message is safely queued: never call it
+    // lost, never offer a Resend (which would duplicate it). Gives up only after MIDTURN_RECEIVED_MAX_MS.
+    if (!pending.received) {
+      const sentAtR = pending.sentAt || pending.addedAt;
+      const want = normalizeForMatch(pending.text);
+      const fp = want.slice(-80).trim();
+      if (queuedBlocks.some((q) => {
+        if (!q.timestamp || new Date(q.timestamp).getTime() < sentAtR - 2000) return false;
+        const n = normalizeForMatch(q.lines.join(" "));
+        return n === want || (fp.length >= 30 && n.includes(fp));
+      })) {
+        pending.received = true;
+        pending.failed = false;
+        pending.superseded = false;
+      }
+    }
+    // v1.65.0: stuck Enter. 2026-10-03 the COO and Software Engineering agents never got three messages:
+    // `claude logs` showed the text sitting in the CLI's input box, the Enter having been taken as part of
+    // the paste (a busy CLI reads the paste end and the Enter in one chunk). Every send writes a receipt
+    // within a second, so no receipt after 8 s / 20 s means the text is waiting for its Enter: press Enter
+    // again, at most twice. Never at a permission prompt (Enter would accept it). An Enter into an empty
+    // box does nothing, so a false alarm costs nothing.
+    if (!pending.received && pending.text.trim() !== "/clear") {
+      const ageN = now - (pending.sentAt || pending.addedAt);
+      const stepN = pending.enterNudges || 0;
+      if ((stepN === 0 && ageN > ENTER_NUDGE_1_MS) || (stepN === 1 && ageN > ENTER_NUDGE_2_MS)) {
+        pending.enterNudges = stepN + 1;
+        window.api.agentInputHoldsText(agentPath, pending.text).then((holds) => {
+          if (holds) window.api.sendInput(agentPath, "\r");
+        }).catch(() => {});
+      }
+    }
+    if (pending.received) return now - (pending.sentAt || pending.addedAt) < MIDTURN_RECEIVED_MAX_MS;
+
     // 2026-09-27: a later message that DID land proves this one was dropped.
     // Traced live on the Software Engineering agent: "yes" was sent at 04:13:34
     // while the agent sat idle, and the CLI never recorded it (the message sent
@@ -2041,6 +2087,11 @@ async function rebuildChatView(agentPath, opts = {}) {
     // this app does not have. Manual-only from here: Resend is a real
     // click, one at a time, by a person who can see whether the last one
     // already went through before trying again.
+    if (pending.midTurn && !pending.failed && now - (pending.sentAt || pending.addedAt) > MIDTURN_NO_RECEIPT_FAIL_MS) {
+      pending.failed = true;
+      window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+      return true;
+    }
     const waited = now - pending.addedAt;
     const limit = session.busy ? PENDING_SENT_BUSY_TIMEOUT_MS : PENDING_SENT_TIMEOUT_MS;
     if (waited >= limit) {
@@ -2647,6 +2698,29 @@ function markActivity(agentPath, session) {
       if (agentPath === activeAgentPath) updateThinkingIndicator();
     }
   }, THINKING_INDICATOR_QUIET_MS);
+}
+
+// v1.65.0 mid-turn delivery (Iddo: a message written while an agent works must reach it at its next
+// step, not ten minutes later). Verified 2026-10-03 with a real `claude` pty: input typed mid-turn is
+// queued by the CLI itself and read at the next tool boundary. So a busy agent gets the message at
+// once, EXCEPT where typing into it would be wrong: a session that is not started yet, a permission
+// prompt on screen (the text would answer it), or a handoff flow in progress. Those still wait in the
+// app queue and go when the agent is free. localStorage midTurnDelivery="0" turns this off.
+function midTurnAllowed() {
+  try { return localStorage.getItem("midTurnDelivery") !== "0"; } catch (e) { return true; }
+}
+async function sendOrHold(agentPath, session, text) {
+  if (!session) { submitToAgent(agentPath, text); return "sent"; }
+  if (!session.started) { session.sendQueue.push(text); renderQueue(agentPath); return "held"; }
+  const working = () => session.busy || session.transcriptWorking;
+  if (!working()) { submitToAgent(agentPath, text); return "sent"; }
+  let ok = midTurnAllowed() && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath));
+  if (ok) { try { ok = !(await window.api.agentDialogOpen(agentPath)); } catch (e) { ok = false; } }
+  if (!working()) { submitToAgent(agentPath, text); return "sent"; }
+  if (ok) { submitToAgent(agentPath, text, { midTurn: true }); return "midturn"; }
+  session.sendQueue.push(text);
+  renderQueue(agentPath);
+  return "held";
 }
 
 function renderQueue(agentPath) {
@@ -3400,7 +3474,7 @@ function clearAttachments() {
 // waiting for the CLI's own echo + a debounced rebuild to surface it - that
 // round trip can take several real seconds, which otherwise looks exactly
 // like a blank, possibly-stuck screen with no feedback at all.
-function submitToAgent(agentPath, text) {
+function submitToAgent(agentPath, text, opts) {
   const session = terminals.get(agentPath);
   if (session) {
     // Single Date.now() call: addedAt and sentAt must actually be equal at
@@ -3409,8 +3483,8 @@ function submitToAgent(agentPath, text) {
     // return different milliseconds on a slow tick and break that invariant
     // from the start.
     const now = Date.now();
-    session.pendingSent.push({ text, addedAt: now, sentAt: now });
-    session.turnStartedAt = now;
+    session.pendingSent.push({ text, addedAt: now, sentAt: now, midTurn: !!(opts && opts.midTurn) });
+    if (!(opts && opts.midTurn)) session.turnStartedAt = now;
     markActivity(agentPath, session);
     if (agentPath === activeAgentPath) {
       // session.lastBlocks (cached by the last successful rebuildChatView())
@@ -3453,7 +3527,7 @@ function submitToAgent(agentPath, text) {
   window.api.sendInput(agentPath, "\x1b[200~" + text);
   setTimeout(() => {
     window.api.sendInput(agentPath, "\x1b[201~");
-    setTimeout(() => window.api.sendInput(agentPath, "\r"), 80);
+    setTimeout(() => window.api.sendInput(agentPath, "\r"), 200); // was 80: a slow CLI read the shorter gap as one chunk
   }, 30);
 }
 
@@ -3578,13 +3652,11 @@ async function sendChatInput() {
   // few hundred milliseconds (setBusy flushes the queue immediately), and the
   // cost of sending into a busy one is losing what Iddo wrote. When in doubt,
   // queue.
-  if (session && (session.busy || session.transcriptWorking || !session.started)) {
-    // Stay typeable at all times rather than blocking - queue it instead;
-    // setBusy() sends it automatically once the agent's actually free, and
-    // showTerminalFor()'s startTerminal().then() does the same once a
-    // freshly-opened agent's session has actually started.
-    session.sendQueue.push(toSend);
-    renderQueue(agentPath);
+  if (session) {
+    // v1.65.0: a working agent now gets the message at its next step (sendOrHold); only a session that
+    // is not started, a permission prompt or a handoff flow still queue it in the app, and setBusy()
+    // / showTerminalFor()'s startTerminal().then() send it once the agent is free as before.
+    await sendOrHold(agentPath, session, toSend);
   } else {
     submitToAgent(agentPath, toSend);
   }
@@ -4088,13 +4160,8 @@ window.libraryBridge = {
       if (!ok) return { ok: false, error: "Could not start " + agent.displayName + "'s session." };
       session = terminals.get(agentPath);
     }
-    if (session.busy || session.transcriptWorking || !session.started) {
-      session.sendQueue.push(toSend);
-      renderQueue(agentPath);
-      return { ok: true, how: "queued" };
-    }
-    submitToAgent(agentPath, toSend);
-    return { ok: true, how: "sent" };
+    const how = await sendOrHold(agentPath, session, toSend);
+    return { ok: true, how: how === "held" ? "queued" : "sent" };
   },
   // Audio blob -> text through the same engine as the chat mic (local whisper, Cloudflare fallback).
   async dictate(blob, note) {

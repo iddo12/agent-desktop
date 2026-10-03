@@ -240,6 +240,18 @@ function slimEntry(obj) {
       : c;
     return { type: "assistant", timestamp: obj.timestamp, message: { model: obj.message.model, content } };
   }
+  // v1.65.0: a message typed while the agent is mid-turn is queued by the CLI and recorded as an
+  // attachment (no "user" entry) when the agent picks it up at its next step; the human ones become
+  // ordinary user entries so the chat shows them and the pending bubble matches them.
+  if (obj.type === "attachment" && obj.attachment && obj.attachment.type === "queued_command" &&
+      obj.attachment.origin && obj.attachment.origin.kind === "human" && typeof obj.attachment.prompt === "string") {
+    return { type: "user", origin: { kind: "human" }, timestamp: obj.timestamp, message: { content: obj.attachment.prompt } };
+  }
+  // The CLI logs "enqueue" the moment it RECEIVES input (also mid-turn), long before the agent reads it.
+  // That is proof of delivery for the pending bubble, so it is kept as a hidden "queued" entry.
+  if (obj.type === "queue-operation" && obj.operation === "enqueue" && typeof obj.content === "string") {
+    return { type: "queue-enqueue", timestamp: obj.timestamp, content: obj.content };
+  }
   return null; // other entry types never produce blocks
 }
 function foldLiveLine(cur, line) {
@@ -353,6 +365,9 @@ function blocksFromEntries(fileEntries) {
       if (text && text.startsWith(HANDOFF_RESUME_TAG)) {
         blocks.push({ role: "reset", lines: [lessonsForResume(text)], timestamp: obj.timestamp });
       } else if (text) blocks.push({ role: "user", lines: [text], timestamp: obj.timestamp });
+    } else if (obj.type === "queue-enqueue") {
+      const qt = String(obj.content || "").replace(/<\/?pasted_content[^>]*>/g, "").trim();
+      if (qt) blocks.push({ role: "queued", lines: [qt], timestamp: obj.timestamp });
     } else if (obj.type === "assistant" && obj.message && Array.isArray(obj.message.content)) {
       // Caught live (2026-08-19): a `model:"<synthetic>"` entry is Claude
       // Code's own internal harness bookkeeping (seen once with the literal
