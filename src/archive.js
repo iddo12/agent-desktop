@@ -173,11 +173,18 @@ function parseTranscriptEntries(jsonlPath) {
 // same agent). Fixed by scoping to only the single file that's actually
 // being written to right now - found by comparing each file's own latest
 // entry timestamp (not filesystem mtime, which can be touched by things
-// unrelated to real writes) and keeping only that one file's entries.
+// unrelated to real writes) and keeping only that one file's entries. That
+// scoping still stands for a plain manual reset (see computeLiveTranscriptBlocks
+// below) - a `/clear` has no marker of its own, so gluing the old file back
+// in front would reintroduce exactly this "did it even do anything" bug.
 // 1.23.0 handoff-reset support (see guards.js). The first message of a fresh
 // session after "Save handoff & reset" starts with this tag followed by the
 // absolute path of the archived handoff file; the Chat View turns it into a
-// red reset marker that lists that handoff's LESSONS section.
+// red reset marker that lists that handoff's LESSONS section. Because that
+// marker exists now, computeLiveTranscriptBlocks() below merges in one file
+// of prior history specifically when it sees this marker - see the
+// 2026-09-28 comment there for why that's safe where the general case above
+// still isn't.
 const HANDOFF_RESUME_TAG = "[[HANDOFF-RESUME]]";
 function lessonsForResume(text) {
   try {
@@ -203,37 +210,150 @@ function extractLessons(md) {
 function getLiveTranscriptBlocks(sessionCwd) {
   return memoByFiles("blocks:" + sessionCwd, findJsonlFiles(sessionCwd), () => computeLiveTranscriptBlocks(sessionCwd));
 }
+// 2026-10-02: incremental + slim. Used to re-read and re-parse EVERY transcript in the folder
+// (old 16 MB sessions included) on each change to the live one, on the main thread, every few
+// seconds while an agent works. Now each file keeps a byte offset and its newest timestamp; only
+// the two newest files keep (slimmed) entries, and only appended bytes are parsed. "Slim" drops
+// what blocksFromEntries never reads (tool_result bodies, thinking, tool inputs other than the two
+// it renders), which also keeps memory small.
+const liveFileState = new Map(); // path -> { offset, carryBuf, latestTs, entries|null }
+function slimEntry(obj) {
+  if (obj.type === "user") {
+    const m = obj.message;
+    let content = m && m.content;
+    if (Array.isArray(content)) {
+      content = content
+        .filter((b) => b && typeof b === "object" && (b.type === "text" || b.type === "tool_use" ||
+          (b.type === "tool_result" && typeof b.content === "string" && /^Your questions have been answered/.test(b.content))))
+        .map((b) => (b.type === "tool_use" ? { type: "tool_use", name: b.name } : b));
+    }
+    return { type: "user", origin: obj.origin ? { kind: obj.origin.kind } : undefined, timestamp: obj.timestamp, message: { content } };
+  }
+  if (obj.type === "assistant" && obj.message) {
+    const c = obj.message.content;
+    const content = Array.isArray(c)
+      ? c
+          .filter((b) => b && typeof b === "object" && (b.type === "text" || b.type === "tool_use"))
+          .map((b) => (b.type === "tool_use"
+            ? { type: "tool_use", name: b.name, input: b.name === "AskUserQuestion" || b.name === "SendUserFile" ? b.input : undefined }
+            : { type: "text", text: b.text }))
+      : c;
+    return { type: "assistant", timestamp: obj.timestamp, message: { model: obj.message.model, content } };
+  }
+  // v1.65.0: a message typed while the agent is mid-turn is queued by the CLI and recorded as an
+  // attachment (no "user" entry) when the agent picks it up at its next step; the human ones become
+  // ordinary user entries so the chat shows them and the pending bubble matches them.
+  if (obj.type === "attachment" && obj.attachment && obj.attachment.type === "queued_command" &&
+      obj.attachment.origin && obj.attachment.origin.kind === "human" && typeof obj.attachment.prompt === "string") {
+    return { type: "user", origin: { kind: "human" }, timestamp: obj.timestamp, message: { content: obj.attachment.prompt } };
+  }
+  // The CLI logs "enqueue" the moment it RECEIVES input (also mid-turn), long before the agent reads it.
+  // That is proof of delivery for the pending bubble, so it is kept as a hidden "queued" entry.
+  if (obj.type === "queue-operation" && (obj.operation === "enqueue" || obj.operation === "remove") && typeof obj.content === "string") {
+    // memory: keep head and tail only (receipt matching needs the exact short text or the last 80 chars)
+    const c = obj.content.length > 1500 ? obj.content.slice(0, 600) + " ... " + obj.content.slice(-600) : obj.content;
+    return { type: obj.operation === "remove" ? "queue-remove" : "queue-enqueue", timestamp: obj.timestamp, content: c };
+  }
+  return null; // other entry types never produce blocks
+}
+function foldLiveLine(cur, line) {
+  if (!line.trim()) return;
+  let obj;
+  try { obj = JSON.parse(line); } catch (e) { return; }
+  if (!obj.timestamp) return;
+  const ts = new Date(obj.timestamp).getTime();
+  if (ts > cur.latestTs) cur.latestTs = ts;
+  if (cur.entries) {
+    const e = slimEntry(obj);
+    if (e) cur.entries.push(e);
+  }
+}
+function advanceLiveFile(jsonlPath, cur) {
+  let size, ino;
+  try { const fst = fs.statSync(jsonlPath); size = fst.size; ino = fst.ino; } catch (e) { return; }
+  if (cur.ino !== undefined && cur.ino !== ino) cur.offset = size + 1; // same path, different file: force the reset below
+  cur.ino = ino;
+  if (size < cur.offset) { cur.offset = 0; cur.carryBuf = null; cur.latestTs = -Infinity; if (cur.entries) cur.entries = []; }
+  if (size === cur.offset) return;
+  let fd;
+  try {
+    fd = fs.openSync(jsonlPath, "r");
+    const CHUNK = 8 * 1024 * 1024;
+    while (cur.offset < size) {
+      const len = Math.min(CHUNK, size - cur.offset);
+      const buf = Buffer.alloc(len);
+      const n = fs.readSync(fd, buf, 0, len, cur.offset);
+      if (n <= 0) break;
+      cur.offset += n;
+      const data = Buffer.concat([cur.carryBuf || Buffer.alloc(0), buf.subarray(0, n)]);
+      const lastNl = data.lastIndexOf(10);
+      if (lastNl < 0) { cur.carryBuf = data; continue; }
+      const complete = data.subarray(0, lastNl).toString("utf-8");
+      cur.carryBuf = Buffer.from(data.subarray(lastNl + 1));
+      for (const line of complete.split("\n")) foldLiveLine(cur, line);
+    }
+  } catch (e) {
+    /* keep what was folded so far */
+  } finally {
+    if (fd != null) try { fs.closeSync(fd); } catch (e) {}
+  }
+}
 function computeLiveTranscriptBlocks(sessionCwd) {
-  let currentFileEntries = [];
-  let currentFileLatestTs = -Infinity;
-  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
-    let raw;
-    try {
-      raw = fs.readFileSync(jsonlPath, "utf-8");
-    } catch (e) {
-      continue;
-    }
-    const fileEntries = [];
-    let fileLatestTs = -Infinity;
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch (e) {
-        continue;
+  const paths = findJsonlFiles(sessionCwd);
+  const states = [];
+  for (const jsonlPath of paths) {
+    let cur = liveFileState.get(jsonlPath);
+    if (!cur) { cur = { offset: 0, carryBuf: null, latestTs: -Infinity, entries: [] }; liveFileState.set(jsonlPath, cur); }
+    advanceLiveFile(jsonlPath, cur);
+    states.push({ jsonlPath, cur });
+  }
+  // Only the two newest files can ever be shown (current + one hop back after a handoff reset).
+  const ranked = states.slice().sort((x, y) => y.cur.latestTs - x.cur.latestTs);
+  const keep = new Set(ranked.slice(0, 2));
+  const files = [];
+  for (const st of ranked) {
+    if (keep.has(st)) {
+      if (!st.cur.entries) {
+        // fell back into the top two after being dropped: rebuild once from the start
+        st.cur.entries = []; st.cur.offset = 0; st.cur.carryBuf = null; st.cur.latestTs = -Infinity;
+        advanceLiveFile(st.jsonlPath, st.cur);
       }
-      if (!obj.timestamp) continue;
-      fileEntries.push(obj);
-      const ts = new Date(obj.timestamp).getTime();
-      if (ts > fileLatestTs) fileLatestTs = ts;
-    }
-    if (fileLatestTs > currentFileLatestTs) {
-      currentFileLatestTs = fileLatestTs;
-      currentFileEntries = fileEntries;
+      files.push({ entries: st.cur.entries, latestTs: st.cur.latestTs });
+    } else if (st.cur.entries) {
+      st.cur.entries = null; // free memory; offset/latestTs kept so it costs nothing while unchanged
     }
   }
-  const entries = currentFileEntries;
+  // Most-recently-active file first, so files[0] is the one being written to
+  // right now and files[1] (if any) is the session immediately before it.
+  files.sort((a, b) => b.latestTs - a.latestTs);
+
+  const current = files[0];
+  let blocks = current ? blocksFromEntries(current.entries) : [];
+
+  // 2026-09-28: a handoff-driven reset (see guards.js/1.23.0) now gets one
+  // hop of merge instead of the full wipe below being final. The wipe was a
+  // deliberate fix (see the long comment above) for a real problem, but that
+  // problem was "no marker exists, so a reset looks identical to nothing
+  // happening" - and a marker exists now (the red chat-reset-marker line
+  // built from role:"reset" below). With the marker in place, showing the
+  // file immediately before the reset alongside it reads as one continuous
+  // scroll with a clear seam, not a wipe - which is what a reset the agent
+  // chose for itself (to keep working, not to start over) should look like.
+  // Capped at exactly one hop on purpose: this is about not hiding the turn
+  // that just happened, not about reconstructing full history - that's what
+  // the History view is for. A manual, no-handoff Reset Session has no
+  // role:"reset" first block and is untouched: it still wipes clean, because
+  // that one *is* meant to read as a deliberate fresh start.
+  const firstReal = blocks.find((b) => b.role !== "queued" && b.role !== "queued-removed");
+  if (firstReal && firstReal.role === "reset" && files.length > 1) {
+    blocks = blocksFromEntries(files[1].entries).concat(blocks);
+  }
+
+  return blocks;
+}
+
+function blocksFromEntries(fileEntries) {
+  const entries = fileEntries.slice();
   entries.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
   const blocks = [];
@@ -248,6 +368,9 @@ function computeLiveTranscriptBlocks(sessionCwd) {
       if (text && text.startsWith(HANDOFF_RESUME_TAG)) {
         blocks.push({ role: "reset", lines: [lessonsForResume(text)], timestamp: obj.timestamp });
       } else if (text) blocks.push({ role: "user", lines: [text], timestamp: obj.timestamp });
+    } else if (obj.type === "queue-enqueue" || obj.type === "queue-remove") {
+      const qt = String(obj.content || "").replace(/<\/?pasted_content[^>]*>/g, "").trim();
+      if (qt) blocks.push({ role: obj.type === "queue-remove" ? "queued-removed" : "queued", lines: [qt], timestamp: obj.timestamp });
     } else if (obj.type === "assistant" && obj.message && Array.isArray(obj.message.content)) {
       // Caught live (2026-08-19): a `model:"<synthetic>"` entry is Claude
       // Code's own internal harness bookkeeping (seen once with the literal
@@ -326,56 +449,97 @@ function getSessionActivity(sessionCwd) {
   return finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId);
 }
 
-function readActivitySummary(sessionCwd) {
-  let entries = [];
-  let latestFileTs = -Infinity;
-  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
-    let raw;
+// 2026-10-02: incremental. A live agent's transcript grows every few seconds and can be 16 MB+;
+// the old version re-read and re-parsed EVERY .jsonl in the folder in full on each change (the
+// memo above only helps when nothing changed), ~hundreds of ms of main-thread time per poll per
+// agent. Now each file keeps a running summary plus the byte offset already consumed, and only the
+// appended bytes are parsed. The reducers are order-dependent but append-only, so the result is
+// identical to a full re-parse. A shrunk/replaced file (size < offset) restarts from zero.
+const activityFileState = new Map(); // path -> { offset, carryBuf, ino, st: summary }
+function newActivityState() {
+  return { lastHumanTs: null, lastEndTurnTs: null, last: null, lastSessionId: null, latestTs: -Infinity };
+}
+function foldActivityLine(st, line) {
+  if (!line.trim()) return;
+  let obj;
+  try { obj = JSON.parse(line); } catch (e) { return; }
+  if (!obj.timestamp) return;
+  const ts = new Date(obj.timestamp).getTime();
+  if (ts > st.latestTs) st.latestTs = ts;
+  if (obj.sessionId) st.lastSessionId = obj.sessionId;
+  if (obj.type === "assistant" && obj.message) {
+    const done = obj.message.stop_reason === "end_turn" || obj.message.stop_reason === "stop_sequence";
+    if (done && (st.lastEndTurnTs == null || ts > st.lastEndTurnTs)) st.lastEndTurnTs = ts;
+    const c = obj.message.content;
+    const toolUse = Array.isArray(c) && c.some((b) => b && b.type === "tool_use");
+    if (st.last == null || ts >= st.last.ts) st.last = { ts, done, toolUse };
+  } else if (obj.type === "user") {
+    if (obj.origin && obj.origin.kind === "human" && !obj.isMeta) {
+      if (st.lastHumanTs == null || ts > st.lastHumanTs) st.lastHumanTs = ts;
+    }
+    // 2026-10-02: Esc / interrupt writes a user entry "[Request interrupted by user...]". It is not a
+    // new prompt; the turn is over. Left as "not done" it made an interrupted agent read as working
+    // forever, so the forced checkpoint's idle path never started the handoff.
+    const uc = obj.message && obj.message.content;
+    const utext = typeof uc === "string" ? uc : Array.isArray(uc) ? uc.map((b) => (b && b.type === "text" ? b.text || "" : "")).join("") : "";
+    const interrupted = /^\s*\[Request interrupted by user/.test(utext);
+    if (st.last == null || ts >= st.last.ts) st.last = { ts, done: interrupted, toolUse: false };
+    if (interrupted && (st.lastEndTurnTs == null || ts > st.lastEndTurnTs)) st.lastEndTurnTs = ts;
+  }
+}
+function readActivityFile(jsonlPath) {
+  let size, ino;
+  try { const fst = fs.statSync(jsonlPath); size = fst.size; ino = fst.ino; } catch (e) { return null; }
+  let cur = activityFileState.get(jsonlPath);
+  // ino check: a deleted-and-recreated file at the same path must not resume at the old offset
+  if (!cur || size < cur.offset || cur.ino !== ino) {
+    cur = { offset: 0, carryBuf: null, ino, st: newActivityState() };
+    activityFileState.set(jsonlPath, cur);
+  }
+  if (size > cur.offset) {
+    let fd;
     try {
-      raw = fs.readFileSync(jsonlPath, "utf-8");
+      fd = fs.openSync(jsonlPath, "r");
+      const CHUNK = 8 * 1024 * 1024;
+      while (cur.offset < size) {
+        const len = Math.min(CHUNK, size - cur.offset);
+        const buf = Buffer.alloc(len);
+        const n = fs.readSync(fd, buf, 0, len, cur.offset);
+        if (n <= 0) break;
+        cur.offset += n;
+        // Split on the newline BYTE so a multi-byte character cut by a chunk edge is never decoded half-way.
+        let data = Buffer.concat([cur.carryBuf || Buffer.alloc(0), buf.subarray(0, n)]);
+        const lastNl = data.lastIndexOf(10);
+        if (lastNl < 0) { cur.carryBuf = data; continue; }
+        const complete = data.subarray(0, lastNl).toString("utf-8");
+        cur.carryBuf = Buffer.from(data.subarray(lastNl + 1));
+        for (const line of complete.split("\n")) foldActivityLine(cur.st, line);
+      }
     } catch (e) {
-      continue;
-    }
-    const fileEntries = [];
-    let fileLatestTs = -Infinity;
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch (e) {
-        continue;
-      }
-      if (!obj.timestamp) continue;
-      fileEntries.push(obj);
-      const ts = new Date(obj.timestamp).getTime();
-      if (ts > fileLatestTs) fileLatestTs = ts;
-    }
-    if (fileLatestTs > latestFileTs) {
-      latestFileTs = fileLatestTs;
-      entries = fileEntries;
+      /* keep what was folded so far */
+    } finally {
+      if (fd != null) try { fs.closeSync(fd); } catch (e) {}
     }
   }
+  // A final line with no trailing newline yet is folded if it parses, but not consumed (it may still be growing).
+  let st = cur.st;
+  if (cur.carryBuf && cur.carryBuf.length) {
+    st = Object.assign({}, cur.st);
+    foldActivityLine(st, cur.carryBuf.toString("utf-8"));
+  }
+  return st;
+}
 
-  let lastHumanTs = null;
-  let lastEndTurnTs = null;
-  let last = null; // { ts, done } for the most recent user/assistant entry
-  let lastSessionId = null;
-  for (const obj of entries) {
-    const ts = new Date(obj.timestamp).getTime();
-    if (obj.sessionId) lastSessionId = obj.sessionId;
-    if (obj.type === "assistant" && obj.message) {
-      const done = obj.message.stop_reason === "end_turn" || obj.message.stop_reason === "stop_sequence";
-      if (done && (lastEndTurnTs == null || ts > lastEndTurnTs)) lastEndTurnTs = ts;
-      if (last == null || ts >= last.ts) last = { ts, done };
-    } else if (obj.type === "user") {
-      if (obj.origin && obj.origin.kind === "human" && !obj.isMeta) {
-        if (lastHumanTs == null || ts > lastHumanTs) lastHumanTs = ts;
-      }
-      if (last == null || ts >= last.ts) last = { ts, done: false };
-    }
+function readActivitySummary(sessionCwd) {
+  let best = null;
+  const live = new Set();
+  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+    live.add(jsonlPath);
+    const st = readActivityFile(jsonlPath);
+    if (st && st.latestTs > (best ? best.latestTs : -Infinity)) best = st;
   }
-  return { lastHumanTs, lastEndTurnTs, last, lastSessionId };
+  if (!best) return { lastHumanTs: null, lastEndTurnTs: null, last: null, lastSessionId: null };
+  return { lastHumanTs: best.lastHumanTs, lastEndTurnTs: best.lastEndTurnTs, last: best.last, lastSessionId: best.lastSessionId };
 }
 
 function finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId) {
@@ -427,7 +591,7 @@ function finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId) 
     if (startTs == null || (lastEndTurnTs != null && lastEndTurnTs > startTs)) startTs = lastEndTurnTs;
     if (startTs == null) startTs = last.ts;
   }
-  return { working, sinceMs: working ? Math.max(0, Date.now() - startTs) : 0 };
+  return { working, sinceMs: working ? Math.max(0, Date.now() - startTs) : 0, pendingToolUse: !!(working && last && last.toolUse) };
 }
 
 // Cheap companion to getSessionActivity() for the stuck-turn watchdog in
@@ -437,6 +601,22 @@ function finishSessionActivity(lastHumanTs, lastEndTurnTs, last, lastSessionId) 
 // this cwd (there can be more than one - old --continue-encoding-bug
 // leftovers, or genuinely multiple past conversations), or null if none
 // exist yet.
+// Size in bytes of the newest transcript (the live conversation). Used by the
+// stuck-turn watchdog to give a huge resumed session longer before it is called wedged.
+function getLatestTranscriptSizeBytes(sessionCwd) {
+  let latest = -Infinity;
+  let size = null;
+  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+    try {
+      const stat = fs.statSync(jsonlPath);
+      if (stat.mtimeMs > latest) { latest = stat.mtimeMs; size = stat.size; }
+    } catch (e) {
+      /* skip */
+    }
+  }
+  return size;
+}
+
 function getLatestTranscriptMtimeMs(sessionCwd) {
   let latest = null;
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
@@ -581,37 +761,71 @@ function getHaltInfo(sessionCwd) {
 function getLatestUsage(sessionCwd) {
   return memoByFiles("usage:" + sessionCwd, findJsonlFiles(sessionCwd), () => computeLatestUsage(sessionCwd));
 }
-function computeLatestUsage(sessionCwd) {
-  let latestUsage = null;
-
-  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
-    let raw;
+// Incremental like readActivityFile above: per-file running "latest usage" + consumed byte offset.
+const usageFileState = new Map(); // path -> { offset, carryBuf, st: { latest } }
+function foldUsageLine(st, line) {
+  if (!line.trim()) return;
+  let obj;
+  try { obj = JSON.parse(line); } catch (e) { return; }
+  if (!obj.timestamp) return;
+  if (obj.type !== "assistant" || !obj.message || !obj.message.usage) return;
+  if (!st.latest || new Date(obj.timestamp) > new Date(st.latest.timestamp)) {
+    const u = obj.message.usage;
+    st.latest = {
+      timestamp: obj.timestamp,
+      contextTokens: (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.input_tokens || 0),
+      outputTokens: u.output_tokens || 0,
+      // "<synthetic>" marks CLI-generated notices, not a real model turn.
+      model: obj.message.model && !String(obj.message.model).startsWith("<") ? obj.message.model : null,
+    };
+  }
+}
+function readUsageFile(jsonlPath) {
+  let size, ino;
+  try { const fst = fs.statSync(jsonlPath); size = fst.size; ino = fst.ino; } catch (e) { return null; }
+  let cur = usageFileState.get(jsonlPath);
+  if (!cur || size < cur.offset || cur.ino !== ino) {
+    cur = { offset: 0, carryBuf: null, ino, st: { latest: null } };
+    usageFileState.set(jsonlPath, cur);
+  }
+  if (size > cur.offset) {
+    let fd;
     try {
-      raw = fs.readFileSync(jsonlPath, "utf-8");
+      fd = fs.openSync(jsonlPath, "r");
+      const CHUNK = 8 * 1024 * 1024;
+      while (cur.offset < size) {
+        const len = Math.min(CHUNK, size - cur.offset);
+        const buf = Buffer.alloc(len);
+        const n = fs.readSync(fd, buf, 0, len, cur.offset);
+        if (n <= 0) break;
+        cur.offset += n;
+        const data = Buffer.concat([cur.carryBuf || Buffer.alloc(0), buf.subarray(0, n)]);
+        const lastNl = data.lastIndexOf(10);
+        if (lastNl < 0) { cur.carryBuf = data; continue; }
+        const complete = data.subarray(0, lastNl).toString("utf-8");
+        cur.carryBuf = Buffer.from(data.subarray(lastNl + 1));
+        for (const line of complete.split("\n")) foldUsageLine(cur.st, line);
+      }
     } catch (e) {
-      continue;
-    }
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch (e) {
-        continue;
-      }
-      if (!obj.timestamp) continue;
-      if (obj.type !== "assistant" || !obj.message || !obj.message.usage) continue;
-      if (!latestUsage || new Date(obj.timestamp) > new Date(latestUsage.timestamp)) {
-        const u = obj.message.usage;
-        latestUsage = {
-          timestamp: obj.timestamp,
-          contextTokens: (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.input_tokens || 0),
-          outputTokens: u.output_tokens || 0,
-        };
-      }
+      /* keep what was folded so far */
+    } finally {
+      if (fd != null) try { fs.closeSync(fd); } catch (e) {}
     }
   }
+  let st = cur.st;
+  if (cur.carryBuf && cur.carryBuf.length) {
+    st = { latest: cur.st.latest };
+    foldUsageLine(st, cur.carryBuf.toString("utf-8"));
+  }
+  return st.latest;
+}
 
+function computeLatestUsage(sessionCwd) {
+  let latestUsage = null;
+  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+    const u = readUsageFile(jsonlPath);
+    if (u && (!latestUsage || new Date(u.timestamp) > new Date(latestUsage.timestamp))) latestUsage = u;
+  }
   return latestUsage;
 }
 
@@ -646,19 +860,144 @@ function dayFilePath(agentPath, dateKey) {
   return path.join(dir, `${day}.md`);
 }
 
-// Regenerates each affected day's file fully from the JSONL source of truth,
-// rather than appending incrementally - JSONL is authoritative, so this is
-// both simpler and avoids any risk of duplicate entries from re-syncing.
-function syncArchive(agentPath, sessionCwd) {
-  const jsonlFiles = findJsonlFiles(sessionCwd);
-  const allEntries = jsonlFiles.flatMap(parseTranscriptEntries);
-  if (allEntries.length === 0) return { daysWritten: 0 };
+// 2026-10-02 (v1.62.9): syncArchive used to re-read and re-JSON.parse EVERY transcript of an
+// agent and rewrite EVERY day file, for every agent, every 30 s. CPU-profiled live: the main
+// process sat at ~100% of one core (parseTranscriptEntries 25%, file reads 40%,
+// formatDayMarkdown 17%), which is what made typing lag and the app freeze. Now:
+//   - first call for an agent in this run: if the newest day file is already at least as new as
+//     the newest transcript, the archive is up to date - just remember each file's size (no
+//     parsing at all). Otherwise do the old full regeneration once.
+//   - every later call: read only the bytes appended since last time (per-file offset, cut at
+//     the last newline so a half-written line is never consumed) and APPEND those entries to
+//     their day files. Nothing is re-parsed or rewritten.
+//   - a file that shrank (truncated/rewritten) triggers one full regeneration for that agent.
+const archiveOffsets = new Map(); // agentPath -> Map(jsonlPath -> consumed byte offset)
 
+function parseEntryLine(line) {
+  if (!line.trim()) return null;
+  let obj;
+  try {
+    obj = JSON.parse(line);
+  } catch (e) {
+    return null;
+  }
+  if (obj.type !== "user" && obj.type !== "assistant") return null;
+  if (!obj.message || !obj.timestamp) return null;
+  const text = extractText(obj.message.content);
+  if (!text) return null;
+  return { timestamp: obj.timestamp, role: obj.type, text };
+}
+
+// Entries from byte `offset` of a transcript up to its last complete line.
+function readEntriesFrom(jsonlPath, offset, size) {
+  const len = size - offset;
+  if (len <= 0) return { entries: [], newOffset: offset };
+  let fd;
+  try {
+    fd = fs.openSync(jsonlPath, "r");
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, offset);
+    const lastNl = buf.lastIndexOf(10);
+    if (lastNl < 0) return { entries: [], newOffset: offset };
+    const entries = [];
+    for (const line of buf.toString("utf-8", 0, lastNl).split("\n")) {
+      const e = parseEntryLine(line);
+      if (e) entries.push(e);
+    }
+    return { entries, newOffset: offset + lastNl + 1 };
+  } catch (e) {
+    return { entries: [], newOffset: offset };
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch (e) {}
+    }
+  }
+}
+
+function formatEntryMarkdown(entry) {
+  const time = new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const who = entry.role === "user" ? "You" : "Agent";
+  return [`### ${time} â€” ${who}`, "", entry.text, ""].join("\n");
+}
+
+function fullSyncArchive(agentPath, jsonlFiles, offsets) {
+  const allEntries = [];
+  for (const f of jsonlFiles) {
+    let size;
+    try { size = fs.statSync(f).size; } catch (e) { continue; }
+    const { entries, newOffset } = readEntriesFrom(f, 0, size);
+    for (const e of entries) allEntries.push(e);
+    offsets.set(f, newOffset);
+  }
+  if (allEntries.length === 0) return { daysWritten: 0 };
   const byDate = groupByDate(allEntries);
   for (const [dateKey, entries] of byDate) {
     entries.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     const md = formatDayMarkdown(dateKey, entries);
     withFsRetry(() => fs.writeFileSync(dayFilePath(agentPath, dateKey), md, "utf-8"));
+  }
+  return { daysWritten: byDate.size };
+}
+
+function syncArchive(agentPath, sessionCwd) {
+  const jsonlFiles = findJsonlFiles(sessionCwd);
+  let offsets = archiveOffsets.get(agentPath);
+
+  if (!offsets) {
+    // First look at this agent in this run.
+    offsets = new Map();
+    archiveOffsets.set(agentPath, offsets);
+    let newestTranscript = 0;
+    const sizes = new Map();
+    for (const f of jsonlFiles) {
+      try {
+        const st = fs.statSync(f);
+        sizes.set(f, st.size);
+        if (st.mtimeMs > newestTranscript) newestTranscript = st.mtimeMs;
+      } catch (e) {}
+    }
+    let newestDay = 0;
+    try {
+      const days = listArchivedDays(agentPath); // newest first
+      if (days.length) {
+        const [y, m, d] = days[0].split("-");
+        newestDay = fs.statSync(path.join(agentPath, "sessions", y, m, `${d}.md`)).mtimeMs;
+      }
+    } catch (e) {}
+    if (newestDay && newestDay >= newestTranscript) {
+      for (const [f, size] of sizes) offsets.set(f, size); // archive already current: no parsing
+      return { daysWritten: 0 };
+    }
+    return fullSyncArchive(agentPath, jsonlFiles, offsets);
+  }
+
+  // Later calls: only the appended bytes.
+  const added = [];
+  for (const f of jsonlFiles) {
+    let size;
+    try { size = fs.statSync(f).size; } catch (e) { continue; }
+    const prev = offsets.get(f) || 0;
+    if (size < prev) {
+      // a transcript shrank (rewritten): regenerate this agent's archive once from scratch
+      const fresh = new Map();
+      archiveOffsets.set(agentPath, fresh);
+      return fullSyncArchive(agentPath, jsonlFiles, fresh);
+    }
+    if (size === prev) continue;
+    const { entries, newOffset } = readEntriesFrom(f, prev, size);
+    for (const e of entries) added.push(e);
+    offsets.set(f, newOffset);
+  }
+  if (added.length === 0) return { daysWritten: 0 };
+  const byDate = groupByDate(added);
+  for (const [dateKey, entries] of byDate) {
+    entries.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const file = dayFilePath(agentPath, dateKey);
+    const body = entries.map(formatEntryMarkdown).join("\n");
+    withFsRetry(() => {
+      if (fs.existsSync(file)) fs.appendFileSync(file, "\n" + body, "utf-8");
+      else fs.writeFileSync(file, formatDayMarkdown(dateKey, entries), "utf-8");
+    });
   }
   return { daysWritten: byDate.size };
 }
@@ -1291,6 +1630,11 @@ module.exports = {
   getLiveTranscriptBlocks,
   getSessionActivity,
   getLatestTranscriptMtimeMs,
+  getLatestTranscriptSizeBytes,
+  __readActivitySummaryForTest: readActivitySummary,
+  __computeLatestUsageForTest: computeLatestUsage,
+  __computeLiveBlocksForTest: computeLiveTranscriptBlocks,
+  __blocksFromEntriesForTest: blocksFromEntries,
   getHaltInfo,
   getConfirmedRateLimits,
   extractLessons,

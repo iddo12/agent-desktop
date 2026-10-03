@@ -226,6 +226,12 @@ def update(args):
     entry = find(args.update)
     if not entry:
         raise LookupError(f"no entry {args.update!r}")
+    # Library shows only the latest version of a document; the link being replaced is
+    # kept (newest first, max 20, no repeats) so older versions open from a fine-print list.
+    if args.link and entry.get("link") and entry["link"] != args.link:
+        older = [v for v in entry.get("olderVersions", []) if v.get("link") not in (entry["link"], args.link)]
+        older.insert(0, {"link": entry["link"], "replacedAt": _now()})
+        entry["olderVersions"] = older[:20]
     for field, value in (("title", args.title), ("description", args.desc), ("link", args.link),
                          ("topic", args.topic), ("agent", args.agent), ("thumbnail", args.thumbnail),
                          ("status", args.status), ("type", args.type), ("pdf", args.pdf),

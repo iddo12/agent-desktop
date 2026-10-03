@@ -178,7 +178,7 @@ function readTelegramTasks() {
   return out.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 }
 
-function getAgentOverview(agents, sessionCwdFor) {
+function getAgentOverview(agents, sessionCwdFor, dialogOpenFor) {
   const telegram = readTelegramTasks();
   const now = Date.now();
   const result = agents.map((a) => {
@@ -217,6 +217,7 @@ function getAgentOverview(agents, sessionCwdFor) {
       state,
       sinceMs: activity.sinceMs,
       attention,
+      dialogOpen: typeof dialogOpenFor === "function" ? !!dialogOpenFor(a.path) : false,
       context,
       openFile: open.file,
       openItems: open.items,

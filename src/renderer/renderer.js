@@ -37,6 +37,7 @@ const chatAttachmentsEl = document.getElementById("chat-attachments");
 const chatQueueEl = document.getElementById("chat-queue");
 const chatThinkingIndicatorEl = document.getElementById("chat-thinking-indicator");
 const contextUsageEl = document.getElementById("context-usage");
+const modelBadgeEl = document.getElementById("model-badge");
 const cacheStatusEl = document.getElementById("cache-status");
 const fiveHourUsageEl = document.getElementById("five-hour-usage");
 const weeklyUsageEl = document.getElementById("weekly-usage");
@@ -332,7 +333,12 @@ function renderAgentItem(agent, groupId) {
   item.draggable = true;
   item.dataset.folderName = agent.folderName;
   item.dataset.groupId = groupId || "";
-  item.appendChild(renderAvatarEl(agent));
+  // The avatar sits in a positioned wrapper so header-tasks.js can pin the run-state
+  // icon and the needs-you badge to its corners (they are added there, from live data).
+  const avatarWrap = document.createElement("div");
+  avatarWrap.className = "avatar-wrap";
+  avatarWrap.appendChild(renderAvatarEl(agent));
+  item.appendChild(avatarWrap);
 
   const textWrap = document.createElement("div");
   textWrap.className = "agent-item-text";
@@ -657,7 +663,47 @@ pauseAgentBtn.addEventListener("click", () => {
   if (agent) toggleAgentPaused(agent);
 });
 
+// Per-agent compose draft (v1.64.3): the compose box and its attachment chips belong to the agent you
+// were typing to. Switching agents parks the unsent text + attachments under the old agent and restores
+// the new agent's own (empty if none). In memory, plus localStorage (debounced) so a restart keeps them.
+const composeDrafts = new Map(); // agentPath -> { text, attachments }
+const COMPOSE_DRAFTS_KEY = "composeDrafts";
+try {
+  const saved = JSON.parse(localStorage.getItem(COMPOSE_DRAFTS_KEY) || "{}");
+  for (const k of Object.keys(saved)) if (saved[k]) composeDrafts.set(k, { text: String(saved[k]), attachments: [] });
+} catch (e) {}
+function persistComposeDrafts() {
+  try {
+    const o = {};
+    for (const [k, v] of composeDrafts) if (v.text) o[k] = v.text;
+    localStorage.setItem(COMPOSE_DRAFTS_KEY, JSON.stringify(o));
+  } catch (e) {}
+}
+function parkComposeDraft(path) {
+  if (!path) return;
+  const text = chatInputEl.value;
+  if (text || pendingAttachments.length) composeDrafts.set(path, { text, attachments: pendingAttachments });
+  else composeDrafts.delete(path);
+  persistComposeDrafts();
+}
+function restoreComposeDraft(path) {
+  const d = composeDrafts.get(path);
+  chatInputEl.value = d ? d.text : "";
+  pendingAttachments = d ? d.attachments : [];
+  renderAttachments();
+  autoGrowChatInput();
+}
+let composeDraftTimer = null;
+chatInputEl.addEventListener("input", () => {
+  clearTimeout(composeDraftTimer);
+  composeDraftTimer = setTimeout(() => parkComposeDraft(activeAgentPath), 600);
+});
+
 function selectAgent(agent) {
+  if (activeAgentPath !== agent.path) {
+    parkComposeDraft(activeAgentPath);
+    restoreComposeDraft(agent.path);
+  }
   activeAgentPath = agent.path;
   localStorage.setItem("lastSelectedAgentPath", agent.path);
   renderAgentList();
@@ -706,11 +752,11 @@ function sendResizeIfChanged(session, agentPath, cols, rows) {
   window.api.resizeTerminal(agentPath, cols, rows);
 }
 
-function showTerminalFor(agent) {
-  terminalContainerEl.innerHTML = "";
-
+// Creates (once) the renderer-side session object + xterm for an agent without showing it.
+function getOrCreateSession(agent) {
   let session = terminals.get(agent.path);
-  if (!session) {
+  if (session) return session;
+  {
     const term = new Terminal({
       // The terminal stays DARK even though the rest of the app is light -
       // same as VS Code and every other IDE. Claude Code's CLI draws its
@@ -786,17 +832,12 @@ function showTerminalFor(agent) {
       window.api.sendInput(agent.path, data);
     });
   }
+  return session;
+}
 
-  session.term.open(terminalContainerEl);
-
-  // Fitting immediately after open() can measure a zero-size container if the
-  // parent was just unhidden this same tick (display:none -> flex hasn't been
-  // painted yet) - defer to the next animation frame so layout has settled.
-  requestAnimationFrame(() => {
-    session.fitAddon.fit();
-    const { cols, rows } = session.term;
-
-    if (!session.started) {
+// Starts the agent's pty once. Shared by showTerminalFor (tab opened) and attachSessionInBackground.
+function startSessionPty(agent, session, cols, rows) {
+  if (session.started) return;
       session.started = true;
       session.lastSentCols = cols;
       session.lastSentRows = rows;
@@ -818,6 +859,24 @@ function showTerminalFor(agent) {
           session.term.writeln(`\r\n[failed to start session: ${err.message}]`);
           session.started = false;
         });
+}
+
+function showTerminalFor(agent) {
+  terminalContainerEl.innerHTML = "";
+
+  const session = getOrCreateSession(agent);
+
+  session.term.open(terminalContainerEl);
+
+  // Fitting immediately after open() can measure a zero-size container if the
+  // parent was just unhidden this same tick (display:none -> flex hasn't been
+  // painted yet) - defer to the next animation frame so layout has settled.
+  requestAnimationFrame(() => {
+    session.fitAddon.fit();
+    const { cols, rows } = session.term;
+
+    if (!session.started) {
+      startSessionPty(agent, session, cols, rows);
     } else {
       sendResizeIfChanged(session, agent.path, cols, rows);
     }
@@ -833,6 +892,21 @@ function showTerminalFor(agent) {
     // menu/keystroke interactions like the theme picker or y/n prompts).
     chatInputEl.focus();
   });
+}
+
+// 2026-10-03: attach + start an agent's pty WITHOUT touching the visible tab, focus or compose
+// box (auto-handoff used to selectAgent() and flick back, so it had to wait for Iddo to stop
+// typing). Never calls term.open(), so there is no DOM work; the first real tab click opens the
+// xterm and sends the true cols/rows via sendResizeIfChanged. Resolves true once started.
+async function attachSessionInBackground(agent) {
+  const session = getOrCreateSession(agent);
+  if (!session.started) startSessionPty(agent, session, 120, 30);
+  const t0 = Date.now();
+  while (Date.now() - t0 < 20000) {
+    if (session.started && Date.now() - t0 > 4000) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return !!session.started;
 }
 
 function refitActiveTerminal() {
@@ -1558,6 +1632,17 @@ async function ensureLongMessageCached(text) {
 }
 
 
+// v1.62.0: the handoff instruction (and its "not written yet" reminder) is a long block of text
+// meant for the agent, not for Iddo - drawing it made the chat need scrolling. The chat shows one
+// short, coloured "Handoff" line instead; the full text still goes to the agent and stays in the
+// transcript. Only the DRAWING changes - message matching (pendingSent) still uses the real text.
+function handoffLabelFor(text) {
+  const t = String(text || "");
+  if (t.startsWith("[Agent Desktop - planned context reset]")) return "Handoff";
+  if (t.startsWith("[Agent Desktop] Your last reply said the handoff was saved")) return "Handoff - reminder to write the file";
+  return null;
+}
+
 function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // Keep the reader where they are. This view is re-rendered from scratch on
   // every rebuild - the 4s stale poll, every burst of streaming output, etc.
@@ -1572,7 +1657,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
   // burst - so selecting text to copy it silently un-selected itself a few
   // seconds later (Iddo: "copy paste regressed"). The skipped render is
   // picked up by the next poll once the selection is gone.
-  const sig = activeAgentPath + "" + JSON.stringify(blocks) + "" + JSON.stringify((pendingSent || []).map((p) => p.text + (p.failed ? " failed" + (p.superseded ? "S" : "") : "")));
+  const sig = activeAgentPath + "\x01" + JSON.stringify(blocks) + "\x01" + JSON.stringify((pendingSent || []).map((p) => p.text + (p.failed ? "\x00failed" + (p.superseded ? "S" : "") : "")));
   const sel = window.getSelection();
   const selectionInChat =
     sel && !sel.isCollapsed && scrollEl.contains(sel.anchorNode) && scrollEl.contains(sel.focusNode);
@@ -1636,8 +1721,12 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       // 4 s chat re-render because it is kept by timestamp.
       const key = block.timestamp || "reset";
       const expanded = resetMarkersExpanded.has(key);
+      // 2026-09-28: no longer claims "earlier conversation is in History" -
+      // the view above this line is now the earlier conversation itself
+      // (one hop of it, merged back in - see computeLiveTranscriptBlocks()
+      // in archive.js), not a pointer away to go find it.
       head.textContent =
-        "SESSION RESET" + (block.timestamp ? " - " + formatBlockTime(block.timestamp) : "") + " - earlier conversation is in History - " + (expanded ? "hide" : "show") + " lessons carried over";
+        "AUTOMATIC HANDOFF" + (block.timestamp ? " - " + formatBlockTime(block.timestamp) : "") + " - lessons carried over from the conversation above - " + (expanded ? "hide" : "show") + " lessons";
       head.style.cursor = "pointer";
       head.title = "Click to show or hide the lessons carried over from the previous session";
       wrap.appendChild(head);
@@ -1676,7 +1765,8 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       continue;
     }
     const el = document.createElement("div");
-    el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role;
+    const handoffLabel = block.role === "user" ? handoffLabelFor(text) : null;
+    el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role + (handoffLabel ? " chat-bubble-handoff" : "");
     // A message too long to paste is handed to the CLI as a file reference,
     // which is a transport detail - but the transcript then shows that
     // reference instead of what Iddo wrote, so scrolling back showed a path
@@ -1684,7 +1774,9 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     // cache, before anything is appended; if it is not cached yet (a message
     // from an earlier run of the app) fetch it, which re-renders when it
     // lands. Agent and user messages render as Markdown; status lines stay plain.
-    if (block.role === "user" && renderLongMessageInto(el, text)) {
+    if (handoffLabel) {
+      el.textContent = handoffLabel;
+    } else if (block.role === "user" && renderLongMessageInto(el, text)) {
       // drawn from the cache
     } else {
       renderRichText(el, text, { markdown: block.role !== "status" });
@@ -1716,7 +1808,11 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     // path it travelled as. This bubble is on screen from the moment Send is
     // pressed until the transcript catches up, which with a busy agent is the
     // whole time he is looking at it.
-    if (!renderLongMessageInto(el, pending.text)) renderRichText(el, pending.text, { markdown: true });
+    const pendingHandoffLabel = handoffLabelFor(pending.text);
+    if (pendingHandoffLabel) {
+      el.classList.add("chat-bubble-handoff");
+      el.textContent = pendingHandoffLabel;
+    } else if (!renderLongMessageInto(el, pending.text)) renderRichText(el, pending.text, { markdown: true });
     if (pending.failed) {
       // See rebuildChatView()'s pendingSent-filtering comment: this never
       // reached the agent's transcript at all. v1.27.1 auto-requeued it;
@@ -1730,7 +1826,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       // rule now has agents ask before acting on a repeat, but the warning
       // should not be pushing Iddo into creating one in the first place.
       warn.textContent = pending.superseded
-        ? "⚠ Not delivered - a later message reached the agent but this one did not"
+        ? "⚠ Not confirmed - a later message reached the agent but this one has not appeared in the conversation"
         : pending.waitedOnBusyAgent
         ? "⚠ Not confirmed - the agent was busy the whole time, so this may still be queued"
         : "⚠ Not confirmed - check the conversation before resending";
@@ -1780,6 +1876,16 @@ function normalizeForMatch(s) {
 // exists - a safety net against a pending bubble that never finds a
 // matching transcript entry and would otherwise pulse "sending" forever.
 const PENDING_SENT_TIMEOUT_MS = 45000;
+// v1.65.0 mid-turn delivery. A receipt in the transcript means the message waits safely in the CLI's
+// own queue (delivered at the agent's next step), so the pending bubble may live this long.
+const MIDTURN_RECEIVED_MAX_MS = 30 * 60 * 1000;
+// Without a receipt this soon after a mid-turn send, the CLI never got it (the receipt is written on
+// arrival): offer Resend early instead of after the long busy-agent wait.
+const MIDTURN_NO_RECEIPT_FAIL_MS = 25000;
+const ENTER_NUDGE_1_MS = 8000;
+const ENTER_NUDGE_2_MS = 20000;
+// How long a later message must be on record, with this one still unmatched, before 'superseded'.
+const SUPERSEDED_GRACE_MS = 20000;
 // How long an agent's transcript must go WITHOUT being written to before an
 // unmatched message is treated as lost. Long agentic runs write a tool_result
 // every few seconds; a genuinely dropped message sits there while the
@@ -1811,11 +1917,15 @@ const PENDING_SENT_BUSY_TIMEOUT_MS = 6 * 60 * 1000;
 async function rebuildChatView(agentPath, opts = {}) {
   const session = terminals.get(agentPath);
   if (!session) return;
-  const [blocks, activity] = await Promise.all([
+  const [allBlocks, activity] = await Promise.all([
     window.api.getLiveTranscript(agentPath),
     window.api.getSessionActivity(agentPath).catch(() => null),
   ]);
   if (agentPath !== activeAgentPath || terminals.get(agentPath) !== session) return; // stale by the time the IPC round-trip finished
+  // v1.65.0: "queued" blocks are the CLI's receipt of input (see archive.js); they prove delivery, never drawn.
+  const queuedBlocks = (allBlocks || []).filter((b) => b.role === "queued");
+  const removedBlocks = (allBlocks || []).filter((b) => b.role === "queued-removed");
+  const blocks = (allBlocks || []).filter((b) => b.role !== "queued" && b.role !== "queued-removed");
 
   // Authoritative "is the agent still working" signal, from the transcript
   // (see getSessionActivity in archive.js) - reliable through quiet stretches
@@ -1902,6 +2012,70 @@ async function rebuildChatView(agentPath, opts = {}) {
     if (stillUnmatched && pending.text.trim() === "/clear" && now - pending.addedAt > 3000) stillUnmatched = false;
     if (!stillUnmatched) return false; // matched - a real transcript entry now carries it, drop the optimistic copy
 
+    // v1.65.0: the CLI logs a receipt the moment input reaches it, mid-turn included, long before the
+    // agent reads it at its next step. A receipt is proof the message is safely queued: never call it
+    // lost, never offer a Resend (which would duplicate it). Gives up only after MIDTURN_RECEIVED_MAX_MS.
+    const isSlash = pending.text.trim().startsWith("/");
+    if (!pending.received && !isSlash) {
+      const sentAtR = pending.sentAt || pending.addedAt;
+      const want = normalizeForMatch(pending.text);
+      const fp = want.slice(-80).trim();
+      // each receipt belongs to ONE pending message (two identical "yes" must not share one)
+      const usedReceipts = new Set(session.pendingSent.filter((p) => p !== pending && p.receiptTs).map((p) => p.receiptTs));
+      const hit = queuedBlocks.find((q) => {
+        if (!q.timestamp || usedReceipts.has(q.timestamp) || new Date(q.timestamp).getTime() < sentAtR - 2000) return false;
+        const n = normalizeForMatch(q.lines.join(" "));
+        return n === want || (fp.length >= 30 && n.includes(fp));
+      });
+      if (hit) {
+        pending.received = true;
+        pending.receiptTs = hit.timestamp;
+        pending.failed = false;
+        pending.superseded = false;
+      }
+    }
+    // The CLI also logs "remove" - normally right before the agent reads the message (a user entry
+    // follows within a second), but a "remove" with no user entry after 15 s means the queued text was
+    // withdrawn (e.g. Esc popped it back into the input box): it was NOT delivered.
+    if (pending.received && pending.receiptTs) {
+      const want2 = normalizeForMatch(pending.text);
+      const fp2 = want2.slice(-80).trim();
+      const gone = removedBlocks.some((q) => {
+        if (!q.timestamp || new Date(q.timestamp).getTime() < new Date(pending.receiptTs).getTime()) return false;
+        if (now - new Date(q.timestamp).getTime() < 15000) return false;
+        const n = normalizeForMatch(q.lines.join(" "));
+        return n === want2 || (fp2.length >= 30 && n.includes(fp2));
+      });
+      if (gone) {
+        pending.received = false;
+        pending.receiptTs = null;
+        pending.failed = true;
+        window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+        return true;
+      }
+    }
+    // v1.65.0: stuck Enter. 2026-10-03 the COO and Software Engineering agents never got three messages:
+    // `claude logs` showed the text sitting in the CLI's input box, the Enter having been taken as part of
+    // the paste (a busy CLI reads the paste end and the Enter in one chunk). Every send writes a receipt
+    // within a second, so no receipt after 8 s / 20 s means the text is waiting for its Enter: press Enter
+    // again, at most twice. Never at a permission prompt (Enter would accept it). An Enter into an empty
+    // box does nothing, so a false alarm costs nothing.
+    if (!pending.received && !pending.failed && !isSlash) {
+      const ageN = now - (pending.sentAt || pending.addedAt);
+      const stepN = pending.enterNudges || 0;
+      if ((stepN === 0 && ageN > ENTER_NUDGE_1_MS) || (stepN === 1 && ageN > ENTER_NUDGE_2_MS && now - (pending.nudgeAt || 0) > 12000)) {
+        pending.enterNudges = stepN + 1;
+        pending.nudgeAt = now;
+        window.api.agentInputHoldsText(agentPath, pending.text).then((holds) => {
+          if (holds) writeQueued(session, () => window.api.sendInput(agentPath, "\r"));
+        }).catch(() => {});
+      }
+    }
+    if (pending.received) {
+      if (now - (pending.sentAt || pending.addedAt) >= MIDTURN_RECEIVED_MAX_MS) { pending.received = false; pending.failed = true; window.api.notifySendFailed(agentPath, pending.text).catch(() => {}); }
+      return true;
+    }
+
     // 2026-09-27: a later message that DID land proves this one was dropped.
     // Traced live on the Software Engineering agent: "yes" was sent at 04:13:34
     // while the agent sat idle, and the CLI never recorded it (the message sent
@@ -1914,9 +2088,16 @@ async function rebuildChatView(agentPath, opts = {}) {
     // sent that is not this one means this one is not coming.
     if (!pending.failed) {
       const sentAt = pending.sentAt || pending.addedAt;
-      const supersededBy = blocks.some(
-        (b) => b.role === "user" && b.timestamp && new Date(b.timestamp).getTime() > sentAt + 2000
-      );
+      // 2026-10-02: a later message must have been on record for SUPERSEDED_GRACE_MS
+      // while this one still did not appear. Without the grace, two quick follow-ups
+      // whose transcript writes land out of order, or a queued message that dequeues
+      // while the first is still genuinely in flight, were declared "not delivered"
+      // within seconds - the false alarm that pushes a resend and makes a duplicate.
+      const laterTimes = blocks
+        .filter((b) => b.role === "user" && b.timestamp)
+        .map((b) => new Date(b.timestamp).getTime())
+        .filter((t) => t > sentAt + 2000);
+      const supersededBy = laterTimes.length > 0 && now - Math.min(...laterTimes) > SUPERSEDED_GRACE_MS;
       if (supersededBy) {
         pending.failed = true;
         pending.superseded = true;
@@ -1953,6 +2134,11 @@ async function rebuildChatView(agentPath, opts = {}) {
     // this app does not have. Manual-only from here: Resend is a real
     // click, one at a time, by a person who can see whether the last one
     // already went through before trying again.
+    if (pending.midTurn && !pending.failed && !isSlash && now - (pending.sentAt || pending.addedAt) > MIDTURN_NO_RECEIPT_FAIL_MS) {
+      pending.failed = true;
+      window.api.notifySendFailed(agentPath, pending.text).catch(() => {});
+      return true;
+    }
     const waited = now - pending.addedAt;
     const limit = session.busy ? PENDING_SENT_BUSY_TIMEOUT_MS : PENDING_SENT_TIMEOUT_MS;
     if (waited >= limit) {
@@ -2120,6 +2306,17 @@ const IDLE_TIMEOUT_MS = 900;
 // so the approximation is never silently hidden.
 const ASSUMED_CONTEXT_WINDOW = 200000;
 
+// "claude-sonnet-5-5" -> "Sonnet 5.5", "claude-haiku-4-5-20251001" -> "Haiku 4.5",
+// "claude-3-5-sonnet-20241022" -> "Sonnet 3.5". Unknown shapes fall back to the raw id.
+function prettyModelName(id) {
+  if (!id) return "";
+  const parts = String(id).replace(/\[.*\]$/, "").replace(/^claude-/, "").replace(/-\d{8}$/, "").split("-");
+  const names = parts.filter((p) => /^[a-z]+$/.test(p));
+  const nums = parts.filter((p) => /^\d{1,2}$/.test(p));
+  if (names.length !== 1 || !nums.length) return String(id);
+  return names[0][0].toUpperCase() + names[0].slice(1) + " " + nums.join(".");
+}
+
 async function refreshContextUsage(agentPath) {
   let usage = await window.api.getContextUsage(agentPath);
   if (agentPath !== activeAgentPath) return; // user may have switched agents while this was in flight
@@ -2127,13 +2324,28 @@ async function refreshContextUsage(agentPath) {
   if (usage && typeof window.guardUsageIsStale === "function" && window.guardUsageIsStale(agentPath, usage)) usage = null; // pre-reset leftovers
   if (usage && typeof usage.contextTokens === "number") {
     const pct = Math.min(100, Math.round((usage.contextTokens / ASSUMED_CONTEXT_WINDOW) * 100));
-    contextUsageEl.textContent = `${pct}% context`;
+    // Iddo, 2026-09-28: wants the actual token count on screen at a glance,
+    // not just a percentage hidden behind a hover - "it will tell me ... 100,000
+    // tokens or 50,000 tokens or whatever, just a number on top." Percentage
+    // stays alongside since it's the more actionable figure for "how close to
+    // the wall," but the raw count is now always the visible text itself.
+    const kTokens = usage.contextTokens >= 1000
+      ? `${Math.round(usage.contextTokens / 1000)}K`
+      : String(usage.contextTokens);
+    contextUsageEl.textContent = `${kTokens} tokens (${pct}%)`;
     contextUsageEl.title = `~${usage.contextTokens.toLocaleString()} tokens of an assumed ${ASSUMED_CONTEXT_WINDOW.toLocaleString()}-token context window (approximate - not a confirmed figure for this model). Scoped to just this agent's own conversation - grows as this specific conversation grows, resets on /clear or a fresh session.`;
     contextUsageEl.classList.remove("hidden", "warning", "critical");
     if (pct >= 90) contextUsageEl.classList.add("critical");
     else if (pct >= 70) contextUsageEl.classList.add("warning");
   } else {
     contextUsageEl.classList.add("hidden");
+  }
+  if (usage && usage.model) {
+    modelBadgeEl.textContent = prettyModelName(usage.model);
+    modelBadgeEl.title = "The model this agent used for its most recent reply (" + usage.model + "). Agents can switch models, so this follows the latest turn.";
+    modelBadgeEl.classList.remove("hidden");
+  } else {
+    modelBadgeEl.classList.add("hidden");
   }
 
   const session = terminals.get(agentPath);
@@ -2561,6 +2773,29 @@ function markActivity(agentPath, session) {
       if (agentPath === activeAgentPath) updateThinkingIndicator();
     }
   }, THINKING_INDICATOR_QUIET_MS);
+}
+
+// v1.65.0 mid-turn delivery (Iddo: a message written while an agent works must reach it at its next
+// step, not ten minutes later). Verified 2026-10-03 with a real `claude` pty: input typed mid-turn is
+// queued by the CLI itself and read at the next tool boundary. So a busy agent gets the message at
+// once, EXCEPT where typing into it would be wrong: a session that is not started yet, a permission
+// prompt on screen (the text would answer it), or a handoff flow in progress. Those still wait in the
+// app queue and go when the agent is free. localStorage midTurnDelivery="0" turns this off.
+function midTurnAllowed() {
+  try { return localStorage.getItem("midTurnDelivery") !== "0"; } catch (e) { return true; }
+}
+async function sendOrHold(agentPath, session, text) {
+  if (!session) { submitToAgent(agentPath, text); return "sent"; }
+  if (!session.started) { session.sendQueue.push(text); renderQueue(agentPath); return "held"; }
+  const working = () => session.busy || session.transcriptWorking;
+  if (!working()) { submitToAgent(agentPath, text); return "sent"; }
+  let ok = midTurnAllowed() && session.sendQueue.length === 0 && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath));
+  if (ok) { try { ok = !(await window.api.agentDialogOpen(agentPath)); } catch (e) { ok = false; } }
+  if (!working()) { submitToAgent(agentPath, text); return "sent"; }
+  if (ok) { submitToAgent(agentPath, text, { midTurn: true }); return "midturn"; }
+  session.sendQueue.push(text);
+  renderQueue(agentPath);
+  return "held";
 }
 
 function renderQueue(agentPath) {
@@ -3231,8 +3466,7 @@ function autoGrowChatInput() {
 // Dropped or pasted images/files show up as small removable thumbnail chips
 // above the textarea, matching how a normal chat interface previews an
 // attachment before send, rather than sitting in the textarea as raw quoted
-// path text. Not scoped per-agent (same as chatInputEl's own text, which
-// already isn't cleared on agent switch) - one compose box, one draft.
+// path text. Per-agent since v1.64.3 (see composeDrafts in selectAgent).
 let pendingAttachments = []; // { path, previewUrl }
 
 function mimeToExt(mime) {
@@ -3315,7 +3549,7 @@ function clearAttachments() {
 // waiting for the CLI's own echo + a debounced rebuild to surface it - that
 // round trip can take several real seconds, which otherwise looks exactly
 // like a blank, possibly-stuck screen with no feedback at all.
-function submitToAgent(agentPath, text) {
+function submitToAgent(agentPath, text, opts) {
   const session = terminals.get(agentPath);
   if (session) {
     // Single Date.now() call: addedAt and sentAt must actually be equal at
@@ -3324,8 +3558,8 @@ function submitToAgent(agentPath, text) {
     // return different milliseconds on a slow tick and break that invariant
     // from the start.
     const now = Date.now();
-    session.pendingSent.push({ text, addedAt: now, sentAt: now });
-    session.turnStartedAt = now;
+    session.pendingSent.push({ text, addedAt: now, sentAt: now, midTurn: !!(opts && opts.midTurn) });
+    if (!(opts && opts.midTurn)) session.turnStartedAt = now;
     markActivity(agentPath, session);
     if (agentPath === activeAgentPath) {
       // session.lastBlocks (cached by the last successful rebuildChatView())
@@ -3365,11 +3599,22 @@ function submitToAgent(agentPath, text) {
   // sharing a single low-level write with a large content blob, then the
   // existing gap before "\r". Needs the same live-test confirmation this
   // caught the bug with before it's trusted further.
-  window.api.sendInput(agentPath, "\x1b[200~" + text);
-  setTimeout(() => {
-    window.api.sendInput(agentPath, "\x1b[201~");
-    setTimeout(() => window.api.sendInput(agentPath, "\r"), 80);
-  }, 30);
+  // v1.65.0: one write sequence per session at a time (overlapping sends corrupt each other, v1.27.1)
+  writeQueued(session, () => new Promise((resolve) => {
+    window.api.sendInput(agentPath, "\x1b[200~" + text);
+    setTimeout(() => {
+      window.api.sendInput(agentPath, "\x1b[201~");
+      setTimeout(() => { window.api.sendInput(agentPath, "\r"); resolve(); }, 200); // was 80: a slow CLI read the shorter gap as one chunk
+    }, 30);
+  }));
+}
+
+function writeQueued(session, fn) {
+  const prev = (session && session.writeChain) || Promise.resolve();
+  const run = prev.then(fn);
+  const settled = run.catch(() => {});
+  if (session) session.writeChain = settled;
+  return run;
 }
 
 // 2026-09-20: Iddo's direct ask after the whole splitLongMessage() saga -
@@ -3493,19 +3738,19 @@ async function sendChatInput() {
   // few hundred milliseconds (setBusy flushes the queue immediately), and the
   // cost of sending into a busy one is losing what Iddo wrote. When in doubt,
   // queue.
-  if (session && (session.busy || session.transcriptWorking || !session.started)) {
-    // Stay typeable at all times rather than blocking - queue it instead;
-    // setBusy() sends it automatically once the agent's actually free, and
-    // showTerminalFor()'s startTerminal().then() does the same once a
-    // freshly-opened agent's session has actually started.
-    session.sendQueue.push(toSend);
-    renderQueue(agentPath);
+  if (session) {
+    // v1.65.0: a working agent now gets the message at its next step (sendOrHold); only a session that
+    // is not started, a permission prompt or a handoff flow still queue it in the app, and setBusy()
+    // / showTerminalFor()'s startTerminal().then() send it once the agent is free as before.
+    await sendOrHold(agentPath, session, toSend);
   } else {
     submitToAgent(agentPath, toSend);
   }
 
   chatInputEl.value = "";
   clearAttachments();
+  clearTimeout(composeDraftTimer);
+  parkComposeDraft(activeAgentPath); // sent: drop this agent's saved draft (box is empty now)
   chatInputManualFloor = 0; // a fresh message starts from the default size again
   setChatInputHeight(CHAT_INPUT_DEFAULT_HEIGHT);
   chatInputEl.focus();
@@ -3864,6 +4109,7 @@ function pcmToWavChunks(pcm) {
 
 async function startVoiceRecording() {
   try {
+    try { if (window.api.voiceWarm) window.api.voiceWarm(); } catch (e) {} // load the model while speaking
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const recorder = new MediaRecorder(stream);
     const rec = { stream, recorder, chunks: [], timer: null };
@@ -3972,6 +4218,70 @@ voiceInputBtn.addEventListener("click", () => {
   if (voiceRec) stopVoiceRecording();
   else startVoiceRecording();
 });
+
+// v1.64.0: a small bridge for the Library (library.js) so "comment on a document and send it to an
+// agent" reuses THIS file's send path (the same busy-queue / submitToAgent the compose box uses) and the
+// same local whisper dictation, instead of a second transport. Nothing here runs until the Library calls it.
+window.libraryBridge = {
+  agents: () => agents.map((a) => ({ path: a.path, folderName: a.folderName, displayName: a.displayName, role: a.role || "", paused: !!a.paused })),
+  warmVoice: () => { try { if (window.api.voiceWarm) window.api.voiceWarm(); } catch (e) {} },
+  // Sends `text` to an agent exactly as if typed in its compose box, without changing the visible agent
+  // or touching anyone's draft. Starts the agent's session in the background if it has none yet.
+  async send(agentPath, text) {
+    const agent = agents.find((a) => a.path === agentPath);
+    if (!agent) return { ok: false, error: "That agent is not in the list." };
+    if (agent.paused) return { ok: false, error: agent.displayName + " is paused - resume it first." };
+    let toSend = String(text || "");
+    if (!toSend.trim()) return { ok: false, error: "Nothing to send." };
+    if (toSend.length > LONG_MESSAGE_FILE_THRESHOLD) {
+      try {
+        const filePath = await window.api.saveLongMessage(toSend);
+        longMessageCache.set(filePath, toSend);
+        toSend = `This message was too long to paste directly, so it was saved to a file - please read it: "${filePath}"`;
+      } catch (e) { /* send inline */ }
+    }
+    let session = terminals.get(agentPath);
+    if (!session || !session.started) {
+      const ok = await attachSessionInBackground(agent);
+      if (!ok) return { ok: false, error: "Could not start " + agent.displayName + "'s session." };
+      session = terminals.get(agentPath);
+    }
+    const how = await sendOrHold(agentPath, session, toSend);
+    return { ok: true, how: how === "held" ? "queued" : "sent" };
+  },
+  // Audio blob -> text through the same engine as the chat mic (local whisper, Cloudflare fallback).
+  async dictate(blob, note) {
+    const say = typeof note === "function" ? note : () => {};
+    try {
+      const pcm = await blobToPcm16k(blob);
+      let saved = null;
+      try { saved = await window.api.voiceSave(encodeWav16k(pcm, 16000)); } catch (e) {}
+      const savedFile = saved && saved.ok ? saved.file : null;
+      let local = false;
+      try { local = !!(window.api.voiceEngine && (await window.api.voiceEngine()).local); } catch (e) {}
+      say(local ? "Transcribing on this PC..." : "Transcribing...");
+      const parts = [];
+      if (local) {
+        const res = savedFile ? await window.api.transcribeAudio(null, savedFile) : await window.api.transcribeAudio(encodeWav16k(pcm, 16000));
+        if (!res || !res.ok) return { ok: false, error: (res && res.error) || "Transcription failed." };
+        if (res.text) parts.push(res.text.trim());
+      } else {
+        const wavChunks = pcmToWavChunks(pcm);
+        for (let i = 0; i < wavChunks.length; i++) {
+          const res = await window.api.transcribeAudio(wavChunks[i]);
+          if (!res || !res.ok) {
+            if (parts.length) break;
+            return { ok: false, error: (res && res.error) || "Transcription failed." };
+          }
+          if (res.text) parts.push(res.text.trim());
+        }
+      }
+      return { ok: true, text: stitchTranscripts(parts).trim() };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  },
+};
 
 // Pure visual reminder/shortcut - just prefills the compose box, doesn't
 // send anything itself. Prepends rather than overwrites so it still works
@@ -4609,7 +4919,7 @@ resetSessionBtn.addEventListener("click", async () => {
 // Instead: stop the bg process and dispatch a fresh one (the same switch-conversation path as
 // the Chats panel's "+ New chat"): a new conversation with a clean process, old one stays in
 // History/Chats. The caller (guards.js) then delivers its first message and VERIFIES it landed.
-async function performSessionReset(agentPath) {
+async function performSessionReset(agentPath, opts = {}) {
   if (switchingConversation) throw new Error("another conversation switch is already in progress");
   switchingConversation = true;
   const isActive = activeAgentPath === agentPath;
@@ -4626,7 +4936,7 @@ async function performSessionReset(agentPath) {
       Date.now() - tickStartedAt > RESET_SESSION_SLOW_HINT_MS ? `Resetting… ${elapsedSec}s (longer than usual)` : `Resetting… ${elapsedSec}s`;
   }, 100);
   try {
-    const result = await window.api.switchConversation(agentPath, { newConversation: true });
+    const result = await window.api.switchConversation(agentPath, { newConversation: true, initialPrompt: opts.initialPrompt });
     if (result && result.agentId) pendingKnownAgentIdByPath.set(agentPath, result.agentId);
     // Same teardown the Chats panel uses: drop the cached terminal so the next
     // showTerminalFor() builds a fresh one and attaches to the new bg process.
@@ -4732,6 +5042,228 @@ restartSessionBtn.addEventListener("click", async () => {
       restartSessionBtn.disabled = false;
     }, 1500);
   }
+});
+
+// Restart All: the same per-agent restart (kill + re-dispatch `claude --bg
+// --resume <id>`, conversation kept) run across the whole fleet, or a chosen
+// subset. Iddo's ask (2026-10-02) - after changing an autoMode/settings
+// change that applies fleet-wide, clicking Restart Session on 8 agents by
+// hand was the actual friction.
+//
+// Busy/paused handling deliberately does NOT reuse the single-agent button's
+// `session.busy` (renderer-side, pty-silence-derived, and only populated for
+// an agent whose chat has been opened this launch - see showTerminalFor()).
+// That would silently skip the busy check entirely for any agent never
+// clicked into yet. Instead this calls getSessionActivity() (the same
+// transcript+pid-liveness check the main process already uses - see
+// archive.js finishSessionActivity) fresh, right before each agent's own
+// restart, since that is backed by the live session cwd on disk and works
+// identically whether or not that agent's terminal has ever been attached.
+// Paused agents (agent.paused) are left unchecked by default in the picker
+// rather than silently included - a fleet restart that quietly un-pauses
+// something a human paused on purpose would be a surprising side effect.
+//
+// Restarts run sequentially, not in parallel: it keeps the per-row progress
+// readable, and avoids N `claude --bg` processes all starting at once.
+const restartAllBtn = document.getElementById("restart-all-btn");
+const restartAllModalEl = document.getElementById("restart-all-modal");
+const restartAllListEl = document.getElementById("restart-all-list");
+const restartAllSelectAllCb = document.getElementById("restart-all-select-all-cb");
+const restartAllCountEl = document.getElementById("restart-all-count");
+const restartAllSummaryEl = document.getElementById("restart-all-summary");
+const cancelRestartAllBtn = document.getElementById("cancel-restart-all-btn");
+const confirmRestartAllBtn = document.getElementById("confirm-restart-all-btn");
+
+let restartAllInProgress = false;
+let restartAllRows = new Map(); // agentPath -> { checkbox, statusEl }
+
+function restartAllSetRowStatus(agentPath, cls, text) {
+  const row = restartAllRows.get(agentPath);
+  if (!row) return;
+  row.statusEl.className = "restart-all-row-status " + cls;
+  row.statusEl.textContent = text;
+}
+
+function restartAllUpdateCount() {
+  let checked = 0;
+  for (const { checkbox } of restartAllRows.values()) if (checkbox.checked) checked++;
+  restartAllCountEl.textContent = checked + " selected";
+  confirmRestartAllBtn.disabled = restartAllInProgress || checked === 0;
+  confirmRestartAllBtn.textContent = checked > 0 ? `Restart ${checked} agent${checked === 1 ? "" : "s"}` : "Restart agents";
+  restartAllSelectAllCb.checked = checked > 0 && checked === restartAllRows.size;
+}
+
+function openRestartAllModal() {
+  restartAllListEl.innerHTML = "";
+  restartAllRows = new Map();
+  restartAllSummaryEl.classList.add("hidden");
+  restartAllInProgress = false;
+  restartAllLastSkippedNames = [];
+  cancelRestartAllBtn.disabled = false;
+  cancelRestartAllBtn.textContent = "Cancel";
+  retrySkippedRestartAllBtn.classList.add("hidden");
+  retrySkippedRestartAllBtn.disabled = false;
+
+  const sorted = [...agents].sort((a, b) => (a.displayName || "").localeCompare(b.displayName || ""));
+  for (const agent of sorted) {
+    const row = document.createElement("div");
+    row.className = "restart-all-row";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !agent.paused;
+    checkbox.addEventListener("change", restartAllUpdateCount);
+
+    const name = document.createElement("span");
+    name.className = "restart-all-row-name";
+    name.textContent = agent.displayName || agent.folderName || agent.path;
+    if (agent.paused) {
+      const note = document.createElement("span");
+      note.className = "restart-all-row-note";
+      note.textContent = " (paused - unchecked by default)";
+      name.appendChild(note);
+    }
+
+    const status = document.createElement("span");
+    status.className = "restart-all-row-status status-pending";
+    status.textContent = "";
+
+    row.appendChild(checkbox);
+    row.appendChild(name);
+    row.appendChild(status);
+    restartAllListEl.appendChild(row);
+    restartAllRows.set(agent.path, { checkbox, statusEl: status });
+  }
+
+  restartAllUpdateCount();
+  restartAllModalEl.classList.remove("hidden");
+}
+
+restartAllBtn.addEventListener("click", openRestartAllModal);
+
+restartAllSelectAllCb.addEventListener("click", () => {
+  const checkAll = restartAllSelectAllCb.checked;
+  for (const { checkbox } of restartAllRows.values()) checkbox.checked = checkAll;
+  restartAllUpdateCount();
+});
+
+cancelRestartAllBtn.addEventListener("click", () => {
+  if (restartAllInProgress) return; // disabled while running - see below
+  restartAllModalEl.classList.add("hidden");
+});
+
+const retrySkippedRestartAllBtn = document.getElementById("retry-skipped-restart-all-btn");
+let restartAllLastSkippedNames = []; // [{ path, name }] - busy OR unknown-state skips, for the summary + Retry
+
+// Shared by the initial run and "Retry skipped" - runs the given agent paths
+// sequentially through check-then-restart and returns the per-reason counts
+// plus which ones were skipped (by path+displayName, for the summary text
+// and so Retry skipped can target exactly those next).
+async function restartAllRunBatch(paths) {
+  let restarted = 0, skipped = 0, failed = 0;
+  const skippedEntries = [];
+  for (const agentPath of paths) {
+    restartAllSetRowStatus(agentPath, "status-active", "Checking…");
+    let activity;
+    let checkFailed = false;
+    try {
+      activity = await window.api.getSessionActivity(agentPath);
+    } catch (e) {
+      checkFailed = true; // unknown MUST mean skip here - a false "not busy" would kill a mid-turn agent
+    }
+    if (checkFailed) {
+      restartAllSetRowStatus(agentPath, "status-skip", "Skipped (couldn't check)");
+      skipped++;
+      const agentObj = agents.find((a) => a.path === agentPath);
+      skippedEntries.push({ path: agentPath, name: (agentObj && agentObj.displayName) || agentPath });
+      continue;
+    }
+    if (activity && activity.working) {
+      restartAllSetRowStatus(agentPath, "status-skip", "Skipped (busy)");
+      skipped++;
+      const agentObj = agents.find((a) => a.path === agentPath);
+      skippedEntries.push({ path: agentPath, name: (agentObj && agentObj.displayName) || agentPath });
+      continue;
+    }
+
+    restartAllSetRowStatus(agentPath, "status-active", "Restarting…");
+    try {
+      const convos = await window.api.listConversations(agentPath);
+      const cur = (convos || []).find((c) => c.isCurrent) || (convos || [])[0];
+      const sessionId = cur && cur.sessionId;
+      if (!sessionId) {
+        restartAllSetRowStatus(agentPath, "status-error", "No conversation yet");
+        failed++;
+        continue;
+      }
+      await window.api.switchConversation(agentPath, { resumeSessionId: sessionId });
+      // Same as the single-agent Restart Session handler: if this is the
+      // currently open chat, refresh its view so it re-attaches immediately
+      // instead of showing a stale terminal until next clicked.
+      if (activeAgentPath === agentPath) {
+        reloadAgentSessionView(agentPath);
+        const agentObj = agents.find((a) => a.path === agentPath);
+        if (agentObj) selectAgent(agentObj);
+      }
+      restartAllSetRowStatus(agentPath, "status-success", "✓ Restarted");
+      restarted++;
+    } catch (e) {
+      restartAllSetRowStatus(agentPath, "status-error", "✗ " + (e.message || String(e)));
+      failed++;
+    }
+  }
+  return { restarted, skipped, failed, skippedEntries };
+}
+
+function restartAllShowSummary(prefix, result, notSelectedCount) {
+  restartAllLastSkippedNames = result.skippedEntries;
+  let text = `${prefix} - ${result.restarted} restarted, ${result.skipped} skipped, ${result.failed} failed`;
+  if (notSelectedCount > 0) text += `, ${notSelectedCount} not selected`;
+  text += ".";
+  if (result.skippedEntries.length > 0) {
+    text += ` Skipped: ${result.skippedEntries.map((e) => e.name).join(", ")}.`;
+  }
+  restartAllSummaryEl.textContent = text;
+  restartAllSummaryEl.classList.remove("hidden");
+  retrySkippedRestartAllBtn.classList.toggle("hidden", result.skippedEntries.length === 0);
+}
+
+function restartAllSetBatchUi(running) {
+  restartAllInProgress = running;
+  // "Restart Selected" and the checkboxes stay disabled for the rest of this
+  // picker's lifetime once a batch has started, even after it finishes -
+  // reopening the picker (close + click Restart All again) is the way to get
+  // a fresh run, rather than letting a second pass silently reuse stale row
+  // state. Retry skipped is the one control meant to re-enable after a run.
+  confirmRestartAllBtn.disabled = true;
+  restartAllSelectAllCb.disabled = true;
+  for (const { checkbox } of restartAllRows.values()) checkbox.disabled = true;
+  cancelRestartAllBtn.disabled = running;
+  retrySkippedRestartAllBtn.disabled = running;
+  cancelRestartAllBtn.textContent = running ? "Cancel" : "Close";
+}
+
+confirmRestartAllBtn.addEventListener("click", async () => {
+  if (restartAllInProgress) return;
+  const selected = [...restartAllRows.entries()].filter(([, row]) => row.checkbox.checked).map(([path]) => path);
+  if (selected.length === 0) return;
+
+  restartAllSetBatchUi(true);
+  const result = await restartAllRunBatch(selected);
+  restartAllSetBatchUi(false);
+  restartAllShowSummary("Done", result, restartAllRows.size - selected.length);
+});
+
+retrySkippedRestartAllBtn.addEventListener("click", async () => {
+  if (restartAllInProgress || restartAllLastSkippedNames.length === 0) return;
+  const paths = restartAllLastSkippedNames.map((e) => e.path);
+  for (const path of paths) restartAllSetRowStatus(path, "status-pending", "");
+  retrySkippedRestartAllBtn.classList.add("hidden");
+
+  restartAllSetBatchUi(true);
+  const result = await restartAllRunBatch(paths);
+  restartAllSetBatchUi(false);
+  restartAllShowSummary("Retry done", result, 0);
 });
 
 loadAgents();

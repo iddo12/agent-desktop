@@ -16,6 +16,18 @@ REM
 REM  Usage:
 REM    Start-TestDesktop.bat          fixtures only, spends nothing  (tiers 1+2)
 REM    Start-TestDesktop.bat live     also allows ONE real agent     (tier 3)
+REM
+REM  Cleanup: a fleet-wide action that restarts an agent's process (e.g. the
+REM  "Restart agents" picker) dispatches a REAL `claude --bg` process for
+REM  each fixture it restarts, same as it would for a real agent - this is
+REM  NOT gated by the fixtures-only tier, since restarting is specifically
+REM  "kill and redispatch a real process". Because the reaper and the
+REM  background-dispatch sweep both refuse to run in test mode (line 13-14
+REM  above), nothing auto-cleans these up afterward. Found 2026-10-02
+REM  testing the Restart agents feature: 8 real idle bg sessions were left
+REM  running after a sandbox restart-all and had to be stopped by hand.
+REM  Check for and stop any stray `claude` processes under this sandbox's
+REM  AGENT_DESKTOP_ROOT after any test that restarts/dispatches fixtures.
 REM ===========================================================================
 
 setlocal

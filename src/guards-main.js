@@ -47,6 +47,20 @@ function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, lo
     }
   });
 
+  // v1.63.4: deliver a prompt over the agent's message channel (see agentChannel.js). Returns
+  // {ok:false, reason} when the channel is unavailable so the renderer falls back to pty typing.
+  ipcMain.handle("guard-channel-send", async (event, { agentPath, text }) => {
+    try {
+      return await require("./agentChannel").send(agentPath, String(text || ""));
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  });
+
+  ipcMain.handle("guard-channel-cancel", (event, { id }) => {
+    try { return require("./agentChannel").cancel(id); } catch (e) { return { ok: false, reason: e.message }; }
+  });
+
   ipcMain.handle("guard-handoff-info", (event, { agentPath }) => {
     try {
       const p = path.join(agentPath, "handoff_latest.md");
@@ -89,12 +103,18 @@ function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, lo
         if (!newest || st.mtimeMs > newest.mtimeMs) newest = { full, mtimeMs: st.mtimeMs, size: st.size };
       }
       if (!newest) return false;
-      const len = Math.min(newest.size, 256 * 1024);
+      // tail first (cheap); if the marker is not there, look in the last 1 MB (a busy agent can write
+      // more than 256 KB of tool output between the prompt landing and our check)
       const fd = fs.openSync(newest.full, "r");
       try {
-        const buf = Buffer.alloc(len);
-        fs.readSync(fd, buf, 0, len, newest.size - len);
-        return buf.toString("utf-8").includes(needle);
+        for (const cap of [256 * 1024, 1024 * 1024]) {
+          const len = Math.min(newest.size, cap);
+          const buf = Buffer.alloc(len);
+          fs.readSync(fd, buf, 0, len, newest.size - len);
+          if (buf.toString("utf-8").includes(needle)) return true;
+          if (len >= newest.size) break;
+        }
+        return false;
       } finally {
         fs.closeSync(fd);
       }

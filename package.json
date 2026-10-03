@@ -1,6 +1,6 @@
 {
   "name": "agent-desktop",
-  "version": "1.60.6",
+  "version": "1.65.0",
   "description": "Standalone desktop app for managing and chatting with local Claude Code agents",
   "main": "src/main.js",
   "author": "LensVid",
@@ -8,7 +8,8 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win nsis zip --publish never",
-    "pack": "electron-builder --dir"
+    "pack": "electron-builder --dir",
+    "test": "node tests/handoffDelivery.test.js && node tests/libraryState.test.js && node tools/check-changelog.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

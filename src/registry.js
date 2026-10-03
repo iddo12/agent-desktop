@@ -16,12 +16,55 @@
 
 const fs = require("fs");
 const path = require("path");
-const { shell, clipboard } = require("electron");
+const crypto = require("crypto");
+const { shell, clipboard, nativeImage } = require("electron");
 
 const STALE_AFTER_DAYS = 90; // same as registry.py
 
 function registryDir(workspaceRoot) {
   return path.join(workspaceRoot, "shared_registry");
+}
+
+// Iddo, 2026-09-28: the Images tab was serving full-resolution originals
+// (some multi-MB 1024px renders) as thumbnails - "make sure the resolution on
+// these thumbnails is fairly low, otherwise... the database will just
+// increase significantly." Downscale once per source file and cache the
+// result; `link` (Open / Show in folder) always stays the real original, only
+// the card preview uses the small cached copy. Uses Electron's built-in
+// nativeImage instead of adding an image-processing dependency.
+const THUMB_MAX_DIM = 480;
+
+function thumbCacheDir(workspaceRoot) {
+  const dir = path.join(registryDir(workspaceRoot), ".thumb-cache");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    /* fall through - cachedThumbnail() below falls back to the original */
+  }
+  return dir;
+}
+
+function cachedThumbnail(workspaceRoot, sourcePath) {
+  try {
+    const stat = fs.statSync(sourcePath);
+    // Keyed by path + mtime + size so an edited/replaced source regenerates
+    // instead of serving a stale cached preview forever.
+    const key = crypto.createHash("sha1").update(`${sourcePath}|${stat.mtimeMs}|${stat.size}`).digest("hex");
+    // JPEG, not PNG: these are photographic renders, where lossless PNG barely
+    // shrinks past a couple hundred KB even at 480px. JPEG at this size is
+    // visually indistinguishable for a card preview and typically 5-10x smaller.
+    const outPath = path.join(thumbCacheDir(workspaceRoot), `${key}.jpg`);
+    if (fs.existsSync(outPath)) return outPath;
+    const img = nativeImage.createFromPath(sourcePath);
+    if (img.isEmpty()) return sourcePath; // unreadable/corrupt - show the original rather than nothing
+    const { width, height } = img.getSize();
+    const scale = Math.min(1, THUMB_MAX_DIM / Math.max(width, height, 1));
+    const resized = scale < 1 ? img.resize({ width: Math.round(width * scale), height: Math.round(height * scale) }) : img;
+    fs.writeFileSync(outPath, resized.toJPEG(80));
+    return outPath;
+  } catch (e) {
+    return sourcePath; // a thumbnail failure must never break the whole Library list
+  }
 }
 
 function loadEntries(workspaceRoot) {
@@ -56,7 +99,7 @@ function viewablePath(e) {
   return null;
 }
 
-function listRegistry(workspaceRoot) {
+function listRegistryRaw(workspaceRoot) {
   const now = Date.now();
   return loadEntries(workspaceRoot)
     .map((e) => {
@@ -75,10 +118,17 @@ function listRegistry(workspaceRoot) {
         // A local link that no longer exists is worth showing plainly - the
         // registry is only useful if it does not quietly point at nothing.
         missing: !!(local && !fs.existsSync(e.link)),
-        thumbnail: thumb && !isUrl(thumb) && fs.existsSync(thumb) ? thumb : null,
+        thumbnail: thumb && !isUrl(thumb) && fs.existsSync(thumb) ? cachedThumbnail(workspaceRoot, thumb) : null,
+        // Iddo, 2026-09-28: wants an image's size and folder visible on its
+        // card, not just its name. Computed here (main process) rather than
+        // the renderer so the renderer never needs raw filesystem access.
+        fileSize: local && fs.existsSync(e.link) ? fs.statSync(e.link).size : null,
+        folder: local ? path.dirname(e.link) : null,
         // What the in-app viewer can show: the entry's PDF copy if it has one,
         // else a local PDF/image/HTML link. Web links open in the browser.
         viewable: !!viewablePath(e),
+        // v1.64.0: the full local path of the document itself (its PDF copy for a web entry), for "send to an agent".
+        path: viewablePath(e) || (local ? e.link : ""),
         status: e.status || "active",
         // v1.60.0: pipeline stage (idea | researched | active) for the Projects
         // view. A project with no stage is active (every entry older than this).
@@ -86,11 +136,37 @@ function listRegistry(workspaceRoot) {
         stage: ["idea", "researched", "active"].includes(e.stage) ? e.stage : e.type === "project" ? "active" : "",
         updatedAt: e.updatedAt || e.createdAt || null,
         staleDays: Number.isFinite(confirmed) ? Math.floor((now - confirmed) / 86400000) : null,
+        // Previous versions of this document (registry.py --update --link keeps them).
+        // Only the display bits go to the renderer; opening is by index through main.
+        olderVersions: (Array.isArray(e.olderVersions) ? e.olderVersions : []).map((v) => ({
+          name: path.basename(String(v.link || "")), date: v.replacedAt || null, exists: !!(v.link && (isUrl(v.link) || fs.existsSync(v.link))),
+        })),
+        _pdf: e.pdf || null,
       };
     })
     .map((e) => ({ ...e, stale: e.staleDays != null && e.staleDays > STALE_AFTER_DAYS }))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 }
+
+// A document's web copy (a web link whose `pdf` is another entry's file) is one document,
+// not two: fold it into the file's card as a "Web version" button.
+function normLink(p) { return String(p || "").replace(/\\/g, "/").toLowerCase(); }
+function mergeWebCopies(list) {
+  const byLink = new Map(list.filter((e) => !e.isUrl && e.link).map((e) => [normLink(e.link), e]));
+  const out = [];
+  for (const e of list) {
+    const host = e.isUrl && e._pdf ? byLink.get(normLink(e._pdf)) : null;
+    if (host && host.type === e.type) { host.hasWebCopy = true; continue; }
+    out.push(e);
+  }
+  return out.map(({ _pdf, ...rest }) => rest);
+}
+function webCopyOf(workspaceRoot, host) {
+  const key = normLink(host.link);
+  return loadEntries(workspaceRoot).find((x) => x.id !== host.id && isUrl(x.link) && x.pdf && normLink(x.pdf) === key) || null;
+}
+
+function listRegistry(workspaceRoot) { return mergeWebCopies(listRegistryRaw(workspaceRoot)); }
 
 function findEntry(workspaceRoot, id) {
   return loadEntries(workspaceRoot).find((e) => e.id === id) || null;
@@ -102,6 +178,21 @@ async function registryAction(workspaceRoot, id, action) {
   if (action === "copy") {
     clipboard.writeText(e.link);
     return { ok: true };
+  }
+  if (action === "openWeb") {
+    const w = webCopyOf(workspaceRoot, e);
+    if (!w) return { ok: false, error: "No web version registered for this document." };
+    await shell.openExternal(w.link);
+    return { ok: true };
+  }
+  const olderIdx = /^openOlder:(\d+)$/.exec(String(action));
+  if (olderIdx) {
+    const v = (Array.isArray(e.olderVersions) ? e.olderVersions : [])[Number(olderIdx[1])];
+    if (!v || !v.link) return { ok: false, error: "No such older version." };
+    if (isUrl(v.link)) { await shell.openExternal(v.link); return { ok: true }; }
+    if (!fs.existsSync(v.link)) return { ok: false, error: "That older file is no longer at " + v.link };
+    const err = await shell.openPath(v.link);
+    return err ? { ok: false, error: err } : { ok: true };
   }
   if (action === "view") {
     // In-app viewer: returns a file:// URL for the renderer's viewer frame.
