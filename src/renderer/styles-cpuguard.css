@@ -1,0 +1,23 @@
+/* CPU guard / start limiter banner (v1.66.0) - see cpuguard-banner.js. Amber for a hold or overload, plain
+   for the "starting gradually" note. In normal flow at the top of #main-panel. */
+
+#cpuguard-banner {
+  flex-shrink: 0;
+  padding: 8px 20px;
+  font-size: 0.84rem;
+  color: var(--text);
+  border-bottom: 1px solid var(--border, #ddd);
+}
+#cpuguard-banner.cpuguard-hold,
+#cpuguard-banner.cpuguard-overload {
+  background: #fdf3e2;
+  border-bottom-color: #ecc98f;
+  border-left: 4px solid var(--health-warning);
+  font-weight: 600;
+}
+#cpuguard-banner.cpuguard-queue {
+  background: var(--bg-secondary, #f4f1ec);
+}
+#cpuguard-banner.hidden {
+  display: none;
+}

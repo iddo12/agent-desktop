@@ -95,6 +95,13 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("untrusted-agents", (event, list) => callback(list));
   },
 
+  // CPU guard + start limiter (v1.66.0) - see src/cpuGuardGlue.js.
+  getCpuGuardState: () => ipcRenderer.invoke("cpuguard-state"),
+  cpuGuardAction: (action) => ipcRenderer.invoke("cpuguard-action", { action }),
+  onCpuGuardState: (callback) => {
+    ipcRenderer.on("cpuguard-state", (event, state) => callback(state));
+  },
+
   onTerminalData: (callback) => {
     ipcRenderer.on("terminal-data", (event, payload) => callback(payload));
   },

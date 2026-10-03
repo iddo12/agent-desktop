@@ -424,6 +424,24 @@ ipcMain.handle("ui-flag-set", (event, { key, value }) => {
   }
 });
 
+// v1.66.0: start limiter + CPU guard install/consent + banner state (src/cpuGuardGlue.js).
+const cpuGuard = require("./cpuGuardGlue").init({
+  app,
+  ipcMain,
+  dialog,
+  testMode,
+  getMainWindow: () => mainWindow,
+  readUiFlags,
+  setUiFlag: (key, value) => {
+    try {
+      const f = readUiFlags();
+      f[key] = value;
+      fs.writeFileSync(UI_FLAGS_PATH, JSON.stringify(f, null, 2));
+    } catch (e) {}
+  },
+  log: (m) => logStuckWatchdog(m),
+});
+
 ipcMain.handle("check-claude-code-update", async () => {
   const current = getInstalledClaudeCodeVersion();
   const latest = await getLatestClaudeCodeVersion();
@@ -1074,6 +1092,12 @@ if (!gotSingleInstanceLock) {
     // A sandbox whose sweep will be skipped anyway is ready at once rather
     // than after the 10 s settle delay below.
     if (!testMode.liveAgentsPermitted()) markStartupSweepDone(false);
+    // v1.66.1: the startup overlay never waits longer than 90 s for the sweep (a CPU hold can queue starts for
+    // up to 15 min; the sweep carries on in the background, the overlay is released with a log line).
+    setTimeout(() => {
+      logStuckWatchdog("startup: overlay released after 90 s (sweep still queued, probably behind a CPU hold)");
+      markStartupSweepDone(false);
+    }, 100000).unref();
     setTimeout(() => {
       ensureAllAgentsBackgrounded(startupProgress)
         .then((result) => markStartupSweepDone(!!(result && result.measured)))
@@ -1087,6 +1111,7 @@ if (!gotSingleInstanceLock) {
     }, ENSURE_AGENTS_ALIVE_INTERVAL_MS);
     setInterval(repinAllAgentNames, REPIN_AGENT_NAMES_INTERVAL_MS);
     writeRuntimeStamp();
+    setTimeout(() => cpuGuard.ensure().catch(() => {}), 45000); // first-time consent dialog, after the startup rush
     logStuckWatchdog(`started v${app.getVersion()} pid=${process.pid} (${testMode.describe()})`);
     if (testMode.TEST_MODE) {
       enforceTestTokenBudget();
@@ -2035,13 +2060,32 @@ const lastDispatchAt = new Map(); // path.resolve(sessionCwd).toLowerCase() -> m
 function dispatchKey(sessionCwd) {
   return path.resolve(sessionCwd).toLowerCase();
 }
+// v1.66.1: starts that are queued or running (the limiter can hold a start for minutes), per agent.
+const startsInFlight = new Map(); // dispatchKey -> { p: Promise<id>, urgent }
 function dispatchedRecently(sessionCwd) {
-  const at = lastDispatchAt.get(dispatchKey(sessionCwd));
+  const k = dispatchKey(sessionCwd);
+  if (startsInFlight.has(k)) return true;
+  const at = lastDispatchAt.get(k);
   return !!at && Date.now() - at < DISPATCH_GRACE_MS;
 }
 
-async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
-  lastDispatchAt.set(dispatchKey(sessionCwd), Date.now());
+// The same agent is never started twice at once: a second plain start (sweep, reattach) joins the one already
+// queued/running. A forced-fresh / resume start, or an urgent one over a queued non-urgent start, goes ahead
+// (the queued one re-checks that the agent is not up yet once its slot is granted).
+function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
+  const k = dispatchKey(sessionCwd);
+  const plain = !opts.forceFresh && !opts.resumeSessionId;
+  const cur = startsInFlight.get(k);
+  if (cur && plain && (cur.urgent || !opts.urgent)) return cur.p;
+  const entry = { urgent: !!opts.urgent };
+  entry.p = dispatchBackgroundAgentImpl(shell, spawnEnv, sessionCwd, opts).finally(() => {
+    if (startsInFlight.get(k) === entry) startsInFlight.delete(k);
+  });
+  startsInFlight.set(k, entry);
+  return entry.p;
+}
+
+async function dispatchBackgroundAgentImpl(shell, spawnEnv, sessionCwd, opts = {}) {
   let args;
   if (opts.resumeSessionId) {
     args = ["--bg", "--resume", opts.resumeSessionId];
@@ -2061,12 +2105,26 @@ async function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   // (no 90 s timeout) and rejects with err.untrusted = true.
   let output;
   try {
-    output = await runClaudeCommand(shell, args, {
-      cwd: sessionCwd,
-      env: spawnEnv,
-      timeoutMs: CLAUDE_CLI_TIMEOUT_MS,
-      abortPattern: workspaceTrust.TRUST_PROMPT_RE,
-    });
+    // v1.66.0: start limiter (max 3 starts in flight, 4 s apart, holds while the CPU guard says overloaded).
+    // opts.urgent = one explicit user action (or a reconnect): never queued behind the crowd.
+    output = await cpuGuard.limiter.run(
+      async () => {
+        // A start that waited in the queue may have been overtaken (a tab open, another path): never start a second copy.
+        if (!opts.urgent && !opts.forceFresh && !opts.resumeSessionId) {
+          const up = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd, { fresh: true }).catch(() => null);
+          if (up && up.id) return { existingId: up.id };
+        }
+        lastDispatchAt.set(dispatchKey(sessionCwd), Date.now()); // stamped when the start really begins, not when it was queued
+        return runClaudeCommand(shell, args, {
+          cwd: sessionCwd,
+          env: spawnEnv,
+          timeoutMs: CLAUDE_CLI_TIMEOUT_MS,
+          abortPattern: workspaceTrust.TRUST_PROMPT_RE,
+        });
+      },
+      { label: path.basename(path.dirname(sessionCwd)), urgent: !!opts.urgent }
+    );
+    if (output && output.existingId) return output.existingId;
   } catch (e) {
     if (e.aborted) {
       const err = new Error(
@@ -2271,7 +2329,22 @@ const ENSURE_AGENTS_ALIVE_STAGGER_MS = 2000; // don't launch every configured ag
 // `progress` (optional) is the startup countdown's hook - see startupProgress.
 // Returns { measured: true } only when it actually walked the agent list, so
 // the caller can tell a real sweep from a skipped/failed one.
+// v1.66.1: one sweep at a time. With starts queued behind a CPU hold a sweep can take minutes; the 15-min timer
+// must not stack a second sweep on top of it.
+let sweepRunning = false;
 async function ensureAllAgentsBackgrounded(progress) {
+  if (sweepRunning) {
+    logStuckWatchdog("ensureAllAgentsBackgrounded: previous sweep still running - skipping this one");
+    return { measured: false, skipped: true };
+  }
+  sweepRunning = true;
+  try {
+    return await ensureAllAgentsBackgroundedImpl(progress);
+  } finally {
+    sweepRunning = false;
+  }
+}
+async function ensureAllAgentsBackgroundedImpl(progress) {
   // Tier 1/2 sandboxes must never dispatch a real `claude --bg` process: that
   // spends real quota and, in a fixtures-only sandbox, there is nothing for a
   // live process to do anyway. Tier 3 turns it on explicitly, and stops again
@@ -2488,7 +2561,7 @@ async function findOrDispatchBackgroundAgent(shell, spawnEnv, sessionCwd) {
     existing = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
   }
   if (existing) return { id: existing.id, freshlyDispatched: false };
-  const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+  const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, { urgent: true }); // opening one agent's tab
   return { id, freshlyDispatched: true };
 }
 
@@ -3404,7 +3477,7 @@ async function startTerminalSession(agentPath, sessionCwd, cols, rows, knownAgen
         // fix (the alternative - hanging forever - is strictly worse).
         await stopClaudeAgent(shell, agentId, spawnEnv, { timeoutMs: 5000 });
       } catch (e) {}
-      const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
+      const freshAgentId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, { urgent: true });
       return startTerminalSession(agentPath, sessionCwd, cols, rows, freshAgentId, isReattachAttempt, /* isLoginRecoveryAttempt */ true);
     }
 
@@ -3845,7 +3918,7 @@ ipcMain.handle("switch-conversation", async (event, { agentPath, resumeSessionId
   await stopBackgroundAgentForCwd(sessionCwd);
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
-  const opts = newConversation ? { forceFresh: true, initialPrompt } : { resumeSessionId };
+  const opts = newConversation ? { forceFresh: true, initialPrompt, urgent: true } : { resumeSessionId, urgent: true };
   const newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
   return { ok: true, agentId: newId };
 });
