@@ -639,7 +639,10 @@
     // v1.62.0: the resume message rides along as the fresh session's FIRST prompt, so it is delivered
     // even if Iddo has moved to another agent (before, it waited for the agent's tab to be opened).
     // tickResume then only VERIFIES it; if it never lands it falls back to the old attach-and-send.
-    const resumeText = resumePrompt(arch.path);
+    let resumeText = resumePrompt(arch.path);
+    // v1.69.0: main decides the text (continue-at-once when the handoff has open work and no BLOCKED) and sets the persisted
+    // "mission in progress" marker; the old static text stays the fallback.
+    try { const kg = await window.api.keepGoingResumePrompt(agentPath, arch.path); if (kg && kg.text && kg.text.startsWith(RESUME_MARKER)) resumeText = kg.text; } catch (e) { /* keep the static text */ }
     await performSessionReset(agentPath, { initialPrompt: resumeText });
     pendingResume.set(agentPath, { text: resumeText, path: arch.path, readySince: null, sentAt: Date.now(), viaDispatch: true, tries: 1 });
     flow.phase = "resuming";
@@ -649,8 +652,20 @@
   // Runs every 2s. For each pending resume: wait until the fresh session is attached (it only
   // attaches once the agent is opened), give it a few seconds to settle, send, then confirm the
   // marker landed in the transcript. Resend once if not; after that tell the user what to do.
+  // v1.69.0 (M4): tell main which agents have a handoff running so keep-going never nudges them (only sent when the list changes)
+  let kgActiveKey = null; // null: the first tick after a (re)load always sends the list, so main never keeps a stale flag
+  function syncKeepGoing() {
+    try {
+      const act = [];
+      for (const [ap, f] of flows.entries()) if (f && (f.phase === "saving" || f.phase === "resetting" || f.phase === "resuming")) act.push(ap);
+      for (const ap of pendingResume.keys()) if (!act.includes(ap)) act.push(ap);
+      const key = act.slice().sort().join("|");
+      if (key !== kgActiveKey) { kgActiveKey = key; window.api.keepGoingHandoffActive(act); }
+    } catch (e) { /* never break the handoff */ }
+  }
   async function tickResume() {
     restoreParkedQueues();
+    syncKeepGoing();
     for (const [ap, r] of Array.from(pendingResume.entries())) {
       try {
         const flow = flows.get(ap);
