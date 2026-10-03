@@ -25,6 +25,7 @@ const DEFAULTS = {
   restartWindowMs: 15 * 60 * 1000,
   nudgeMinGapMs: 15 * 60 * 1000,
   nudgeDelayMs: 10 * 1000,
+  opTimeoutMs: 2 * 60 * 1000,   // a restart / reconnect that hangs (or waits in a start limiter) falls back to backoff
 };
 
 const NUDGE_TEXT =
@@ -84,7 +85,7 @@ function create(deps, opts) {
     if (kind === "real") { onConnected(p); return; }
     if (kind === "starting") { schedule(a); return; } // someone else (a tab open, the sweep) is connecting right now
     try {
-      await deps.reconnect(p, a.size);
+      await withTimeout(deps.reconnect(p, a.size), o.opTimeoutMs, "reconnect");
     } catch (e) {
       a.attempts++;
       a.reason = (e && e.message) || String(e);
@@ -132,8 +133,16 @@ function create(deps, opts) {
     return true;
   }
 
+  // Real message text only: a bracketed-paste start, or >= 3 printable characters once escape sequences are removed.
+  function isMessageWrite(data) {
+    if (typeof data !== "string") return false;
+    if (data.indexOf("\u001b[200~") === 0) return data.length > 6;
+    const plain = data.replace(/\u001b\[[0-9;?<>]*[A-Za-z~]/g, "").replace(/\u001b[O]?[A-Za-z]/g, "").replace(/[\x00-\x1f\x7f]/g, "");
+    return plain.length >= 3;
+  }
+
   function noteWrite(p, data) {
-    if (typeof data !== "string" || data.length < 2) return; // lone "\r" / keystrokes are not messages
+    if (!isMessageWrite(data)) return; // keystrokes, arrow keys, focus/mouse reports are not messages (review H2)
     const a = get(p);
     if ((a.state !== "connected" && a.state !== "degraded") || a.unackedSince != null) return;
     a.unackedSince = now();
@@ -162,9 +171,20 @@ function create(deps, opts) {
     recover(p, `no output from the agent's pty for ${Math.round(o.deadLinkMs / 1000)}s after a message was written, and the agent is idle with nothing new in its transcript`);
   }
 
+  function withTimeout(promise, ms, what) {
+    let t;
+    const timeout = new Promise((_, rej) => { t = setT(() => rej(new Error(what + " timed out after " + Math.round(ms / 1000) + "s")), ms); unref(t); });
+    return Promise.race([promise, timeout]).finally(() => clearT(t));
+  }
+
   async function recover(p, reason) {
     const a = get(p);
     if (a.recovering) return;
+    // review M4: only restart a session that really exists; a "starting" placeholder belongs to a stuck-turn recovery,
+    // a tab open or the sweep (a second dispatch for the same folder would make a duplicate agent copy)
+    let kind = null;
+    try { kind = deps.sessionKind(p); } catch (e) {}
+    if (kind !== "real") { a.unackedSince = null; log(`connection: ${p} dead-link restart skipped (session is ${kind || "absent"}, something else is connecting)`); return; }
     const t = now();
     a.restarts = a.restarts.filter((x) => t - x < o.restartWindowMs);
     a.requeueSince = a.unackedSince;
@@ -185,7 +205,7 @@ function create(deps, opts) {
     log(`connection: ${p} DEAD LINK - ${reason}. Restarting its session (#${a.restarts.length} in the last ${Math.round(o.restartWindowMs / 60000)} min)`);
     emit(a);
     try {
-      await deps.restartSession(p);
+      await withTimeout(deps.restartSession(p), o.opTimeoutMs, "session restart");
       a.recovering = false;
       log(`connection: ${p} session restarted OK`);
       onConnected(p);

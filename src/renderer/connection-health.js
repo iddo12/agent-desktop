@@ -45,7 +45,7 @@
 
   function requeue(s, since) {
     if (!s || since == null) return 0;
-    const back = s.pendingSent.filter((p) => (p.sentAt || p.addedAt || 0) >= since - 5000);
+    const back = s.pendingSent.filter((p) => (p.sentAt || p.addedAt || 0) >= since - 1000);
     if (!back.length) return 0;
     s.pendingSent = s.pendingSent.filter((p) => !back.includes(p));
     for (let i = back.length - 1; i >= 0; i--) {
@@ -64,7 +64,15 @@
     } catch (e) { /* cosmetic */ }
   }
 
-  async function channelDeliver(p) {
+  // review M3: one channel delivery pass per agent at a time; a second caller waits for it, then runs its own pass
+  function channelDeliver(p) {
+    const s = sess(p);
+    if (!s) return Promise.resolve();
+    if (s.connChannelP) return s.connChannelP.then(() => channelDeliver(p));
+    s.connChannelP = channelDeliverPass(p).finally(() => { s.connChannelP = null; });
+    return s.connChannelP;
+  }
+  async function channelDeliverPass(p) {
     const s = sess(p);
     if (!s || !s.sendQueue.length) return;
     s.connChannelTried = s.connChannelTried || new Set();
@@ -201,7 +209,7 @@
           if (showInterrupt) {
             const b = document.createElement("button");
             b.textContent = "Interrupt now (Esc) and deliver";
-            b.title = "Sends Esc to this agent: the running command is stopped (nothing else is lost) and your message is delivered.";
+            b.title = "Sends Esc to this agent: the running command is stopped (nothing else is lost) and your message is delivered. If the command is waiting on a permission prompt, Esc answers No to it.";
             b.addEventListener("click", () => interrupt(p));
             banner.appendChild(b);
           }
@@ -215,20 +223,34 @@
     } catch (e) { return false; }
   }
 
-  function interrupt(p) {
+  async function interrupt(p) {
     const s = sess(p);
     if (!s || s.connInterrupt) return;
-    s.connInterrupt = { at: Date.now(), idleSince: null };
+    // review M5a: never send Esc blind - re-read the activity first (the command may have just ended)
+    let a = null;
+    try { a = await window.api.getSessionActivity(p); } catch (e) {}
+    if (!a || !a.working || !a.pendingToolUse) {
+      s.connLongCmd = null;
+      window.api.logGuard("connection: Interrupt skipped for " + p + " - the command had already ended");
+      paint(p, chatThinkingIndicatorEl);
+      return;
+    }
+    s.connInterrupt = { at: Date.now(), idleSince: null, since: (s.connLongCmd && s.connLongCmd.startedAt) || 0 };
     window.api.logGuard("connection: user pressed Interrupt now on a long command for " + p);
     window.api.sendInput(p, "\x1b");
     paint(p, chatThinkingIndicatorEl);
   }
 
   async function deliverAfterInterrupt(p, s) {
+    const since = (s.connInterrupt && s.connInterrupt.since) || 0;
     s.connInterrupt = null;
     s.connLongCmd = null;
-    const left = s.pendingSent.filter((x) => !x.superseded).slice();
+    // review M5b: only messages sent while the long command ran (not old "Not confirmed" ones), and not ones the
+    // transcript already has (a message run as the next turn that the view has not matched yet)
+    const left = s.pendingSent.filter((x) => !x.superseded && (x.sentAt || x.addedAt || 0) >= since).slice();
     for (const pending of left) {
+      const needle = (String(pending.text).match(/[A-Za-z0-9 ]{14,}/g) || []).sort((x, y) => y.length - x.length)[0];
+      try { if (needle && await window.api.transcriptHas(p, needle.trim().slice(0, 60))) { window.api.logGuard("connection: message already in the transcript after Esc, not re-sent, " + p); continue; } } catch (e) {}
       let holds = false;
       try { holds = await window.api.agentInputHoldsText(p, pending.text); } catch (e) {}
       if (!s.pendingSent.includes(pending)) continue; // matched meanwhile

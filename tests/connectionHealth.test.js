@@ -21,7 +21,7 @@ function harness(over) {
     shouldRetry: () => h.eligible,
     sessionKind: (p) => h.sessions[p] || null,
     reconnect: async (p) => { calls.reconnect++; if (h.reconnectFails > 0) { h.reconnectFails--; throw new Error("agent timed out"); } h.sessions[p] = "real"; ch.onConnected(p); },
-    restartSession: async (p) => { calls.restart++; if (h.restartFails > 0) { h.restartFails--; throw new Error("dispatch failed"); } h.sessions[p] = "real"; },
+    restartSession: async (p) => { calls.restart++; if (h.restartHangs) return new Promise(() => {}); if (h.restartFails > 0) { h.restartFails--; throw new Error("dispatch failed"); } h.sessions[p] = "real"; },
     isIdleAndQuiet: () => h.idleQuiet,
     screenShows: () => !!h.screenShows,
     isWorking: () => h.working,
@@ -169,6 +169,33 @@ function harness(over) {
     await x.advance(25000);
     assert.strictEqual(x.ch.getState(P).state, "connected");
     assert.strictEqual(x.calls.reconnect, 0);
+  }
+
+  // 11. (review H2) key sequences never arm the dead-link check
+  {
+    const x = harness();
+    x.h.sessions[P] = "real";
+    for (const k of ["\x1b[A", "\x1b[B", "\x1b[H", "\x1b[I", "\x1b[O", "\x1b[<0;10;10M", "\x1bOP", "\r", "a", "ab"]) x.ch.noteWrite(P, k);
+    await x.advance(60000); assert.strictEqual(x.calls.restart, 0);
+    x.ch.noteWrite(P, "\x1b[200~hello"); await x.advance(31000); assert.strictEqual(x.calls.restart, 1);
+  }
+
+  // 12. (review M4) a hung restart times out into backoff; a non-real session is never restarted
+  {
+    const x = harness();
+    x.h.sessions[P] = "real";
+    x.h.restartHangs = true;
+    x.ch.noteWrite(P, "\x1b[200~hi");
+    await x.advance(31000);
+    assert.strictEqual(x.ch.getState(P).state, "restarting");
+    await x.advance(2 * 60 * 1000 + 1000);
+    assert.strictEqual(x.ch.getState(P).state, "reconnecting");
+    const y = harness();
+    y.h.sessions[P] = "starting";
+    y.ch.noteWrite(P, "\x1b[200~hi");
+    await y.advance(31000);
+    assert.strictEqual(y.calls.restart, 0);
+    assert.ok(y.logs.some((l) => /skipped/.test(l)));
   }
 
   console.log("connectionHealth ok");

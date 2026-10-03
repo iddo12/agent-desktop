@@ -6,6 +6,7 @@ const L = require("../src/handoffLogic");
 const file = "D:\agents\A\handoff_latest.md";
 const p = L.handoffPrompt(file);
 assert.ok(!/\n/.test(p) && p.length < 220, "one short line, got " + p.length);
+assert.ok(/memory, then write .* LAST/.test(p), "write the file LAST");
 for (const w of ["LESSONS", "OPEN NOW", "STATE", "KEY FACTS", "Handoff saved", file]) assert.ok(p.includes(w), w);
 assert.ok(L.handoffPrompt(file, { interrupted: true }).includes("in flight"));
 assert.ok(!/\n/.test(L.nudgePrompt(file)) && L.nudgePrompt(file).length < 200);

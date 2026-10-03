@@ -5,7 +5,7 @@
 
   // ONE line, nothing else. The hid marker is added by HandoffDelivery.deliver (body = marker + " " + text).
   function handoffPrompt(file, opts) {
-    return "Write " + file + " now (sections LESSONS, OPEN NOW, STATE, KEY FACTS; save durable lessons to memory)" +
+    return "First save durable lessons to memory, then write " + file + " LAST (sections LESSONS, OPEN NOW, STATE, KEY FACTS)" +
       (opts && opts.interrupted ? "; in STATE say what was in flight" : "") + ", then reply only: Handoff saved";
   }
   function nudgePrompt(file) {

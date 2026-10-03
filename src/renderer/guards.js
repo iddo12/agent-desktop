@@ -448,7 +448,7 @@
   headerBtn.addEventListener("click", () => startFlow(activeAgentPath, true));
 
   function handoffPrompt(agentPath) {
-    if (window.HandoffLogic) return window.HandoffLogic.handoffPrompt(agentPath.replace(/[/@B@@B@]+$/, "") + String.fromCharCode(92) + "handoff_latest.md", { interrupted: forcedInterrupts.has(agentPath) });
+    if (window.HandoffLogic) return window.HandoffLogic.handoffPrompt(agentPath.replace(/[\\/]+$/, "") + String.fromCharCode(92) + "handoff_latest.md", { interrupted: forcedInterrupts.has(agentPath) });
     const file = agentPath.replace(/[\\/]+$/, "") + "\\handoff_latest.md";
     return (
       "[Agent Desktop - planned context reset] Iddo approved resetting this session to cut usage. " +
@@ -602,7 +602,8 @@
         flow.readyMtime = info.mtimeMs;
         flow.fileReady = true;
       } else { flow.readyPolls = 0; }
-      const filePollsOk = flow.readyPolls >= 2 && !flow.deliveryPending && !(act && act.pendingToolUse);
+      // H1 (review): also require the agent to be done (not working): it may still be saving memory files or editing.
+      const filePollsOk = flow.readyPolls >= 2 && !flow.deliveryPending && !(act && (act.working || act.pendingToolUse));
       if (!filePollsOk && flow.quietPolls < 2) { render(); return; } // not done yet (render keeps the countdown moving)
       await runReset(agentPath, flow);
     } catch (e) {

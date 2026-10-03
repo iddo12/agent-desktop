@@ -2848,6 +2848,7 @@ ipcMain.on("guard-log", (event, { line }) => {
 // v1.67.0 connection health (reconnect with backoff, dead-link auto-restart, post-recovery nudge) - see
 // src/connectionHealth.js. Hook points elsewhere in this file: handlePtyExit, recoverStuckSession,
 // start-terminal's catch, startTerminalSession (noteData / onConnected), terminal-input (noteWrite).
+const lateInputs = new Map(); // agentPath -> input written while disconnected; replayed by the next attach (review M1)
 const TEST_FAULT_DIR = () => app.getPath("userData");
 function testFaultFile(name) { return path.join(TEST_FAULT_DIR(), name); }
 async function restartAgentSession(agentPath) {
@@ -2894,7 +2895,7 @@ const connHealth = require("./connectionHealth").create({
   },
   reconnect: async (agentPath, size) => {
     if (ptySessions.has(agentPath)) return;
-    ptySessions.set(agentPath, { starting: true, pendingInput: [] });
+    ptySessions.set(agentPath, { starting: true, pendingInput: lateInputs.get(agentPath) ? lateInputs.get(agentPath).splice(0) : [] });
     try {
       await startTerminalSession(agentPath, sessionCwdFor(agentPath), size && size.cols, size && size.rows);
     } catch (e) {
@@ -3964,14 +3965,19 @@ async function switchConversationImpl(agentPath, { resumeSessionId, newConversat
       if (live.proc) live.proc.kill();
     } catch (e) {}
   }
+  // review M1: claim the slot BEFORE the (slow) stop so input arriving meanwhile queues instead of being dropped
+  if (placeholder) ptySessions.set(agentPath, { starting: true, pendingInput: [] });
   // Stops the underlying `claude --bg` daemon for this cwd and polls until
   // its pid is actually gone (same helper delete-agent uses).
-  await stopBackgroundAgentForCwd(sessionCwd);
+  try {
+    await stopBackgroundAgentForCwd(sessionCwd);
+  } catch (e) {
+    if (placeholder) ptySessions.delete(agentPath);
+    throw e;
+  }
   const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
   const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
   const opts = newConversation ? { forceFresh: true, initialPrompt } : { resumeSessionId };
-  // v1.67.0: an automatic restart keeps a "starting" placeholder so input arriving meanwhile queues.
-  if (placeholder) ptySessions.set(agentPath, { starting: true, pendingInput: [] });
   let newId;
   try {
     newId = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts);
@@ -4037,6 +4043,12 @@ ipcMain.on("terminal-input", (event, { agentPath, data }) => {
     // Root trigger for how ptySessions can lack an entry while the user is
     // still looking at this agent's chat isn't confirmed - flagging rather
     // than guessing further.
+    // v1.67.2: while the connection-health module is reconnecting, keep the input and replay it on attach.
+    if (connHealth.getState(agentPath).state !== "connected") {
+      if (!lateInputs.has(agentPath)) lateInputs.set(agentPath, []);
+      lateInputs.get(agentPath).push(data);
+      return;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("terminal-data", {
         agentPath,
