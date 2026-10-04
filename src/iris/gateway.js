@@ -210,6 +210,7 @@ function frameForCoo(peer, env) {
   }
   lines.push("You can reply with the IRIS send capability (type reply, reply-to this message's id) if you have one; " +
     "any reply you send with reply-to set is queued for your user to approve before it leaves this machine.");
+  lines.push(`When you tell your user about this message, start with the line: FROM ${name.toUpperCase()}'S SIDE (IRIS): - so they can see at once that it is not from them.`);
   lines.push(`----- IRIS-QUOTE-${tag} start -----`);
   lines.push(stripInvisible(env.text));
   lines.push(`----- IRIS-QUOTE-${tag} end -----`);

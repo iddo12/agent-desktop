@@ -1916,3 +1916,15 @@ button.danger:not(:disabled):hover { filter: brightness(1.1); }
   font-style: italic;
   opacity: 0.85;
 }
+
+/* v1.69.17: a message that came from the linked Agent Desktop (Merav's side) over IRIS - clearly not one of Iddo's own bubbles */
+.chat-bubble-iris {
+  background: #dcecf7;
+  color: #12344d;
+  border-left: 5px solid #2b6fa8;
+  border-radius: 8px;
+  max-width: none;
+  align-self: stretch;
+}
+.chat-iris-head { font-weight: 700; letter-spacing: 0.04em; font-size: 12px; }
+.chat-iris-sub { font-size: 13px; margin-top: 2px; }
