@@ -4490,6 +4490,26 @@ try {
   console.error("voice-main failed to load:", e);
 }
 
+// v1.55.0 IRIS - Agent Desktop-to-Agent Desktop link. Off until the user turns
+// it on in the Links view. After app ready because it needs safeStorage (DPAPI)
+// for its keys; isolated like the guards so a fault only disables IRIS.
+app.whenReady().then(() => {
+  try {
+    require("./iris/main-iris").init({
+      ipcMain,
+      app,
+      safeStorage: require("electron").safeStorage,
+      Notification,
+      getMainWindow: () => mainWindow,
+      log: (line) => logStuckWatchdog(line),
+      testMode: testMode.TEST_MODE,
+    });
+  } catch (e) {
+    console.error("iris failed to load:", e);
+    try { logStuckWatchdog(`iris failed to load: ${e.message}`); } catch (e2) {}
+  }
+});
+
 // --- Chats panel (per-agent conversation list / switch / rename) -----------
 //
 // Each agent's `.claude-session` cwd accumulates one <sessionId>.jsonl per

@@ -1,6 +1,6 @@
 {
   "name": "agent-desktop",
-  "version": "1.69.9",
+  "version": "1.69.10",
   "description": "Standalone desktop app for managing and chatting with local Claude Code agents",
   "main": "src/main.js",
   "private": true,
@@ -11,7 +11,8 @@
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "electron": "^33.0.0",

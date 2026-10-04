@@ -1,0 +1,63 @@
+/* IRIS Links view (v1.55.0) */
+.iris-nav {
+  margin: 0 12px 8px; padding: 9px 12px; display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel);
+  color: var(--text); font: inherit; cursor: pointer; text-align: left;
+}
+.iris-nav:hover { background: var(--bg-hover); }
+.iris-nav.active { border-color: var(--accent); background: var(--bg-active); }
+.iris-nav-name { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.iris-nav-title { font-weight: 700; letter-spacing: .12em; font-size: 13px; }
+.iris-nav-sub { font-size: 11px; color: var(--text-muted); }
+.iris-nav-badge { min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: var(--accent); color: #fff;
+  font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.iris-nav-badge.hidden { display: none; }
+
+body.iris-open #chat-view,
+body.iris-open #empty-state,
+body.iris-open #library-view,
+body.iris-open #argus-view,
+body.iris-open #xp-panel { display: none !important; }
+
+#iris-view { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bg-app); }
+#iris-view.hidden { display: none; }
+.iris-head { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+.iris-title { flex: 1; display: flex; align-items: baseline; gap: 10px; }
+.iris-title-main { font-weight: 700; letter-spacing: .14em; font-size: 16px; }
+.iris-title-sub { color: var(--text-muted); font-size: 13px; }
+.iris-close { border: none; background: transparent; font-size: 22px; cursor: pointer; color: var(--text-muted); }
+.iris-body { flex: 1; overflow-y: auto; padding: 16px 20px 40px; max-width: 900px; }
+.iris-section { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+.iris-h { margin: 0 0 6px; font-size: 14px; }
+.iris-hint { margin: 0 0 10px; color: var(--text-muted); font-size: 12.5px; line-height: 1.45; }
+.iris-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+.iris-label { font-size: 12px; color: var(--text-muted); }
+.iris-meta { font-size: 12px; color: var(--text-muted); margin: 4px 0; }
+.iris-input, .iris-select, .iris-text { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); color: var(--text); }
+.iris-input.wide { flex: 1; min-width: 260px; }
+.iris-text { flex: 1; min-width: 260px; min-height: 44px; resize: vertical; }
+.iris-btn { font: inherit; font-size: 12.5px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); color: var(--text); cursor: pointer; }
+.iris-btn:hover { background: var(--bg-hover); }
+.iris-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.iris-btn.primary:hover { background: var(--accent-2); }
+.iris-btn.on { border-color: var(--health-healthy); color: var(--health-healthy); }
+.iris-btn.iris-danger { background: var(--bg-panel); color: var(--health-critical); border-color: var(--health-critical); }
+.iris-invite { border: 1px dashed var(--accent); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+.iris-invite-line { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.iris-code { font-family: Consolas, monospace; font-size: 13px; background: var(--bg-sidebar); padding: 4px 8px; border-radius: 4px; user-select: all; }
+.iris-peer { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.iris-peer.paused { opacity: .6; }
+.iris-peer-name { font-size: 14px; }
+.iris-fp { font-family: Consolas, monospace; font-size: 12.5px; margin: 4px 0; }
+.iris-ok { color: var(--health-healthy); font-size: 13px; }
+.iris-error { color: var(--health-critical); font-size: 13px; }
+.iris-pending { border-left: 3px solid var(--accent); padding: 6px 10px; margin: 8px 0; background: var(--bg-sidebar); }
+.iris-pre { white-space: pre-wrap; font-size: 12px; margin: 4px 0 0; max-height: 220px; overflow: auto; }
+.iris-log { font-size: 12px; max-height: 360px; overflow-y: auto; }
+.iris-log-line { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.iris-log-at { color: var(--text-muted); white-space: nowrap; }
+.iris-log-ev { font-weight: 600; white-space: nowrap; }
+.iris-log-line.rejected .iris-log-ev, .iris-log-line.frame-dropped .iris-log-ev, .iris-log-line.send-blocked .iris-log-ev, .iris-log-line.pair-rejected .iris-log-ev { color: var(--health-critical); }
+.iris-log-line.received .iris-log-ev, .iris-log-line.delivered .iris-log-ev, .iris-log-line.paired .iris-log-ev { color: var(--health-healthy); }
+.iris-log-detail { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+body.argus-open .iris-nav { display: none; }
