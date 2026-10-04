@@ -63,6 +63,8 @@ contextBridge.exposeInMainWorld("api", {
   approveTelegramTasks: (ids) => ipcRenderer.invoke("approve-telegram-tasks", { ids }),
   heldSave: (json) => ipcRenderer.invoke("guard-held-save", { json }),
   heldLoad: () => ipcRenderer.invoke("guard-held-load"),
+  ledgerSave: (json) => ipcRenderer.invoke("ledger-save", { json }),
+  ledgerLoad: () => ipcRenderer.invoke("ledger-load"),
   channelSend: (agentPath, text) => ipcRenderer.invoke("guard-channel-send", { agentPath, text }),
   channelCancel: (id) => ipcRenderer.invoke("guard-channel-cancel", { id }),
   getHandoffInfo: (agentPath) => ipcRenderer.invoke("guard-handoff-info", { agentPath }),
