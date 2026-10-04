@@ -1,0 +1,45 @@
+/* Hebrew / Arabic (right-to-left) text in the chat. Added v1.69.11 (2026-10-04).
+   Before this every paragraph inherited the page's left-to-right direction, so Hebrew
+   lines started at the left edge, and commas, full stops and English words landed on the
+   wrong side. unicode-bidi: plaintext gives each block its own direction from its first
+   strong letter: Hebrew blocks read right-to-left and sit at the right, English stays
+   as it was. Code stays left-to-right. */
+.chat-bubble,
+.chat-answer-section,
+.chat-bubble p,
+.chat-answer-section p,
+.chat-bubble li,
+.chat-answer-section li,
+.chat-bubble h3, .chat-bubble h4, .chat-bubble h5,
+.chat-answer-section h3, .chat-answer-section h4, .chat-answer-section h5,
+.chat-bubble blockquote,
+.chat-answer-section blockquote,
+.chat-bubble th, .chat-bubble td,
+.chat-answer-section th, .chat-answer-section td {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+/* bullets/numbers and quote bars follow the text direction instead of always sitting on the left */
+.chat-bubble ul, .chat-bubble ol,
+.chat-answer-section ul, .chat-answer-section ol {
+  padding-left: 0;
+  padding-inline-start: 1.45em;
+}
+.chat-bubble blockquote,
+.chat-answer-section blockquote {
+  padding-left: 0;
+  border-left: 0;
+  padding-inline-start: 0.9em;
+  border-inline-start: 3px solid var(--border);
+}
+.chat-bubble pre, .chat-bubble code,
+.chat-answer-section pre, .chat-answer-section code {
+  unicode-bidi: normal;
+  direction: ltr;
+  text-align: left;
+}
+/* what you type: direction follows the first letter too */
+#chat-input {
+  unicode-bidi: plaintext;
+  text-align: start;
+}

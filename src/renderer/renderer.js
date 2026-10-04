@@ -1391,6 +1391,7 @@ function appendMarkdownBlocks(container, text) {
         i++;
       }
       const bq = document.createElement("blockquote");
+      bq.dir = "auto";
       appendMarkdownBlocks(bq, buf.join("\n"));
       container.appendChild(bq);
       continue;
@@ -1462,6 +1463,7 @@ function appendMarkdownBlocks(container, text) {
           i++;
         }
         const li = document.createElement("li");
+        li.dir = "auto";   // Hebrew item: marker on the right (v1.69.11)
         appendInlineMarkdown(li, content);
         list.appendChild(li);
       }
