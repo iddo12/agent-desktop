@@ -1460,11 +1460,16 @@
     if (!controls) return;
     if (!badge || !controls.contains(badge)) {
       badge = el("button", "argus-badge");
-      badge.title = "Decisions waiting on you, across all agents - opens Argus";
+      badge.title = "Needs you: decisions waiting on you, across all agents (the number). Click to open the Bridge (Argus).";
       badge.addEventListener("click", () => openArgus("decisions"));
       controls.insertBefore(badge, controls.firstChild);
     }
-    badge.textContent = "Needs you " + n;
+    // v1.71.0: bell icon + label + round count (blue, the only coloured control in the bar).
+    badge.textContent = "";
+    if (typeof window.xpIcon === "function") badge.appendChild(window.xpIcon("bell"));
+    badge.appendChild(el("span", "xp-lbl", "Needs you"));
+    badge.appendChild(el("span", "xp-need-n", String(n)));
+    badge.setAttribute("aria-label", "Needs you: " + n + " decisions waiting");
     badge.classList.toggle("none", !n);
   }
   async function pollBadge() {
