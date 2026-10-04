@@ -1068,6 +1068,7 @@ if (!gotSingleInstanceLock) {
     ensureRemoteControlEnabled();
     reapOrphanedBackgroundAgentProcesses();
     setInterval(reapOrphanedBackgroundAgentProcesses, REAPER_INTERVAL_MS);
+    setInterval(() => { checkApprovalBlocked().catch((e) => logStuckWatchdog(`checkApprovalBlocked error: ${e.message}`)); }, 60 * 1000).unref();
     setInterval(() => {
       checkForStuckTurns().catch((e) => logStuckWatchdog(`checkForStuckTurns error: ${e.message}`));
     }, STUCK_CHECK_INTERVAL_MS);
@@ -2974,6 +2975,44 @@ async function restartAgentSession(agentPath) {
     throw e;
   }
   if (testMode.TEST_MODE) { try { fs.unlinkSync(testFaultFile("mute-" + path.basename(agentPath))); } catch (e) {} }
+}
+// v1.69.6: an agent that is BLOCKED ON A PERMISSION PROMPT is invisible: a headless background session shows "Working..."
+// while the daemon's job file says needs "approve Read". Found 2026-10-04: fresh sessions with no --model came up as Haiku
+// in permission mode "default", their first Read/Glob waited for an approval nobody could see (21+ min) and every message
+// queued behind it. pinnedModelFor() stops the cause; this catches any recurrence. Every 60 s it reads the job files of the
+// agents this app has attached (a few small reads, no polling of idle agents' transcripts). Blocked on an approval for 2
+// checks in a row -> logged; and if the session is on a non-pinned (Haiku) model it is restarted through Restart Session,
+// which resumes it on the pinned model in auto mode (max once per 20 min per agent). A real approval on a Sonnet session is
+// only logged: restarting would throw away a question that is legitimately Iddo's.
+const approvalBlockedSince = new Map();
+const approvalRestartAt = new Map();
+async function checkApprovalBlocked() {
+  const now = Date.now();
+  for (const [agentPath, sess] of ptySessions) {
+    if (!sess || !sess.agentId) continue;
+    const id8 = String(sess.agentId).slice(0, 8);
+    let st;
+    try { st = JSON.parse(fs.readFileSync(path.join(require("os").homedir(), ".claude", "jobs", id8, "state.json"), "utf-8")); } catch (_) { approvalBlockedSince.delete(agentPath); continue; }
+    if (!(st && st.tempo === "blocked" && /^approve\b/i.test(String(st.needs || "")))) { approvalBlockedSince.delete(agentPath); continue; }
+    const since = approvalBlockedSince.get(agentPath) || now;
+    approvalBlockedSince.set(agentPath, since);
+    if (now - since < 90 * 1000) continue;
+    let model = "";
+    try {
+      const fd = fs.openSync(st.linkScanPath, "r"); const size = fs.fstatSync(fd).size; const len = Math.min(size, 256 * 1024);
+      const buf = Buffer.alloc(len); fs.readSync(fd, buf, 0, len, size - len); fs.closeSync(fd);
+      const all = buf.toString("utf-8").match(/"model":"([^"]+)"/g); if (all) model = all[all.length - 1];
+    } catch (_) {}
+    const secs = Math.round((now - since) / 1000);
+    const haiku = /haiku/i.test(model);
+    logStuckWatchdog(`approval-blocked: ${agentPath} - waiting ${secs}s for "${String(st.needs).slice(0, 160)}" (${model || "model unknown"})${haiku ? " - Haiku session, restarting it on the pinned model" : " - left alone, this approval is Iddo's"}`);
+    if (haiku && now - (approvalRestartAt.get(agentPath) || 0) > 20 * 60 * 1000) {
+      approvalRestartAt.set(agentPath, now);
+      approvalBlockedSince.delete(agentPath);
+      try { await restartAgentSession(agentPath); logStuckWatchdog(`approval-blocked: ${agentPath} - restarted on ${pinnedModelFor(sessionCwdFor(agentPath))}`); }
+      catch (e) { logStuckWatchdog(`approval-blocked: ${agentPath} - restart failed: ${e.message}`); }
+    }
+  }
 }
 function typeIntoPty(agentPath, text) {
   const s = ptySessions.get(agentPath);
