@@ -2992,6 +2992,10 @@ async function restartAgentSession(agentPath) {
 // only logged: restarting would throw away a question that is legitimately Iddo's.
 const approvalBlockedSince = new Map();
 const approvalRestartAt = new Map();
+// v1.69.17: a Sonnet agent blocked on a permission prompt nobody could see (UI/UX sat for hours on "approve Bash: ls ...",
+// the app only said "Working..."). approvalPending drives a visible banner with Approve / Deny that only Iddo's click
+// answers (nothing is ever approved automatically), and makes the stuck-turn watchdog leave the agent alone.
+const approvalPending = new Map();      // agentPath -> { needs, since }
 async function checkApprovalBlocked() {
   const now = Date.now();
   // Scans the daemon's job files, NOT ptySessions: an agent whose tab was never opened has no attach client, and the
@@ -3008,7 +3012,7 @@ async function checkApprovalBlocked() {
     const agentPath = path.dirname(st.cwd);
     if (!fs.existsSync(agentPath) || sessionCwdFor(agentPath) !== st.cwd) continue;
     seen.add(agentPath);
-    if (!(st.tempo === "blocked" && /^approve\b/i.test(String(st.needs || "")))) { if (!seen.has("!" + agentPath)) approvalBlockedSince.delete(agentPath); continue; }
+    if (!(st.tempo === "blocked" && /^approve\b/i.test(String(st.needs || "")))) { if (!seen.has("!" + agentPath)) { approvalBlockedSince.delete(agentPath); approvalPending.delete(agentPath); } continue; }
     seen.add("!" + agentPath);
     const since = approvalBlockedSince.get(agentPath) || now;
     if (!approvalBlockedSince.has(agentPath)) logStuckWatchdog(`approval-blocked: ${agentPath} - first seen waiting for "${String(st.needs).slice(0, 120)}"`);
@@ -3032,6 +3036,7 @@ async function checkApprovalBlocked() {
     const secs = Math.round((now - since) / 1000);
     const haiku = /haiku/i.test(model);
     logStuckWatchdog(`approval-blocked: ${agentPath} - waiting ${secs}s for "${String(st.needs).slice(0, 160)}" (${model || "model unknown"})${haiku ? " - Haiku session, restarting it on the pinned model" : " - left alone, this approval is Iddo's"}`);
+    if (!haiku) approvalPending.set(agentPath, { needs: String(st.needs).slice(0, 600), since });   // shown as a banner with Approve / Deny (renderer approval-banner.js)
     if (haiku && now - (approvalRestartAt.get(agentPath) || 0) > 20 * 60 * 1000) {
       approvalRestartAt.set(agentPath, now);
       approvalBlockedSince.delete(agentPath);
@@ -3040,6 +3045,20 @@ async function checkApprovalBlocked() {
     }
   }
 }
+ipcMain.handle("approval-pending-get", (event, { agentPath }) => {
+  const p = approvalPending.get(agentPath);
+  return p ? { needs: p.needs, since: p.since, promptOnScreen: promptLikelyOpen(agentPath) } : null;
+});
+// Iddo's click only. Enter takes the prompt's default "Yes"; Escape declines.
+ipcMain.handle("approval-answer", (event, { agentPath, answer }) => {
+  const s = ptySessions.get(agentPath);
+  if (!s || !s.proc) return { ok: false, reason: "this agent is not attached; open its Terminal tab once, or use Session > Restart session" };
+  if (!approvalPending.has(agentPath)) return { ok: false, reason: "nothing is waiting for approval" };
+  if (!promptLikelyOpen(agentPath)) return { ok: false, reason: "the prompt is not on the screen; use Session > Restart session" };
+  logStuckWatchdog(`approval-answer: ${agentPath} - Iddo chose ${answer === "approve" ? "APPROVE" : "DENY"} for "${String(approvalPending.get(agentPath).needs).slice(0, 160)}"`);
+  writeToPtyChunked(s.proc, agentPath, answer === "approve" ? "\r" : "\x1b");
+  return { ok: true };
+});
 function typeIntoPty(agentPath, text) {
   const s = ptySessions.get(agentPath);
   if (!s || !s.proc) return;

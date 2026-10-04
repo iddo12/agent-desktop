@@ -272,6 +272,7 @@
     delivering = true;
     try {
       const pend = await iris.pending();
+      try { const st0 = await iris.status(); window.irisPeerNames = Object.fromEntries((st0.peers || []).map((p) => [p.id, p.name])); } catch (e) { /* label falls back to a generic one */ }
       navBadge.textContent = pend.length ? String(pend.length) : "";
       navBadge.classList.toggle("hidden", !pend.length);
       if (!pend.length) return;

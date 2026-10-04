@@ -1916,3 +1916,25 @@ button.danger:not(:disabled):hover { filter: brightness(1.1); }
   font-style: italic;
   opacity: 0.85;
 }
+
+/* v1.69.17: a message that came from the linked Agent Desktop (Merav's side) over IRIS - clearly not one of Iddo's own bubbles */
+.chat-bubble-iris {
+  background: #dcecf7;
+  color: #12344d;
+  border-left: 5px solid #2b6fa8;
+  border-radius: 8px;
+  max-width: none;
+  align-self: stretch;
+}
+.chat-iris-head { font-weight: 700; letter-spacing: 0.04em; font-size: 12px; }
+.chat-iris-sub { font-size: 13px; margin-top: 2px; }
+
+/* v1.69.17: agent blocked on a permission prompt - visible, with Iddo-only Approve / Deny */
+.approval-banner { margin: 6px 16px; padding: 8px 12px; border: 1px solid #c96442; border-left: 5px solid #c96442; border-radius: 8px; background: #fbeee8; color: #4a2012; }
+.approval-banner.hidden { display: none; }
+.approval-head { font-weight: 700; }
+.approval-cmd { font-family: Consolas, monospace; font-size: 12px; margin: 4px 0; word-break: break-all; max-height: 4.5em; overflow: auto; }
+.approval-row { display: flex; gap: 8px; }
+.approval-row button { padding: 3px 14px; border-radius: 6px; border: 1px solid #c96442; background: #fff; cursor: pointer; font-weight: 600; }
+.approval-row .approval-yes { background: #c96442; color: #fff; }
+.approval-msg { font-size: 12px; margin-top: 4px; }

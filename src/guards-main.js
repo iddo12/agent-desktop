@@ -75,6 +75,20 @@ function init({ ipcMain, Notification, getMainWindow, sessionCwdFor, archive, lo
     try { return { ok: true, json: fs.readFileSync(heldPath(), "utf-8") }; } catch (e) { return { ok: true, json: "{}" }; }
   });
 
+  // v1.69.15: unsent-message ledger (renderer unsent-ledger.js): messages stay on disk until the transcript proves delivery.
+  const ledgerPath = () => path.join(require("electron").app.getPath("userData"), "unsent-ledger.json");
+  ipcMain.handle("ledger-save", (event, { json }) => {
+    try {
+      const tmp = ledgerPath() + ".tmp";
+      fs.writeFileSync(tmp, String(json || "{}"), { encoding: "utf-8", mode: 0o600 });
+      fs.renameSync(tmp, ledgerPath());
+      return { ok: true };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+  ipcMain.handle("ledger-load", () => {
+    try { return { ok: true, json: fs.readFileSync(ledgerPath(), "utf-8") }; } catch (e) { return { ok: true, json: "{}" }; }
+  });
+
   ipcMain.handle("guard-handoff-info", (event, { agentPath }) => {
     try {
       const p = path.join(agentPath, "handoff_latest.md");

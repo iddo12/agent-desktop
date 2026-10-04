@@ -899,11 +899,15 @@ function startSessionPty(agent, session, cols, rows) {
 }
 
 function showTerminalFor(agent) {
-  terminalContainerEl.innerHTML = "";
+  // v1.69.16: DETACH whatever is showing (never innerHTML = "", which throws the other agent's xterm element away) and
+  // re-attach this agent's own element. xterm's open() on an already-opened terminal returns without attaching, so
+  // returning to an agent shown before left the Terminal tab blank behind the dark mask ("black bar", Merav + Iddo).
+  while (terminalContainerEl.firstChild) terminalContainerEl.removeChild(terminalContainerEl.firstChild);
 
   const session = getOrCreateSession(agent);
 
-  session.term.open(terminalContainerEl);
+  if (session.term.element) terminalContainerEl.appendChild(session.term.element);
+  else session.term.open(terminalContainerEl);
 
   // Fitting immediately after open() can measure a zero-size container if the
   // parent was just unhidden this same tick (display:none -> flex hasn't been
@@ -911,6 +915,7 @@ function showTerminalFor(agent) {
   requestAnimationFrame(() => {
     session.fitAddon.fit();
     const { cols, rows } = session.term;
+    try { session.term.refresh(0, Math.max(0, rows - 1)); } catch (e) { /* repaint after a re-attach; cosmetic */ }
 
     if (!session.started) {
       startSessionPty(agent, session, cols, rows);
@@ -1696,6 +1701,18 @@ function handoffLabelFor(text) {
   return null;
 }
 
+// v1.69.17: IRIS delivers an incoming message to the COO as a typed pointer "[IRIS] New <type> from linked peer <id>. ..."
+// (renderer/iris.js deliverPending). window.irisPeerNames (id -> name) is filled there; the text of the message itself is
+// in the inbox file the agent reads, and the agent's reply starts with "FROM <name>'S SIDE (IRIS):" (gateway frame).
+function irisIncomingFor(text) {
+  const m = /^\[IRIS\] New (\w+) from linked peer (\S+?)\./.exec(String(text || ""));
+  if (!m) return null;
+  const names = window.irisPeerNames || {};
+  const who = names[m[2]] ? names[m[2]] + "'s Agent Desktop" : "a linked Agent Desktop";
+  const kind = m[1] === "request" ? "Request" : m[1] === "reply" ? "Reply" : "Information";
+  return { who, kind };
+}
+
 // What a pending bubble looks like depends on these fields only; an unchanged key keeps the existing element.
 let pendingSeq = 0;
 function pendingKey(p) {
@@ -1865,7 +1882,8 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     }
     const el = document.createElement("div");
     const handoffLabel = block.role === "user" ? handoffLabelFor(text) : null;
-    el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role + (handoffLabel ? " chat-bubble-handoff" : "");
+    const irisIn = block.role === "user" && !handoffLabel ? irisIncomingFor(text) : null;
+    el.className = block.role === "status" ? "chat-status-line" : "chat-bubble chat-bubble-" + block.role + (handoffLabel ? " chat-bubble-handoff" : "") + (irisIn ? " chat-bubble-iris" : "");
     // A message too long to paste is handed to the CLI as a file reference,
     // which is a transport detail - but the transcript then shows that
     // reference instead of what Iddo wrote, so scrolling back showed a path
@@ -1875,6 +1893,15 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     // lands. Agent and user messages render as Markdown; status lines stay plain.
     if (handoffLabel) {
       el.textContent = handoffLabel;
+    } else if (irisIn) {
+      // v1.69.17: a message from the linked (Merav's) Agent Desktop is drawn as its own card, never as one of Iddo's bubbles
+      const head = document.createElement("div");
+      head.className = "chat-iris-head";
+      head.textContent = "FROM " + irisIn.who.toUpperCase() + " · IRIS";
+      const sub = document.createElement("div");
+      sub.className = "chat-iris-sub";
+      sub.textContent = irisIn.kind + " from the other side - this agent is reading it. Not written by Iddo.";
+      el.append(head, sub);
     } else if (block.role === "user" && renderLongMessageInto(el, text)) {
       // drawn from the cache
     } else {
