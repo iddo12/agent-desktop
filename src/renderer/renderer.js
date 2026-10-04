@@ -899,11 +899,15 @@ function startSessionPty(agent, session, cols, rows) {
 }
 
 function showTerminalFor(agent) {
-  terminalContainerEl.innerHTML = "";
+  // v1.69.16: DETACH whatever is showing (never innerHTML = "", which throws the other agent's xterm element away) and
+  // re-attach this agent's own element. xterm's open() on an already-opened terminal returns without attaching, so
+  // returning to an agent shown before left the Terminal tab blank behind the dark mask ("black bar", Merav + Iddo).
+  while (terminalContainerEl.firstChild) terminalContainerEl.removeChild(terminalContainerEl.firstChild);
 
   const session = getOrCreateSession(agent);
 
-  session.term.open(terminalContainerEl);
+  if (session.term.element) terminalContainerEl.appendChild(session.term.element);
+  else session.term.open(terminalContainerEl);
 
   // Fitting immediately after open() can measure a zero-size container if the
   // parent was just unhidden this same tick (display:none -> flex hasn't been
@@ -911,6 +915,7 @@ function showTerminalFor(agent) {
   requestAnimationFrame(() => {
     session.fitAddon.fit();
     const { cols, rows } = session.term;
+    try { session.term.refresh(0, Math.max(0, rows - 1)); } catch (e) { /* repaint after a re-attach; cosmetic */ }
 
     if (!session.started) {
       startSessionPty(agent, session, cols, rows);
