@@ -53,6 +53,8 @@
     const n = norm(entry.text);
     if ((ctx.queued || []).some((q) => norm(q) === n)) return "drop";     // already waiting in the visible queue
     if ((ctx.pending || []).some((q) => norm(q) === n)) return "drop";    // the user resent it by hand
+    const firstTs = (ctx.blocks || []).find((b) => b && b.timestamp);
+    if (firstTs && entry.sentAt < new Date(firstTs.timestamp).getTime() - 2000) return "drop"; // older than the loaded window: cannot judge, never risk a duplicate
     if (!ctx.started || !ctx.blocks || !ctx.blocks.length) return "keep";  // transcript not loaded yet: cannot judge
     if ((ctx.idleForMs || 0) < IDLE_BEFORE_RECOVER_MS) return "keep";      // agent may still be about to read it
     return "recover";

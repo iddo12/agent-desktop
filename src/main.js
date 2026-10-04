@@ -3050,13 +3050,23 @@ ipcMain.handle("approval-pending-get", (event, { agentPath }) => {
   return p ? { needs: p.needs, since: p.since, promptOnScreen: promptLikelyOpen(agentPath) } : null;
 });
 // Iddo's click only. Enter takes the prompt's default "Yes"; Escape declines.
-ipcMain.handle("approval-answer", (event, { agentPath, answer }) => {
+ipcMain.handle("approval-answer", (event, { agentPath, answer, since }) => {
+  // v1.71.1 (Testing agent review): the click must answer EXACTLY the prompt the banner showed.
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return { ok: false, reason: "not from the main window" };
+  if (answer !== "approve" && answer !== "deny") return { ok: false, reason: "bad answer" };
   const s = ptySessions.get(agentPath);
   if (!s || !s.proc) return { ok: false, reason: "this agent is not attached; open its Terminal tab once, or use Session > Restart session" };
-  if (!approvalPending.has(agentPath)) return { ok: false, reason: "nothing is waiting for approval" };
+  const pend = approvalPending.get(agentPath);
+  if (!pend) return { ok: false, reason: "nothing is waiting for approval" };
+  if (since !== pend.since) return { ok: false, reason: "the request changed while you were looking; read the new one and click again" };
   if (!promptLikelyOpen(agentPath)) return { ok: false, reason: "the prompt is not on the screen; use Session > Restart session" };
-  logStuckWatchdog(`approval-answer: ${agentPath} - Iddo chose ${answer === "approve" ? "APPROVE" : "DENY"} for "${String(approvalPending.get(agentPath).needs).slice(0, 160)}"`);
+  const strip = (x) => String(x).replace(/\s+/g, "");
+  const want = strip(String(pend.needs).replace(/^approve\s*\w*\s*:?\s*/i, "")).slice(0, 30);
+  if (want.length < 3 || !strip(dialogTails.get(agentPath) || "").includes(want)) return { ok: false, reason: "the prompt on the agent's screen is not the one shown here; use Session > Restart session" };
+  logStuckWatchdog(`approval-answer: ${agentPath} - Iddo chose ${answer === "approve" ? "APPROVE" : "DENY"} for "${String(pend.needs).slice(0, 160)}"`);
   writeToPtyChunked(s.proc, agentPath, answer === "approve" ? "\r" : "\x1b");
+  approvalPending.delete(agentPath);        // the next prompt (if any) must be seen and read again, never approved by a second click on this card
+  approvalBlockedSince.delete(agentPath);
   return { ok: true };
 });
 function typeIntoPty(agentPath, text) {
