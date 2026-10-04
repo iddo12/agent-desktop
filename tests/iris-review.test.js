@@ -262,6 +262,28 @@ test("#13 the approval gate is keyed on the sender (viaAgent), not on whether re
   } finally { await A.stop(); await B.stop(); }
 });
 
+test("#14 autoSend: the human's per-peer switch lets agent sends out without a click; off by default; only setPeer sets it", async () => {
+  const { A, B } = await pair();
+  try {
+    assert.equal(A.status().peers.find((x) => x.id === B.me.id).autoSend, false);
+    const held = A.send({ peerId: B.me.id, text: "held by default", type: "info", viaAgent: true });
+    assert.equal(held.pending, true);
+    assert.equal(A.setPeer(B.me.id, { autoSend: true }).ok, true);
+    assert.equal(A.status().peers.find((x) => x.id === B.me.id).autoSend, true);
+    const direct = A.send({ peerId: B.me.id, text: "goes straight out", type: "request", viaAgent: true });
+    assert.equal(direct.ok, true);
+    assert.equal(direct.pending, undefined);
+    assert.equal(A.outbox.some((o) => o.env.id === direct.id), true);
+    assert.equal(A.pendingSends.some((p) => p.env.id === direct.id), false);
+    // a reply (replyTo) from an agent is covered by the same switch
+    const rep = A.send({ peerId: B.me.id, text: "reply", type: "reply", replyTo: "x", viaAgent: true });
+    assert.equal(rep.pending, undefined);
+    // switching it off restores the gate
+    A.setPeer(B.me.id, { autoSend: false });
+    assert.equal(A.send({ peerId: B.me.id, text: "held again", type: "info", viaAgent: true }).pending, true);
+  } finally { await A.stop(); await B.stop(); }
+});
+
 test("#9 no prototype pollution through peer ids", async () => {
   const { A, B, pa } = await pair();
   try {
