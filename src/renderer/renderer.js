@@ -5557,18 +5557,32 @@ updateAvailableBtn.addEventListener("click", async () => {
   // background agents restart (and auto-reattach).
   updateAvailableBtn.disabled = true;
   const original = updateAvailableBtn.textContent;
-  updateAvailableBtn.textContent = "Updating Claude Code…";
+  // v1.69.9: this takes about 2 minutes (stops every agent, downloads, verifies, restarts) and used to show one
+  // frozen line, which looked stuck. Now: the real stage, seconds elapsed, an estimate, ticking every second.
+  const CLI_UPDATE_ESTIMATE_S = 150;
+  const startedAt = Date.now();
+  let stage = "starting";
+  const paint = () => {
+    const el = Math.round((Date.now() - startedAt) / 1000);
+    const left = CLI_UPDATE_ESTIMATE_S - el;
+    updateAvailableBtn.textContent = `Updating Claude Code - ${stage} (${el}s; ${left > 0 ? "about " + left + "s left, this takes ~2 min" : "taking longer than usual, still working"})`;
+  };
+  window.api.onCliUpdateProgress((d) => { if (d && d.stage) { stage = d.stage; paint(); } });
+  paint();
+  const ticker = setInterval(paint, 1000);
   try {
     // main.js installs into its private CLI dir, verifies, then shows a
     // "Restart now" dialog and relaunches - so this await normally never
     // resolves (the window is torn down first). If it does resolve, the
     // relaunch didn't happen for some reason; reflect that.
     const { version, restarting } = await window.api.updateClaudeCli();
+    clearInterval(ticker);
     updateAvailableBtn.textContent = restarting
       ? `Updated to Claude Code ${version || "latest"} - restarting…`
       : `Updated to Claude Code ${version || "latest"} - reopen the app to load it`;
     setTimeout(() => updateAvailableBtn.classList.add("hidden"), 8000);
   } catch (e) {
+    clearInterval(ticker);
     updateAvailableBtn.disabled = false;
     updateAvailableBtn.textContent = original + "  (update failed - click to retry)";
     updateAvailableBtn.title = String((e && e.message) || e);

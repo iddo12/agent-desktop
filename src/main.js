@@ -523,8 +523,12 @@ ipcMain.handle("update-claude-cli", async () => {
   // 1. Stop only OUR background agents + live attach ptys, so nothing from
   //    the private dir holds a file handle during npm's swap. They
   //    re-dispatch (on the new CLI) the next time the renderer reattaches.
+  const cliProg = (stage) => { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("cli-update-progress", { stage }); } catch (e) {} };
   try {
-    for (const agent of listAgents()) {
+    const all = listAgents();
+    let n = 0;
+    for (const agent of all) {
+      cliProg(`stopping agents (${++n} of ${all.length})`);
       await stopBackgroundAgentForCwd(sessionCwdFor(agent.path));
     }
   } catch (e) {
@@ -540,6 +544,7 @@ ipcMain.handle("update-claude-cli", async () => {
 
   // 2. Install @latest into the private prefix (works where a default-prefix
   //    -g install silently no-ops against the bundled copy).
+  cliProg("downloading and installing the new version");
   const npmPath = resolveNpmExecutable();
   const env = { ...process.env, DISABLE_AUTOUPDATER: "1" };
   await runClaudeCommand(
@@ -551,6 +556,7 @@ ipcMain.handle("update-claude-cli", async () => {
   );
 
   // 3. Verify against the freshly-installed binary itself.
+  cliProg("checking the new version works");
   let version = null;
   try {
     const out = await runClaudeCommand(privateCliCmd(), ["--version"], { env }, 3, 500);
