@@ -124,6 +124,9 @@ function isPrivateHost(host) {
   return false;
 }
 
+// Agent messages per peer per rolling hour that may skip the human click once autoSend is on.
+const AUTO_SEND_PER_HOUR = 20;
+
 class IrisService {
   // opts: { dir, name, port, bindHost, protect, unprotect, deliver(peer, env, framed, inboxFile), log(line), now() }
   constructor(opts) {
@@ -511,7 +514,17 @@ class IrisService {
     // caller happened to set replyTo - an agent send with no replyTo must not
     // be able to skip the human click (security review 2026-10-02, follow-up
     // on finding 1).
-    if ((replyTo || viaAgent) && !peer.autoSend) {
+    // autoSend is not unlimited: at most AUTO_SEND_PER_HOUR agent messages per peer per rolling hour skip the
+    // click, so two auto-sending agents cannot ping-pong all day (security review 2026-10-04); the rest wait.
+    let autoOk = false;
+    if (peer.autoSend && (replyTo || viaAgent)) {
+      const cutoff = now - 3600 * 1000;
+      this._autoTimes = this._autoTimes || {};
+      const recent = (this._autoTimes[peer.id] || []).filter((t) => t > cutoff);
+      if (recent.length < AUTO_SEND_PER_HOUR) { recent.push(now); autoOk = true; }
+      this._autoTimes[peer.id] = recent;
+    }
+    if ((replyTo || viaAgent) && !autoOk) {
       this.pendingSends.push({ peerId: peer.id, env, queuedAt: new Date(now).toISOString() });
       this._save();
       this._audit({ event: "send-pending-approval", peer: peer.id, id: env.id, type, hop, text });

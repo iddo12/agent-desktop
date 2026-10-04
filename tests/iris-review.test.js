@@ -278,6 +278,10 @@ test("#14 autoSend: the human's per-peer switch lets agent sends out without a c
     // a reply (replyTo) from an agent is covered by the same switch
     const rep = A.send({ peerId: B.me.id, text: "reply", type: "reply", replyTo: "x", viaAgent: true });
     assert.equal(rep.pending, undefined);
+    // not unlimited: after 20 auto-sent messages within the hour the rest wait for a click again
+    let waited = 0;
+    for (let i = 0; i < 25; i++) if (A.send({ peerId: B.me.id, text: "n" + i, type: "info", viaAgent: true }).pending) waited++;
+    assert.ok(waited >= 5, "expected the hourly limit to hold the later ones, held " + waited);
     // switching it off restores the gate
     A.setPeer(B.me.id, { autoSend: false });
     assert.equal(A.send({ peerId: B.me.id, text: "held again", type: "info", viaAgent: true }).pending, true);

@@ -188,7 +188,7 @@
         cb.type = "checkbox";
         cb.checked = !!p.autoSend;
         cb.addEventListener("change", async () => { await iris.setPeer(p.id, { autoSend: cb.checked }); render(); });
-        auto.append(cb, el("span", null, " My agents may message this Agent Desktop without asking me each time (messages from them still go to my COO)"));
+        auto.append(cb, el("span", null, " My agents may message this Agent Desktop without asking me each time (up to 20 an hour; more wait for my click)"));
         card.append(auto);
         const sendRow = el("div", "iris-row");
         const txt = el("textarea", "iris-text");
