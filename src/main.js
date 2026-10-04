@@ -2988,15 +2988,27 @@ const approvalBlockedSince = new Map();
 const approvalRestartAt = new Map();
 async function checkApprovalBlocked() {
   const now = Date.now();
-  for (const [agentPath, sess] of ptySessions) {
-    if (!sess || !sess.agentId) continue;
-    const id8 = String(sess.agentId).slice(0, 8);
+  // Scans the daemon's job files, NOT ptySessions: an agent whose tab was never opened has no attach client, and the
+  // first version (ptySessions only) never saw the two hung agents after an app restart.
+  const jobsDir = path.join(require("os").homedir(), ".claude", "jobs");
+  let ids = [];
+  try { ids = fs.readdirSync(jobsDir); } catch (_) { return; }
+  const seen = new Set();
+  for (const id8 of ids) {
+    const f = path.join(jobsDir, id8, "state.json");
     let st;
-    try { st = JSON.parse(fs.readFileSync(path.join(require("os").homedir(), ".claude", "jobs", id8, "state.json"), "utf-8")); } catch (_) { approvalBlockedSince.delete(agentPath); continue; }
-    if (!(st && st.tempo === "blocked" && /^approve\b/i.test(String(st.needs || "")))) { approvalBlockedSince.delete(agentPath); continue; }
+    try { if (now - fs.statSync(f).mtimeMs > 36 * 3600 * 1000) continue; st = JSON.parse(fs.readFileSync(f, "utf-8")); } catch (_) { continue; }
+    if (!st || !st.cwd || !/\.claude-session$/i.test(st.cwd)) continue; // only the fleet's agent sessions
+    const agentPath = path.dirname(st.cwd);
+    if (!fs.existsSync(agentPath) || sessionCwdFor(agentPath) !== st.cwd) continue;
+    seen.add(agentPath);
+    if (!(st.tempo === "blocked" && /^approve\b/i.test(String(st.needs || "")))) { if (!seen.has("!" + agentPath)) approvalBlockedSince.delete(agentPath); continue; }
+    seen.add("!" + agentPath);
     const since = approvalBlockedSince.get(agentPath) || now;
     approvalBlockedSince.set(agentPath, since);
     if (now - since < 90 * 1000) continue;
+    // only the agent's CURRENT conversation counts: an old killed job file can keep "blocked" forever
+    try { const cv = listConversations(st.cwd); const cur = cv.find((c) => c.isCurrent) || cv[0]; if (!cur || cur.sessionId !== st.sessionId || st.state !== "working") continue; } catch (_) { continue; }
     let model = "";
     try {
       const fd = fs.openSync(st.linkScanPath, "r"); const size = fs.fstatSync(fd).size; const len = Math.min(size, 256 * 1024);
