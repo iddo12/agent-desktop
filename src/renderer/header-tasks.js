@@ -29,10 +29,10 @@
   // in - today nothing does). Six are session actions, several destructive,
   // which have no business sitting one stray click from Reset Session.
   const VIEWS = [
-    { label: "Chat", btn: null },                       // the default view
-    { label: "Terminal", btn: "raw-terminal-toggle-btn" },
-    { label: "Chats", btn: "chats-toggle-btn" },
-    { label: "History", btn: "history-toggle-btn" },
+    { label: "Chat", btn: null, icon: "chat", tip: "Chat: the normal message view (the default)." },
+    { label: "Terminal", btn: "raw-terminal-toggle-btn", icon: "terminal", tip: "Terminal: the plain text terminal Claude Code actually runs in (the old Raw Terminal button)." },
+    { label: "Chats", btn: "chats-toggle-btn", icon: "chats", tip: "Chats: this agent's other past and parallel conversations; switch, start or rename." },
+    { label: "History", btn: "history-toggle-btn", icon: "history", tip: "History: this agent's full message history, day by day." },
   ];
   const SESSION_ACTIONS = [
     "handoff-reset-btn",
@@ -43,6 +43,113 @@
     "model-picker-btn",
     "save-to-master-btn",
   ];
+
+  // --- v1.71.0 helpers: one line-icon set, and the meter readings -------------
+  // 16px, stroke 1.75, currentColor (UI rules 2). Built as SVG nodes, no innerHTML, no emoji.
+  const ICONS = {
+    bell: [["path", { d: "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" }], ["path", { d: "M10.3 21a1.94 1.94 0 0 0 3.4 0" }]],
+    chat: [["path", { d: "M7.9 20A9 9 0 1 0 4 16.1L2 22Z" }]],
+    terminal: [["rect", { x: "3", y: "4", width: "18", height: "16", rx: "2" }], ["path", { d: "m7 9 3 3-3 3" }], ["path", { d: "M13 15h4" }]],
+    chats: [["path", { d: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" }]],
+    history: [["circle", { cx: "12", cy: "12", r: "9" }], ["path", { d: "M12 7v5l3 2" }]],
+    check: [["path", { d: "M20 6 9 17l-5-5" }]],
+    dots: [["path", { d: "M5 12h.01M12 12h.01M19 12h.01" }]],
+    chevron: [["path", { d: "m6 9 6 6 6-6" }]],
+  };
+  function icon(name, cls) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "16");
+    svg.setAttribute("height", "16");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.75");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("class", "xp-ico" + (cls ? " " + cls : ""));
+    (ICONS[name] || []).forEach(([tag, attrs]) => {
+      const n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach((k) => n.setAttribute(k, attrs[k]));
+      svg.appendChild(n);
+    });
+    return svg;
+  }
+  window.xpIcon = icon;
+
+  // Meter level: green under 50, amber 50 to 80, red over 80 - the same rule for all three (UI rules 3).
+  function meterLevel(pct) { return pct > 80 ? "crit" : pct >= 50 ? "warn" : "ok"; }
+  window.xpMeterLevel = meterLevel;
+
+  const METERS = [
+    ["five-hour-usage", "5h", "5-hour usage"],
+    ["weekly-usage", "7d", "7-day usage"],
+    ["context-usage", "Context", "Context window used"],
+  ];
+  // renderer.js keeps writing "27% (5h)" / "125K tokens (63%)" with textContent. This re-dresses the same element as
+  // label + number + bar. It reads the percent from the text, never computes usage itself.
+  function wrapMeter(el, label, name) {
+    if (el.querySelector(":scope > .xp-m-l")) return;                 // already dressed, text not rewritten since
+    const raw = el.textContent;
+    const m = /(\d+(?:\.\d+)?)\s*%/.exec(raw);
+    if (!m) {                                                          // estimate fallback with no percent: plain muted text
+      el.classList.remove("xp-meter");
+      delete el.dataset.xpPct; delete el.dataset.xpLevel;
+      el.removeAttribute("role");
+      return;
+    }
+    const pct = Math.min(100, Math.round(parseFloat(m[1])));
+    el.dataset.xpRaw = raw;
+    el.dataset.xpPct = String(pct);
+    el.dataset.xpLevel = meterLevel(pct);
+    el.classList.add("xp-meter");
+    el.style.setProperty("--pct", pct + "%");
+    el.setAttribute("role", "meter");
+    el.setAttribute("aria-valuemin", "0");
+    el.setAttribute("aria-valuemax", "100");
+    el.setAttribute("aria-valuenow", String(pct));
+    el.setAttribute("aria-label", name + " " + pct + " percent");
+    const l = document.createElement("span"); l.className = "xp-m-l"; l.textContent = label;
+    const n = document.createElement("span"); n.className = "xp-m-n"; n.textContent = pct + "%";
+    const bar = document.createElement("span"); bar.className = "xp-m-bar";
+    const fill = document.createElement("i"); bar.appendChild(fill);
+    el.textContent = "";
+    el.append(l, n, bar);
+    if (el.id === "context-usage") {
+      const t = $("xp-tokens");
+      if (t) { t.textContent = raw.split("(")[0].trim(); t.classList.toggle("hidden", !t.textContent); }
+    }
+  }
+  let meterObs = null;
+  function watchMeters() {
+    if (meterObs) return;
+    const run = () => {
+      METERS.forEach(([id, label, name]) => { const el = $(id); if (el) wrapMeter(el, label, name); });
+      const ctx = $("context-usage"), t = $("xp-tokens");
+      if (ctx && t && ctx.classList.contains("hidden")) t.classList.add("hidden");
+    };
+    meterObs = new MutationObserver(() => { run(); meterObs.takeRecords(); });
+    METERS.forEach(([id]) => { const el = $(id); if (el) meterObs.observe(el, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ["class"] }); });
+    run();
+    meterObs.takeRecords();
+  }
+  // Always-visible key to the colours (Iddo will not remember encodings). Dropped first on a narrow window.
+  function buildMeterLegend() {
+    const lg = document.createElement("span");
+    lg.className = "xp-legend";
+    lg.title = "Meter colours (5h, 7d, Context): green under 50%, amber 50 to 80%, red over 80%. Every meter also shows its number. " +
+      "Blue 'Needs you' = decisions waiting for you. The Keep going switch is the only control in this row.";
+    [["ok", "<50%"], ["warn", "50-80%"], ["crit", ">80%"], ["old", "old"]].forEach(([lvl, txt]) => {
+      const it = document.createElement("span");
+      it.className = "xp-lg-item";
+      const sw = document.createElement("i");
+      sw.className = "xp-lg-sw " + lvl;
+      it.append(sw, txt);
+      lg.appendChild(it);
+    });
+    return lg;
+  }
 
   function buildHeader() {
     const header = $("chat-header");
@@ -62,27 +169,66 @@
     // Reordered so the two he actually watches moment-to-moment (rate-limit
     // %, and now token count) survive longest; the rougher monthly estimate
     // and the cache-status debug reading are now what gets sacrificed first.
+    // v1.71.0 Option B: TWO rows. Row 1 = identity (avatar, name, role) on the left and the actions on the right.
+    // Row 2 (.xp-status) = status only: Keep going, the 5h / 7d / Context meters, model chip, a muted detail line, a legend.
+    // Order inside row 2 is also clip priority (the detail line and legend are dropped first on a narrow window).
+    // Every id is kept and moved, never recreated, so renderer.js keeps writing to the same elements.
+    const row1 = document.createElement("div");
+    row1.className = "xp-row1";
+    ["chat-avatar-slot", "chat-header-text"].forEach((id) => { const el = $(id); if (el) row1.appendChild(el); });
+    header.appendChild(row1);
+
     const status = document.createElement("div");
     status.className = "xp-status";
-    ["five-hour-usage", "weekly-usage", "context-usage", "model-badge", "monthly-usage", "cache-status"].forEach((id) => {
+    const kg = $("keepgoing-btn");           // keepgoing.js may not have created it yet; it docks itself later
+    if (kg) status.appendChild(kg);
+    const vdiv = document.createElement("span");
+    vdiv.className = "xp-vdiv";
+    vdiv.setAttribute("aria-hidden", "true");
+    status.appendChild(vdiv);
+    ["five-hour-usage", "weekly-usage", "context-usage", "model-badge"].forEach((id) => {
       const el = $(id);
       if (el) status.appendChild(el);
     });
+    // The muted detail line: token count (taken from the Context reading), messages this month, cache timer.
+    const detail = document.createElement("span");
+    detail.className = "xp-detail";
+    const tokens = document.createElement("span");
+    tokens.id = "xp-tokens";
+    tokens.className = "xp-detail-item hidden";
+    detail.appendChild(tokens);
+    ["monthly-usage", "cache-status"].forEach((id) => {
+      const el = $(id);
+      if (el) detail.appendChild(el);
+    });
+    status.appendChild(detail);
+    status.appendChild(buildMeterLegend());
     header.appendChild(status);
+    try { watchMeters(); } catch (e) { console.error("[header-tasks] meters", e); }
 
     const controls = document.createElement("div");
     controls.className = "xp-controls";
 
-    // Segmented view switcher.
+    // Segmented view switcher (icon + word; words drop away on a narrow window, icons stay).
     const seg = document.createElement("div");
     seg.className = "xp-seg";
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", "View");
     VIEWS.forEach((v, i) => {
       const b = document.createElement("button");
       b.className = "xp-seg-btn" + (i === 0 ? " active" : "");
-      b.textContent = v.label;
+      b.setAttribute("aria-label", v.label + " view");
+      b.title = v.tip;
+      b.setAttribute("aria-pressed", i === 0 ? "true" : "false");
+      b.appendChild(icon(v.icon));
+      const lbl = document.createElement("span");
+      lbl.className = "xp-lbl";
+      lbl.textContent = v.label;
+      b.appendChild(lbl);
       b.addEventListener("click", () => {
-        seg.querySelectorAll(".xp-seg-btn").forEach((x) => x.classList.remove("active"));
+        seg.querySelectorAll(".xp-seg-btn").forEach((x) => { x.classList.remove("active"); x.setAttribute("aria-pressed", "false"); });
         b.classList.add("active");
+        b.setAttribute("aria-pressed", "true");
         // "Chat" is the absence of the other views; the real Raw Terminal
         // button is a toggle, so leaving it is clicking it again.
         const raw = $("raw-terminal-toggle-btn");
@@ -97,10 +243,16 @@
     // Tasks toggle, with a count so waiting work is visible without opening it.
     const tasksBtn = document.createElement("button");
     tasksBtn.className = "xp-tasks-btn";
+    tasksBtn.title = "Open the Tasks panel: this agent's open work and anything waiting for your approval. The number is how many open items there are.";
+    tasksBtn.setAttribute("aria-label", "Tasks");
+    tasksBtn.appendChild(icon("check"));
     // Built from nodes rather than innerHTML throughout this file: the task
     // text these controls will eventually carry comes from dictated voice
     // notes and from other agents, i.e. not content this code authored.
-    tasksBtn.append("Tasks ");
+    const tlbl = document.createElement("span");
+    tlbl.className = "xp-lbl";
+    tlbl.textContent = "Tasks";
+    tasksBtn.appendChild(tlbl);
     const count = document.createElement("span");
     count.className = "xp-count";
     count.textContent = "0";
@@ -108,12 +260,20 @@
     tasksBtn.addEventListener("click", () => document.body.classList.toggle("xp-panel-open"));
     controls.appendChild(tasksBtn);
 
-    // One menu for everything that changes or ends the session.
+    // One menu for everything that changes or ends the session (Reset, Restart, Pause, Model, Save to master file, handoff).
     const wrap = document.createElement("div");
     wrap.className = "xp-menu-wrap";
     const menuBtn = document.createElement("button");
     menuBtn.className = "xp-menu-btn";
-    menuBtn.textContent = "Session ▾";
+    menuBtn.title = "Session actions: handoff and reset, restart, pause, choose the model, save to the master file.";
+    menuBtn.setAttribute("aria-label", "Session menu");
+    menuBtn.setAttribute("aria-haspopup", "true");
+    menuBtn.appendChild(icon("dots"));
+    const slbl = document.createElement("span");
+    slbl.className = "xp-lbl";
+    slbl.textContent = "Session";
+    menuBtn.appendChild(slbl);
+    menuBtn.appendChild(icon("chevron", "xp-chev"));
     const menu = document.createElement("div");
     menu.className = "xp-menu";
     SESSION_ACTIONS.forEach((id) => {
@@ -126,13 +286,14 @@
       item.addEventListener("click", () => { menu.classList.remove("open"); orig.click(); });
       menu.appendChild(item);
     });
-    menuBtn.addEventListener("click", (e) => { e.stopPropagation(); menu.classList.toggle("open"); });
-    document.addEventListener("click", () => menu.classList.remove("open"));
+    menuBtn.addEventListener("click", (e) => { e.stopPropagation(); menu.classList.toggle("open"); menuBtn.setAttribute("aria-expanded", menu.classList.contains("open") ? "true" : "false"); });
+    document.addEventListener("click", () => { menu.classList.remove("open"); menuBtn.setAttribute("aria-expanded", "false"); });
     wrap.appendChild(menuBtn);
     wrap.appendChild(menu);
     controls.appendChild(wrap);
 
-    header.appendChild(controls);
+    row1.appendChild(controls);
+
     header.dataset.xpDone = "1";
     // Publish the real header height so the drawer can sit below it rather
     // than guessing a number that breaks when the header wraps or the banner

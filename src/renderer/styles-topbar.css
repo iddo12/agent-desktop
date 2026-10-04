@@ -1,0 +1,199 @@
+/* v1.71.0 - top bar of an agent chat, "Option B" (two rows). Design owner: UI/UX agent (docs\agent_desktop_ui_rules.md,
+ * mockup topbar_options.html). Loaded LAST so it overrides styles.css / styles-header-tasks.css; reverting the redesign's
+ * look = removing this one <link> (the DOM restructure is in header-tasks.js buildHeader).
+ *
+ * Row 1 (.xp-row1): identity left; right: Needs you, Chat/Terminal/Chats/History, Tasks, Session. The only thing that wraps
+ *   is never row 1: tabs collapse to icons when the header gets narrow (container query on #chat-header, not the window,
+ *   because the sidebar width is user-resizable).
+ * Row 2 (.xp-status): status only. Keep going switch, 5h / 7d / Context meters, model chip, muted detail line, colour key.
+ * Colours: green < 50, amber 50-80, red > 80 (--health-*), blue = Needs you, terracotta = count badges. No new colours.
+ * The app has ONE (light) theme; every colour below is an existing token, so a future dark theme only has to redefine tokens. */
+
+#chat-header {
+  --radius-control: 8px;
+  --control-h: 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 0;
+  padding: 0;
+  container-type: inline-size;
+  container-name: topbar;
+  position: relative;
+  z-index: 30;                    /* the Session menu hangs below the header; keep it above the chat body */
+}
+
+.xp-row1 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 16px 8px;
+}
+body.xp-header #chat-header-text { flex: 1 1 0; min-width: 0; }
+#chat-avatar-slot { flex-shrink: 0; }
+.xp-row1 .xp-controls { margin-left: auto; gap: 12px; flex-shrink: 0; flex-wrap: nowrap; }
+
+/* ---------- row 2: status ---------- */
+.xp-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  overflow: visible;
+  flex: none;
+  min-width: 0;
+  padding: 5px 16px 7px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  -webkit-app-region: no-drag;
+}
+.xp-vdiv { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
+
+/* Keep going: the only pressable thing in row 2 -> a labelled switch with a hover state. */
+#keepgoing-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--control-h);
+  padding: 0 8px 0 46px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 1;
+}
+#keepgoing-btn:hover { background: var(--bg-hover); border-color: var(--border); }
+#keepgoing-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#keepgoing-btn::before {         /* track */
+  content: "";
+  position: absolute; left: 8px; top: 50%;
+  width: 30px; height: 17px; margin-top: -8.5px;
+  border-radius: 9px;
+  background: var(--health-unknown);
+  transition: background 0.12s ease;
+}
+#keepgoing-btn::after {          /* knob */
+  content: "";
+  position: absolute; left: 11px; top: 50%;
+  width: 11px; height: 11px; margin-top: -5.5px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.12s ease;
+}
+#keepgoing-btn.keepgoing-on { color: var(--text); }
+#keepgoing-btn.keepgoing-on::before { background: var(--health-healthy); }
+#keepgoing-btn.keepgoing-on::after { transform: translateX(13px); }
+
+/* Meters: label and number on one line, a thin bar under them. Quiet: no box, no border. */
+#five-hour-usage.xp-meter,
+#weekly-usage.xp-meter,
+#context-usage.xp-meter {
+  display: inline-grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  row-gap: 3px;
+  align-items: baseline;
+  width: 92px;
+  height: auto;
+  padding: 0;
+  font-size: 0.72rem;
+  line-height: 1.15;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-style: none;
+  cursor: default;
+}
+.xp-meter .xp-m-l { color: var(--text-muted); }
+.xp-meter .xp-m-n { text-align: right; color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.xp-meter .xp-m-bar { grid-column: 1 / -1; display: block; height: 5px; border-radius: 3px; background: var(--bg-active); overflow: hidden; }
+.xp-meter .xp-m-bar > i { display: block; height: 100%; width: var(--pct, 0%); border-radius: inherit; background: var(--lvl, var(--health-healthy)); }
+.xp-meter[data-xp-level="ok"] { --lvl: var(--health-healthy); }
+.xp-meter[data-xp-level="warn"] { --lvl: var(--health-warning); }
+.xp-meter[data-xp-level="crit"] { --lvl: var(--health-critical); }
+/* the older 70/90 warning/critical text colours would contradict the 50/80 bar colours; the bar and number carry it now */
+#five-hour-usage.warning, #five-hour-usage.critical,
+#weekly-usage.warning, #weekly-usage.critical,
+#context-usage.warning, #context-usage.critical { color: var(--text-muted); border-color: transparent; }
+/* A reading that has not refreshed: faded (and the tooltip says how old). No dashed border, no hourglass emoji. */
+#five-hour-usage.stale, #weekly-usage.stale { border-style: none; opacity: 0.55; }
+#five-hour-usage.stale::after, #weekly-usage.stale::after { content: none; animation: none; }
+/* separators from the old one-row header are replaced by the row's own gaps */
+#weekly-usage::before, #monthly-usage::before, #context-usage::before, #model-badge::before, #cache-status::before { content: none; }
+/* estimate fallbacks without a percent ("12 msgs (7d, ~3/day)") stay as plain muted text */
+#five-hour-usage:not(.xp-meter), #weekly-usage:not(.xp-meter), #context-usage:not(.xp-meter) { font-size: 0.74rem; padding: 0; }
+
+/* Model chip: a quiet pill, not a button. */
+#model-badge {
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--bg-active);
+  color: var(--text);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+/* Muted detail line: tokens, messages this month, cache timer. Dropped first when the bar is narrow. */
+.xp-detail { display: inline-flex; align-items: center; flex-wrap: nowrap; gap: 8px; min-width: 0; color: var(--text-muted); font-size: 0.74rem; }
+.xp-detail > :not(.hidden) ~ :not(.hidden)::before { content: "\00B7"; margin-right: 8px; color: var(--text-muted); }
+.xp-detail #monthly-usage, .xp-detail #cache-status { height: auto; }
+.xp-detail-item { white-space: nowrap; }
+
+/* Always-visible colour key at the free right end of row 2. */
+.xp-legend { margin-left: auto; display: inline-flex; align-items: center; gap: 9px; color: var(--text-muted); font-size: 0.7rem; white-space: nowrap; cursor: help; }
+.xp-lg-item { display: inline-flex; align-items: center; gap: 4px; }
+.xp-lg-sw { display: inline-block; width: 14px; height: 5px; border-radius: 3px; }
+.xp-lg-sw.ok { background: var(--health-healthy); }
+.xp-lg-sw.warn { background: var(--health-warning); }
+.xp-lg-sw.crit { background: var(--health-critical); }
+.xp-lg-sw.old { background: var(--text-muted); opacity: 0.45; }
+
+/* ---------- row 1 controls: one shape language (8px radius, 30px high, icon + word) ---------- */
+.xp-seg { border-radius: var(--radius-control); background: var(--bg-sidebar); }
+.xp-seg-btn, .xp-tasks-btn, .xp-menu-btn, .argus-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-h);
+  font-size: 0.78rem;
+  line-height: 1;
+}
+.xp-seg-btn { padding: 0 11px; background: transparent; }
+.xp-seg-btn.active { background: var(--bg-panel); box-shadow: 0 0 0 1px var(--border) inset; }
+.xp-seg-btn:focus-visible, .xp-tasks-btn:focus-visible, .xp-menu-btn:focus-visible, .argus-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.xp-ico { flex-shrink: 0; }
+.xp-menu-btn .xp-chev { margin-left: -2px; opacity: 0.7; }
+
+/* Needs you: the only coloured pill. Blue, bell + word + round count (same round shape as the Tasks count). */
+.argus-badge { padding: 0 10px; border-radius: var(--radius-control); font-weight: 600; }
+.argus-badge .xp-need-n {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 17px; height: 17px; padding: 0 5px; border-radius: 999px;
+  background: var(--argus-dec); color: #fff; font-size: 0.68rem; font-weight: 600;
+}
+.argus-badge.none .xp-need-n { background: var(--text-muted); }
+
+/* ---------- narrow header (Iddo does not run the app fullscreen) ---------- */
+@container topbar (max-width: 880px) {
+  .xp-seg-btn .xp-lbl, .xp-tasks-btn .xp-lbl, .xp-menu-btn .xp-lbl, .xp-menu-btn .xp-chev { display: none; }
+  .xp-seg-btn { padding: 0 9px; }
+  .xp-row1 .xp-controls { gap: 8px; }
+  .xp-detail #cache-status { display: none; }
+  .xp-lg-item:nth-child(4) { display: none; }
+  .xp-status { gap: 6px 10px; }
+  #five-hour-usage.xp-meter, #weekly-usage.xp-meter, #context-usage.xp-meter { width: 84px; }
+}
+@container topbar (max-width: 760px) {
+  .xp-detail { display: none; }              /* the plain line goes first (UI rules 7); tooltips still carry the detail */
+}
+@container topbar (max-width: 600px) {
+  .argus-badge .xp-lbl { display: none; }    /* icon + count only; the tooltip says "Needs you" */
+  .xp-legend .xp-lg-item:nth-child(2) { display: none; }
+}

@@ -23,10 +23,12 @@
   function btn() {
     let b = document.getElementById("keepgoing-btn");
     if (b) return b;
+    const row = document.querySelector("#chat-header .xp-status");   // v1.71.0: docks at the start of the status row
     const anchor = document.getElementById("pause-agent-btn");
-    if (!anchor || !anchor.parentNode) return null;
+    if (!row && (!anchor || !anchor.parentNode)) return null;
     b = document.createElement("button");
     b.id = "keepgoing-btn";
+    b.setAttribute("role", "switch");
     b.addEventListener("click", (e) => {
       try {
         const p = typeof activeAgentPath === "undefined" ? null : activeAgentPath;
@@ -37,7 +39,7 @@
         }
       } catch (err) { /* cosmetic */ }
     });
-    anchor.parentNode.insertBefore(b, anchor);
+    if (row) row.insertBefore(b, row.firstChild); else anchor.parentNode.insertBefore(b, anchor);
     return b;
   }
 
@@ -60,9 +62,10 @@
       const b = btn();
       if (b) {
         const on = globalEnabled && (!p || agentOn(p));
-        b.textContent = "Keep going: " + (on ? "on" : "off");
+        b.textContent = "Keep going";                       // v1.71.0: a switch (look in styles-topbar.css); state in aria-checked + tooltip
+        b.setAttribute("aria-checked", on ? "true" : "false");
         b.className = on ? "keepgoing-on" : "keepgoing-off";
-        b.title = "When this agent ends a turn by announcing a next step although nothing blocks it, send it a short nudge to do it now (at most 3 in a row, never the same message twice). " +
+        b.title = "Keep going is " + (on ? "ON" : "OFF") + ". When this agent ends a turn by announcing a next step although nothing blocks it, send it a short nudge to do it now (at most 3 in a row, never the same message twice). " +
           "The agent can stop it any time by ending with a line 'BLOCKED: <reason>' or 'DONE: <summary>'. Click: this agent. Shift-click: all agents (now " + (globalEnabled ? "on" : "off") + ").";
       }
       const el = bannerEl();
