@@ -124,6 +124,9 @@ function isPrivateHost(host) {
   return false;
 }
 
+// Agent messages per peer per rolling hour that may skip the human click once autoSend is on.
+const AUTO_SEND_PER_HOUR = 20;
+
 class IrisService {
   // opts: { dir, name, port, bindHost, protect, unprotect, deliver(peer, env, framed, inboxFile), log(line), now() }
   constructor(opts) {
@@ -219,7 +222,7 @@ class IrisService {
       invite: this.invite && this.invite.expiresAt > this.now()
         ? { code: this.invite.code, expiresAt: this.invite.expiresAt, strings: this.invite.strings } : null,
       peers: Object.values(this.peers).map((p) => ({
-        id: p.id, name: p.name, addr: p.addr, trust: p.trust, paused: !!p.paused,
+        id: p.id, name: p.name, addr: p.addr, trust: p.trust, paused: !!p.paused, autoSend: !!p.autoSend,
         pairedAt: p.pairedAt, fingerprint: ic.fingerprint(this.me, p), lastSeen: p.lastSeen || null,
       })),
       outbox: this.outbox.map((o) => ({ id: o.env.id, peer: o.peerId, status: o.status, tries: o.tries, lastError: o.lastError || null })),
@@ -253,12 +256,15 @@ class IrisService {
     if (!p) return { ok: false, reason: "unknown-peer" };
     patch = patch || {};
     if (has(patch, "paused")) p.paused = !!patch.paused;
+    // autoSend: the HUMAN's standing decision that this machine's agents may message this peer without a click
+    // each time (Iddo 2026-10-04). Settable only here (the Links tab); the agent pipe has no command for it.
+    if (has(patch, "autoSend")) p.autoSend = !!patch.autoSend;
     if (has(patch, "name") && String(patch.name).trim()) p.name = this._uniqueName(cleanName(patch.name), p.id);
     if (has(patch, "dailyCap") && Number.isInteger(patch.dailyCap) && patch.dailyCap >= 0 && patch.dailyCap <= 1000) p.dailyCap = patch.dailyCap;
     // trust is recorded now; Tier 1 (charters) only exists from Stage 2.
     if (has(patch, "trust") && ["household", "remote"].includes(patch.trust)) p.trust = patch.trust;
     this._save();
-    this._audit({ event: "peer-updated", peer: peerId, patch: { paused: patch.paused, name: patch.name, dailyCap: patch.dailyCap, trust: patch.trust } });
+    this._audit({ event: "peer-updated", peer: peerId, patch: { paused: patch.paused, name: patch.name, dailyCap: patch.dailyCap, trust: patch.trust, autoSend: patch.autoSend } });
     return { ok: true };
   }
 
@@ -508,7 +514,17 @@ class IrisService {
     // caller happened to set replyTo - an agent send with no replyTo must not
     // be able to skip the human click (security review 2026-10-02, follow-up
     // on finding 1).
-    if (replyTo || viaAgent) {
+    // autoSend is not unlimited: at most AUTO_SEND_PER_HOUR agent messages per peer per rolling hour skip the
+    // click, so two auto-sending agents cannot ping-pong all day (security review 2026-10-04); the rest wait.
+    let autoOk = false;
+    if (peer.autoSend && (replyTo || viaAgent)) {
+      const cutoff = now - 3600 * 1000;
+      this._autoTimes = this._autoTimes || {};
+      const recent = (this._autoTimes[peer.id] || []).filter((t) => t > cutoff);
+      if (recent.length < AUTO_SEND_PER_HOUR) { recent.push(now); autoOk = true; }
+      this._autoTimes[peer.id] = recent;
+    }
+    if ((replyTo || viaAgent) && !autoOk) {
       this.pendingSends.push({ peerId: peer.id, env, queuedAt: new Date(now).toISOString() });
       this._save();
       this._audit({ event: "send-pending-approval", peer: peer.id, id: env.id, type, hop, text });

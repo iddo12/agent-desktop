@@ -183,6 +183,13 @@
             render();
           }));
         card.append(ctl);
+        const auto = el("label", "iris-row iris-autosend");
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = !!p.autoSend;
+        cb.addEventListener("change", async () => { await iris.setPeer(p.id, { autoSend: cb.checked }); render(); });
+        auto.append(cb, el("span", null, " My agents may message this Agent Desktop without asking me each time (up to 20 an hour; more wait for my click)"));
+        card.append(auto);
         const sendRow = el("div", "iris-row");
         const txt = el("textarea", "iris-text");
         txt.placeholder = `Message to ${p.name}'s COO (information)…`;
