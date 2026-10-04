@@ -709,8 +709,31 @@ chatInputEl.addEventListener("input", () => {
   composeDraftTimer = setTimeout(() => parkComposeDraft(activeAgentPath), 600);
 });
 
+// "Loading conversation..." overlay (v1.69.13): after clicking another agent the chat stays blank for a few
+// seconds while its transcript is read; with no sign of life it looked stuck. Shown on every switch, hidden by the
+// first renderChatBlocks() (or after 12 s at most, so it can never stay forever).
+let chatLoadingTimer = null;
+function showChatLoading() {
+  let ov = document.getElementById("chat-loading-overlay");
+  if (!ov) {
+    ov = document.createElement("div");
+    ov.id = "chat-loading-overlay";
+    ov.innerHTML = '<div class="chat-loading-spinner"></div><div>Loading conversation...</div>';
+    chatMessagesViewEl.parentNode.appendChild(ov);
+  }
+  ov.classList.remove("hidden");
+  clearTimeout(chatLoadingTimer);
+  chatLoadingTimer = setTimeout(hideChatLoading, 12000);
+}
+function hideChatLoading() {
+  clearTimeout(chatLoadingTimer);
+  const ov = document.getElementById("chat-loading-overlay");
+  if (ov) ov.classList.add("hidden");
+}
+
 function selectAgent(agent) {
   if (activeAgentPath !== agent.path) {
+    showChatLoading();
     const leaving = activeAgentPath && terminals.get(activeAgentPath);
     if (leaving) leaving.lastAllBlocks = null; // v1.68.1: do not keep a second copy of every visited transcript
     parkComposeDraft(activeAgentPath);
@@ -1681,6 +1704,7 @@ function pendingKey(p) {
 }
 
 function renderChatBlocks(blocks, pendingSent, opts = {}) {
+  hideChatLoading();
   // Keep the reader where they are. This view is re-rendered from scratch on
   // every rebuild - the 4s stale poll, every burst of streaming output, etc.
   // Snapping to the bottom each time yanked the user back down mid-read
