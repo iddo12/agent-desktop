@@ -1675,7 +1675,7 @@ function handoffLabelFor(text) {
 let pendingSeq = 0;
 function pendingKey(p) {
   if (!p._id) p._id = ++pendingSeq; // identity: two failed "yes" bubbles must not share one DOM node / Resend closure
-  return p._id + "\x00" + p.text + "\x00" + (p.failed ? "failed" + (p.superseded ? "S" : "") + (p.waitedOnBusyAgent ? "B" : "") : p.received ? "recv" : p.written ? "sent" : "send");
+  return p._id + "\x00" + p.text + "\x00" + (p.failed ? "failed" + (p.superseded ? "S" : "") + (p.waitedOnBusyAgent ? "B" : "") : p.received ? "recv" : p.waitedOnBusyAgent ? "busy" : p.written ? "sent" : "send");
 }
 
 function renderChatBlocks(blocks, pendingSent, opts = {}) {
@@ -1932,7 +1932,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
       // v1.68.0: one calm, static state marker instead of a pulsing bubble (Iddo: "no long blinking").
       const mark = document.createElement("span");
       mark.className = "chat-pending-mark";
-      mark.textContent = pending.received ? "\u2713 queued in the agent" : pending.written ? "\u2713 sent" : "sending\u2026";
+      mark.textContent = pending.received ? "\u2713 queued in the agent" : pending.waitedOnBusyAgent ? "\u2713 sent - the agent is busy and will read it at its next step" : pending.written ? "\u2713 sent" : "sending\u2026";
       el.appendChild(mark);
     }
     chatMessagesViewEl.appendChild(el);
@@ -2259,8 +2259,25 @@ async function rebuildChatView(agentPath, opts = {}) {
     // click, one at a time, by a person who can see whether the last one
     // already went through before trying again.
     if (pending.midTurn && !pending.failed && !isSlash && now - (pending.sentAt || pending.addedAt) > MIDTURN_NO_RECEIPT_FAIL_MS) {
-      pending.failed = true;
-      notifyFailed(agentPath, session, pending, "midturn-no-receipt");
+      // v1.69.5: no receipt yet is NOT a loss while the agent is visibly working (Video Editing: a long
+      // Premiere/Bash step, 17 tools, and every message was painted red "Not confirmed" at 25 s although the CLI
+      // had it queued). Fail only once the transcript has been quiet; until then show a calm "queued" state.
+      if (!pending.checkingQuiet) {
+        pending.checkingQuiet = true;
+        window.api.getTranscriptQuietMs(agentPath).then((quietMs) => {
+          pending.checkingQuiet = false;
+          if (pending.failed) return;
+          if (quietMs != null && quietMs < TRANSCRIPT_QUIET_BEFORE_FAIL_MS) {
+            pending.waitedOnBusyAgent = true;
+            pending.sentAt = Date.now() - MIDTURN_NO_RECEIPT_FAIL_MS + 15000; // look again in ~15 s
+            scheduleRebuildChatView(agentPath);
+            return;
+          }
+          pending.failed = true;
+          notifyFailed(agentPath, session, pending, "midturn-no-receipt");
+          scheduleRebuildChatView(agentPath);
+        }).catch(() => { pending.checkingQuiet = false; });
+      }
       return true;
     }
     const waited = now - pending.addedAt;

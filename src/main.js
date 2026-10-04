@@ -2088,6 +2088,21 @@ function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   return entry.p;
 }
 
+// v1.69.5: every dispatched session is pinned to a model. With no --model the CLI picked Haiku, which runs in
+// permission mode "default" (not "auto"): its first Read/Glob waited for an approval nobody could see in a headless
+// agent (job state: needs "approve Read"), and Iddo's messages queued behind it ("Not confirmed" for 20+ min).
+// Default is Sonnet for everything; <userData>gent-model.json {"default":"sonnet","agents":{"<folder name>":"opus"}}
+// overrides it. Haiku is never used unless a file entry names it explicitly.
+function pinnedModelFor(sessionCwd) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "agent-model.json"), "utf-8"));
+    const agent = path.basename(path.dirname(sessionCwd));
+    return String((cfg.agents && cfg.agents[agent]) || cfg.default || "sonnet");
+  } catch (_) {
+    return "sonnet";
+  }
+}
+
 async function dispatchBackgroundAgentImpl(shell, spawnEnv, sessionCwd, opts = {}) {
   let args;
   if (opts.resumeSessionId) {
@@ -2101,6 +2116,7 @@ async function dispatchBackgroundAgentImpl(shell, spawnEnv, sessionCwd, opts = {
   } else {
     args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
   }
+  args.splice(1, 0, "--model", pinnedModelFor(sessionCwd)); // after --bg, before the prompt/resume args
   // Every `claude --bg` in this app goes through here (the sweep, opening a
   // chat, resume-after-pause, conversation switch, login recovery), so this is
   // the one place the workspace-trust prompt is caught - see workspaceTrust.js
