@@ -523,8 +523,12 @@ ipcMain.handle("update-claude-cli", async () => {
   // 1. Stop only OUR background agents + live attach ptys, so nothing from
   //    the private dir holds a file handle during npm's swap. They
   //    re-dispatch (on the new CLI) the next time the renderer reattaches.
+  const cliProg = (stage) => { try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("cli-update-progress", { stage }); } catch (e) {} };
   try {
-    for (const agent of listAgents()) {
+    const all = listAgents();
+    let n = 0;
+    for (const agent of all) {
+      cliProg(`stopping agents (${++n} of ${all.length})`);
       await stopBackgroundAgentForCwd(sessionCwdFor(agent.path));
     }
   } catch (e) {
@@ -540,6 +544,7 @@ ipcMain.handle("update-claude-cli", async () => {
 
   // 2. Install @latest into the private prefix (works where a default-prefix
   //    -g install silently no-ops against the bundled copy).
+  cliProg("downloading and installing the new version");
   const npmPath = resolveNpmExecutable();
   const env = { ...process.env, DISABLE_AUTOUPDATER: "1" };
   await runClaudeCommand(
@@ -551,6 +556,7 @@ ipcMain.handle("update-claude-cli", async () => {
   );
 
   // 3. Verify against the freshly-installed binary itself.
+  cliProg("checking the new version works");
   let version = null;
   try {
     const out = await runClaudeCommand(privateCliCmd(), ["--version"], { env }, 3, 500);
@@ -1068,6 +1074,7 @@ if (!gotSingleInstanceLock) {
     ensureRemoteControlEnabled();
     reapOrphanedBackgroundAgentProcesses();
     setInterval(reapOrphanedBackgroundAgentProcesses, REAPER_INTERVAL_MS);
+    setInterval(() => { checkApprovalBlocked().catch((e) => logStuckWatchdog(`checkApprovalBlocked error: ${e.message}`)); }, 60 * 1000).unref();
     setInterval(() => {
       checkForStuckTurns().catch((e) => logStuckWatchdog(`checkForStuckTurns error: ${e.message}`));
     }, STUCK_CHECK_INTERVAL_MS);
@@ -2088,6 +2095,21 @@ function dispatchBackgroundAgent(shell, spawnEnv, sessionCwd, opts = {}) {
   return entry.p;
 }
 
+// v1.69.5: every dispatched session is pinned to a model. With no --model the CLI picked Haiku, which runs in
+// permission mode "default" (not "auto"): its first Read/Glob waited for an approval nobody could see in a headless
+// agent (job state: needs "approve Read"), and Iddo's messages queued behind it ("Not confirmed" for 20+ min).
+// Default is Sonnet for everything; <userData>gent-model.json {"default":"sonnet","agents":{"<folder name>":"opus"}}
+// overrides it. Haiku is never used unless a file entry names it explicitly.
+function pinnedModelFor(sessionCwd) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "agent-model.json"), "utf-8"));
+    const agent = path.basename(path.dirname(sessionCwd));
+    return String((cfg.agents && cfg.agents[agent]) || cfg.default || "sonnet");
+  } catch (_) {
+    return "sonnet";
+  }
+}
+
 async function dispatchBackgroundAgentImpl(shell, spawnEnv, sessionCwd, opts = {}) {
   let args;
   if (opts.resumeSessionId) {
@@ -2101,6 +2123,7 @@ async function dispatchBackgroundAgentImpl(shell, spawnEnv, sessionCwd, opts = {
   } else {
     args = hasPriorSession(sessionCwd) ? ["--bg", "--continue"] : ["--bg"];
   }
+  args.splice(1, 0, "--model", pinnedModelFor(sessionCwd)); // after --bg, before the prompt/resume args
   // Every `claude --bg` in this app goes through here (the sweep, opening a
   // chat, resume-after-pause, conversation switch, login recovery), so this is
   // the one place the workspace-trust prompt is caught - see workspaceTrust.js
@@ -2958,6 +2981,64 @@ async function restartAgentSession(agentPath) {
     throw e;
   }
   if (testMode.TEST_MODE) { try { fs.unlinkSync(testFaultFile("mute-" + path.basename(agentPath))); } catch (e) {} }
+}
+// v1.69.6: an agent that is BLOCKED ON A PERMISSION PROMPT is invisible: a headless background session shows "Working..."
+// while the daemon's job file says needs "approve Read". Found 2026-10-04: fresh sessions with no --model came up as Haiku
+// in permission mode "default", their first Read/Glob waited for an approval nobody could see (21+ min) and every message
+// queued behind it. pinnedModelFor() stops the cause; this catches any recurrence. Every 60 s it reads the job files of the
+// agents this app has attached (a few small reads, no polling of idle agents' transcripts). Blocked on an approval for 2
+// checks in a row -> logged; and if the session is on a non-pinned (Haiku) model it is restarted through Restart Session,
+// which resumes it on the pinned model in auto mode (max once per 20 min per agent). A real approval on a Sonnet session is
+// only logged: restarting would throw away a question that is legitimately Iddo's.
+const approvalBlockedSince = new Map();
+const approvalRestartAt = new Map();
+async function checkApprovalBlocked() {
+  const now = Date.now();
+  // Scans the daemon's job files, NOT ptySessions: an agent whose tab was never opened has no attach client, and the
+  // first version (ptySessions only) never saw the two hung agents after an app restart.
+  const jobsDir = path.join(require("os").homedir(), ".claude", "jobs");
+  let ids = [];
+  try { ids = fs.readdirSync(jobsDir); } catch (_) { return; }
+  const seen = new Set();
+  for (const id8 of ids) {
+    const f = path.join(jobsDir, id8, "state.json");
+    let st;
+    try { if (now - fs.statSync(f).mtimeMs > 36 * 3600 * 1000) continue; st = JSON.parse(fs.readFileSync(f, "utf-8")); } catch (_) { continue; }
+    if (!st || !st.cwd || !/\.claude-session$/i.test(st.cwd)) continue; // only the fleet's agent sessions
+    const agentPath = path.dirname(st.cwd);
+    if (!fs.existsSync(agentPath) || sessionCwdFor(agentPath) !== st.cwd) continue;
+    seen.add(agentPath);
+    if (!(st.tempo === "blocked" && /^approve\b/i.test(String(st.needs || "")))) { if (!seen.has("!" + agentPath)) approvalBlockedSince.delete(agentPath); continue; }
+    seen.add("!" + agentPath);
+    const since = approvalBlockedSince.get(agentPath) || now;
+    if (!approvalBlockedSince.has(agentPath)) logStuckWatchdog(`approval-blocked: ${agentPath} - first seen waiting for "${String(st.needs).slice(0, 120)}"`);
+    approvalBlockedSince.set(agentPath, since);
+    if (now - since < 90 * 1000) continue;
+    // only the agent's CURRENT conversation counts: an old killed job file can keep "blocked" forever
+    // (newest transcript file by mtime, not listConversations(): that returns [] for a session whose only human turn is a
+    // handoff prompt, which is exactly the kind of session that hangs)
+    try {
+      const pdir = path.join(require("os").homedir(), ".claude", "projects", encodeProjectPath(st.cwd));
+      let best = null, bestT = 0;
+      for (const fn of fs.readdirSync(pdir)) { if (!/\.jsonl$/.test(fn)) continue; const t = fs.statSync(path.join(pdir, fn)).mtimeMs; if (t > bestT) { bestT = t; best = fn; } }
+      if (!best || best.replace(/\.jsonl$/, "") !== st.sessionId || st.state !== "working") continue;
+    } catch (_) { continue; }
+    let model = "";
+    try {
+      const fd = fs.openSync(st.linkScanPath, "r"); const size = fs.fstatSync(fd).size; const len = Math.min(size, 256 * 1024);
+      const buf = Buffer.alloc(len); fs.readSync(fd, buf, 0, len, size - len); fs.closeSync(fd);
+      const all = buf.toString("utf-8").match(/"model":"([^"]+)"/g); if (all) model = all[all.length - 1];
+    } catch (_) {}
+    const secs = Math.round((now - since) / 1000);
+    const haiku = /haiku/i.test(model);
+    logStuckWatchdog(`approval-blocked: ${agentPath} - waiting ${secs}s for "${String(st.needs).slice(0, 160)}" (${model || "model unknown"})${haiku ? " - Haiku session, restarting it on the pinned model" : " - left alone, this approval is Iddo's"}`);
+    if (haiku && now - (approvalRestartAt.get(agentPath) || 0) > 20 * 60 * 1000) {
+      approvalRestartAt.set(agentPath, now);
+      approvalBlockedSince.delete(agentPath);
+      try { await restartAgentSession(agentPath); logStuckWatchdog(`approval-blocked: ${agentPath} - restarted on ${pinnedModelFor(sessionCwdFor(agentPath))}`); }
+      catch (e) { logStuckWatchdog(`approval-blocked: ${agentPath} - restart failed: ${e.message}`); }
+    }
+  }
 }
 function typeIntoPty(agentPath, text) {
   const s = ptySessions.get(agentPath);
@@ -4408,6 +4489,26 @@ try {
 } catch (e) {
   console.error("voice-main failed to load:", e);
 }
+
+// v1.55.0 IRIS - Agent Desktop-to-Agent Desktop link. Off until the user turns
+// it on in the Links view. After app ready because it needs safeStorage (DPAPI)
+// for its keys; isolated like the guards so a fault only disables IRIS.
+app.whenReady().then(() => {
+  try {
+    require("./iris/main-iris").init({
+      ipcMain,
+      app,
+      safeStorage: require("electron").safeStorage,
+      Notification,
+      getMainWindow: () => mainWindow,
+      log: (line) => logStuckWatchdog(line),
+      testMode: testMode.TEST_MODE,
+    });
+  } catch (e) {
+    console.error("iris failed to load:", e);
+    try { logStuckWatchdog(`iris failed to load: ${e.message}`); } catch (e2) {}
+  }
+});
 
 // --- Chats panel (per-agent conversation list / switch / rename) -----------
 //
