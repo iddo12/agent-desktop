@@ -34,9 +34,10 @@
       const row = document.createElement("div"); row.className = "approval-row";
       const mk = (label, answer, cls) => {
         const b = document.createElement("button"); b.textContent = label; b.className = cls;
-        b.addEventListener("click", async () => {
+        b.addEventListener("click", async (ev) => {
+          if (!ev.isTrusted) return;   // a real click only, never a script
           b.disabled = true;
-          const r = await window.api.approvalAnswer(ap, answer).catch((e) => ({ ok: false, reason: e.message }));
+          const r = await window.api.approvalAnswer(ap, answer, p.since).catch((e) => ({ ok: false, reason: e.message }));
           msg.textContent = r && r.ok ? (answer === "approve" ? "Approved - the agent continues." : "Denied.") : "Could not answer: " + ((r && r.reason) || "unknown") + ".";
           setTimeout(() => { lastKey = ""; poll(); }, 2500);
         });

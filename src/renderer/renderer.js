@@ -1708,7 +1708,8 @@ function irisIncomingFor(text) {
   const m = /^\[IRIS\] New (\w+) from linked peer (\S+?)\./.exec(String(text || ""));
   if (!m) return null;
   const names = window.irisPeerNames || {};
-  const who = names[m[2]] ? names[m[2]] + "'s Agent Desktop" : "a linked Agent Desktop";
+  if (!names[m[2]]) return null;   // only a peer id this app really knows gets the card (text typed by hand does not)
+  const who = names[m[2]] + "'s Agent Desktop";
   const kind = m[1] === "request" ? "Request" : m[1] === "reply" ? "Reply" : "Information";
   return { who, kind };
 }

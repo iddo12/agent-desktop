@@ -23,6 +23,7 @@ t("decide: delivered -> drop", () => assert.strictEqual(L.decide({ text: "hi", s
 t("decide: expired -> drop", () => assert.strictEqual(L.decide({ text: "hi", sentAt: NOW - L.TTL_MS - 1, disk: true }, ctx()), "drop"));
 t("decide: sent this run, unproven -> keep (manual Not-confirmed flow owns it)", () => assert.strictEqual(L.decide({ text: "hi", sentAt: NOW - 90000 }, ctx()), "keep"));
 t("decide: from disk, idle agent, transcript loaded, unproven -> recover", () => assert.strictEqual(L.decide({ text: "hi", sentAt: NOW - 90000, disk: true }, ctx()), "recover"));
+t("decide: from disk, older than the oldest loaded block -> drop (cannot judge, no duplicate)", () => assert.strictEqual(L.decide({ text: "hi", sentAt: NOW - 900000, disk: true }, ctx()), "drop"));
 t("decide: from disk but agent not idle long enough -> keep", () => assert.strictEqual(L.decide({ text: "hi", sentAt: NOW - 90000, disk: true }, ctx({ idleForMs: 5000 })), "keep"));
 t("decide: from disk, transcript not loaded -> keep", () => assert.strictEqual(L.decide({ text: "hi", sentAt: NOW - 90000, disk: true }, ctx({ blocks: [] })), "keep"));
 t("decide: from disk, session not started -> keep", () => assert.strictEqual(L.decide({ text: "hi", sentAt: NOW - 90000, disk: true }, ctx({ started: false })), "keep"));

@@ -50,7 +50,7 @@ contextBridge.exposeInMainWorld("api", {
   agentInputHoldsText: (agentPath, snippet) => ipcRenderer.invoke("agent-input-holds-text", { agentPath, snippet }),
   agentDialogOpen: (agentPath) => ipcRenderer.invoke("agent-dialog-open", { agentPath }),
   approvalPending: (agentPath) => ipcRenderer.invoke("approval-pending-get", { agentPath }),
-  approvalAnswer: (agentPath, answer) => ipcRenderer.invoke("approval-answer", { agentPath, answer }),
+  approvalAnswer: (agentPath, answer, since) => ipcRenderer.invoke("approval-answer", { agentPath, answer, since }),
   getTranscriptQuietMs: (agentPath) => ipcRenderer.invoke("get-transcript-quiet-ms", { agentPath }),
   getAgentOverview: () => ipcRenderer.invoke("get-agent-overview"),
   registryList: () => ipcRenderer.invoke("registry-list"),
