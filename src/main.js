@@ -3005,10 +3005,18 @@ async function checkApprovalBlocked() {
     if (!(st.tempo === "blocked" && /^approve\b/i.test(String(st.needs || "")))) { if (!seen.has("!" + agentPath)) approvalBlockedSince.delete(agentPath); continue; }
     seen.add("!" + agentPath);
     const since = approvalBlockedSince.get(agentPath) || now;
+    if (!approvalBlockedSince.has(agentPath)) logStuckWatchdog(`approval-blocked: ${agentPath} - first seen waiting for "${String(st.needs).slice(0, 120)}"`);
     approvalBlockedSince.set(agentPath, since);
     if (now - since < 90 * 1000) continue;
     // only the agent's CURRENT conversation counts: an old killed job file can keep "blocked" forever
-    try { const cv = listConversations(st.cwd); const cur = cv.find((c) => c.isCurrent) || cv[0]; if (!cur || cur.sessionId !== st.sessionId || st.state !== "working") continue; } catch (_) { continue; }
+    // (newest transcript file by mtime, not listConversations(): that returns [] for a session whose only human turn is a
+    // handoff prompt, which is exactly the kind of session that hangs)
+    try {
+      const pdir = path.join(require("os").homedir(), ".claude", "projects", encodeProjectPath(st.cwd));
+      let best = null, bestT = 0;
+      for (const fn of fs.readdirSync(pdir)) { if (!/\.jsonl$/.test(fn)) continue; const t = fs.statSync(path.join(pdir, fn)).mtimeMs; if (t > bestT) { bestT = t; best = fn; } }
+      if (!best || best.replace(/\.jsonl$/, "") !== st.sessionId || st.state !== "working") continue;
+    } catch (_) { continue; }
     let model = "";
     try {
       const fd = fs.openSync(st.linkScanPath, "r"); const size = fs.fstatSync(fd).size; const len = Math.min(size, 256 * 1024);
