@@ -18,6 +18,7 @@
 //
 // Every recording is also written to <userData>\voice-recordings\ before transcription, so a
 // failure never loses what was said; the renderer offers a Retry that re-sends the saved file.
+const voiceSplit = require("./voiceSplit");
 const { execFileSync, execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -146,12 +147,12 @@ function ensureServer(eng, model, say) {
   return entry.ready.then((ok) => (ok ? entry : null));
 }
 // One inference on a warm server. Returns { text, lang } or throws.
-async function serverInfer(entry, wavPath) {
+async function serverInfer(entry, wavPathOrBuffer) {
   const boundary = "----adv" + Date.now().toString(16);
   const field = (n, v) => `--${boundary}\r\nContent-Disposition: form-data; name="${n}"\r\n\r\n${v}\r\n`;
   const head = field("response_format", "verbose_json") + field("language", "auto") + field("temperature", "0.0") +
     `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
-  const body = Buffer.concat([Buffer.from(head), fs.readFileSync(wavPath), Buffer.from(`\r\n--${boundary}--\r\n`)]);
+  const body = Buffer.concat([Buffer.from(head), Buffer.isBuffer(wavPathOrBuffer) ? wavPathOrBuffer : fs.readFileSync(wavPathOrBuffer), Buffer.from(`\r\n--${boundary}--\r\n`)]);
   const r = await httpReq(entry.port, "POST", "/inference", body, { "Content-Type": "multipart/form-data; boundary=" + boundary, "Content-Length": body.length });
   if (r.status !== 200) throw new Error("server HTTP " + r.status);
   const j = JSON.parse(r.body);
@@ -163,6 +164,26 @@ async function transcribeViaServer(eng, wavPath, say) {
   const t0 = Date.now();
   const main = await ensureServer(eng, eng.model, say);
   if (!main) return null;
+  // v1.69.14: a recording with pauses is cut into pieces and each piece gets its own language, so a sentence
+  // that mixes Hebrew and English keeps both (one language per recording dropped the other). No pauses, or a
+  // format we cannot read: unchanged single pass below.
+  const pieces = voiceSplit.splitWav(fs.readFileSync(wavPath));
+  if (pieces) {
+    const heSrv = eng.modelHe ? await ensureServer(eng, eng.modelHe, say) : null;
+    const parts = [], langs = [];
+    for (const piece of pieces) {
+      let pr = await serverInfer(main, piece);
+      let pl = pr.lang || "auto";
+      if (heSrv && (/^(he|iw|hebrew)$/i.test(pl) || voiceSplit.hasHebrew(pr.text))) {
+        try { const hr = await serverInfer(heSrv, piece); if (String(hr.text).trim()) { pr = hr; pl = "he"; } } catch (e) {}
+      }
+      langs.push(pl);
+      const t = pr.text.replace(/\s*[\r\n]+\s*/g, " ").trim();
+      if (t) parts.push(t);
+    }
+    say(`voice-transcribe: warm server, ${pieces.length} pieces (${langs.join(",")}), ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    return parts.join(" ");
+  }
   let r = await serverInfer(main, wavPath);
   let lang = r.lang || "auto";
   if (eng.modelHe && /^(he|iw|hebrew)$/i.test(lang)) {
