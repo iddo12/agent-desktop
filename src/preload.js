@@ -134,6 +134,12 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("terminal-exit", (event, payload) => callback(payload));
   },
 
+  // v1.72.0 My Daily (renderer/daily.js)
+  daily: {
+    load: (force) => ipcRenderer.invoke("daily-load", { force: !!force }),
+    setSettings: (patch) => ipcRenderer.invoke("daily-settings-set", patch),
+    createShoppingList: (name) => ipcRenderer.invoke("daily-shopping-create-list", { name }),
+  },
   // v1.55.0 IRIS (renderer/iris.js)
   iris: {
     status: () => ipcRenderer.invoke("iris-status"),

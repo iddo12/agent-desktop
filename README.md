@@ -77,6 +77,10 @@ Both scripts find the registry the same way the app does: the `AGENT_DESKTOP_ROO
 
 Keep the registry to destinations you would actually go back to. Registering every script buries the few things you want to find again.
 
+## My Daily
+
+A single view for the day: today's schedule, your most important tasks (read from the same task store your agents write to), shopping lists, emails that need an answer, and birthdays. It has its own entry in the sidebar with a badge (open tasks, blue when something needs you) and a hover summary. Nothing runs in the background: it loads when you open it. Email and calendar are not connected in this version, so those parts show clearly labelled demo data. Data lives in plain JSON files under a `daily` folder next to your agents.
+
 ## Requirements
 
 - Windows (developed and tested there; the Electron/node-pty parts are cross-platform in principle, but paths and the launch scripts currently assume Windows)

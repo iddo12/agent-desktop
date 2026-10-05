@@ -1,0 +1,133 @@
+/* My Daily (v1.72.0). Look follows the v4 mockups; colours come from the app tokens where they exist. */
+:root { --daily-blue: #3f7fd0; --daily-blue-bg: #e8f0fb; --daily-warn-bg: #faf1e6; --daily-ok-bg: #e8f5ee; }
+
+/* ---- sidebar entry ---- */
+.daily-nav {
+  margin: 0 12px 8px; padding: 9px 12px; display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel);
+  color: var(--text); font: inherit; cursor: pointer; text-align: left;
+}
+.daily-nav:hover { background: var(--bg-hover); }
+.daily-nav.active { border-color: var(--accent); background: var(--bg-active); }
+.daily-nav-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--health-healthy); flex: none; }
+.daily-nav-dot.blue { background: var(--daily-blue); }
+.daily-nav-name { flex: 1; min-width: 0; font-weight: 700; letter-spacing: .06em; font-size: 13px; }
+.daily-nav-badge { min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: var(--accent); color: #fff;
+  font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.daily-nav-badge.blue { background: var(--daily-blue); }
+.daily-nav-badge.hidden { display: none; }
+body.argus-open .daily-nav, body.iris-open .daily-nav { display: none; }
+
+body.daily-open #chat-view,
+body.daily-open #empty-state,
+body.daily-open #library-view,
+body.daily-open #argus-view,
+body.daily-open #iris-view,
+body.daily-open #xp-panel { display: none !important; }
+
+/* ---- view shell ---- */
+#daily-view { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--bg-app); position: relative; }
+#daily-view.hidden { display: none; }
+.daily-head { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg-panel); }
+.daily-title { font-size: 15px; }
+.daily-date { color: var(--text-muted); font-size: 12px; }
+.daily-sp { flex: 1; }
+.daily-muted { color: var(--text-muted); }
+.daily-btn { font: inherit; color: var(--text); background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; height: 30px;
+  padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.daily-btn:hover { background: var(--bg-hover); }
+.daily-btn.pri { background: var(--accent); border-color: var(--accent); color: #fff; }
+.daily-btn.pri:hover { background: var(--accent-2); }
+.daily-btn.on { background: var(--bg-active); }
+.daily-btn.sm { height: 24px; padding: 0 8px; font-size: 12px; }
+.daily-refresh { padding: 0 9px; color: var(--text-muted); }
+.daily-tabs { display: flex; gap: 6px; padding: 8px 16px 0; background: var(--bg-panel); border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+.daily-tab { font: inherit; color: var(--text); border: 0; border-bottom: 2px solid transparent; background: none; height: 32px; padding: 0 12px;
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; flex: none; }
+.daily-tab:hover { background: var(--bg-hover); }
+.daily-tab.on { border-bottom-color: var(--accent); font-weight: 600; }
+.daily-n { background: var(--accent); color: #fff; border-radius: 10px; padding: 0 7px; font-size: 12px; font-weight: 700; line-height: 17px; cursor: pointer; display: inline-block; }
+.daily-n.blue { background: var(--daily-blue); }
+.daily-body { flex: 1; overflow-y: auto; padding: 14px 16px 30px; }
+.daily-toast { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); background: #26241f; color: #fff; border-radius: 8px; padding: 8px 14px; font-size: 13px; z-index: 5; max-width: 80%; }
+.daily-toast.hidden { display: none; }
+.daily-pad { padding: 8px 0; }
+.daily-error { color: var(--health-critical); }
+
+/* ---- Today ---- */
+.daily-today, .daily-plain { display: flex; flex-direction: column; gap: 14px; max-width: 1100px; }
+.daily-strip { display: flex; gap: 10px; flex-wrap: wrap; }
+.daily-chip { font: inherit; color: var(--text); background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 7px 12px; min-width: 150px; text-align: left; }
+.daily-chip:hover { background: var(--bg-hover); }
+.daily-chip-big { font-size: 20px; font-weight: 700; line-height: 1.1; }
+.daily-chip small { color: var(--text-muted); font-size: 11px; min-height: 1em; }
+.daily-two { display: flex; gap: 14px; }
+.daily-two .grow { flex: 1; min-width: 0; min-height: 230px; }
+.daily-card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.daily-card-h { margin: 0 0 8px; font-size: 12.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--text-muted); display: flex; align-items: center; gap: 8px; }
+.daily-card-h .daily-btn { text-transform: none; letter-spacing: 0; }
+.daily-ev { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.daily-ev:last-child { border: 0; }
+.daily-tm { width: 96px; flex: none; color: var(--text-muted); }
+.daily-ev.now { background: var(--daily-blue-bg); margin: 0 -12px; padding: 6px 12px; box-shadow: inset 3px 0 0 var(--daily-blue); }
+.daily-tk { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.daily-tk:last-of-type { border-bottom: 0; }
+.daily-ti { flex: 1; min-width: 0; }
+.daily-tk small, .daily-ev small { color: var(--text-muted); font-size: 12px; }
+.daily-acct { font-size: 11.5px; border-radius: 5px; padding: 1px 6px; background: var(--bg-hover); color: var(--text-muted); white-space: nowrap; }
+.daily-imp { letter-spacing: 1px; font-size: 11px; }
+.daily-leg { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; }
+.daily-st { font-size: 11px; font-weight: 600; border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
+.daily-st.w { background: var(--daily-ok-bg); color: #116c33; }
+.daily-st.wait { background: var(--daily-warn-bg); color: var(--health-warning); }
+.daily-st.you { background: var(--daily-blue-bg); color: #2a63ac; }
+.daily-st.q { background: #eee; color: #555; }
+.daily-pri { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.daily-pri-tr { width: 58px; height: 10px; border: 1px solid #bdb8a8; border-radius: 5px; background: #fff; overflow: hidden; display: block; }
+.daily-pri-fl { display: block; height: 100%; border-right: 1px solid rgba(0,0,0,.25); }
+.daily-pri b { width: 18px; text-align: right; font-size: 13px; }
+.daily-scope { font-size: 11.5px; font-weight: 600; border-radius: 5px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-muted); white-space: nowrap; }
+.daily-scope.biz { color: #2a63ac; border-color: #b9d0ee; }
+.daily-scope.per { color: #7a4a8c; border-color: #d9c3e2; }
+.daily-cat { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
+.daily-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; font-size: 12px; }
+.daily-sw { width: 18px; height: 18px; border: 1px solid #bdb8a8; border-radius: 4px; display: inline-block; text-align: center; font-size: 10px; line-height: 16px; color: #222; }
+.daily-banner { background: #fff8e6; border: 1px solid #e8d99a; color: #6b5900; padding: 9px 12px; border-radius: 8px; font-size: 13px; }
+.daily-banner.info { background: var(--daily-blue-bg); border-color: #b9d0ee; color: #2a63ac; }
+
+/* ---- empty state, settings, new list ---- */
+.daily-empty { margin: 60px auto; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.daily-empty-ico { width: 44px; height: 44px; border-radius: 50%; background: var(--daily-ok-bg); color: var(--health-healthy); font-size: 22px; display: flex; align-items: center; justify-content: center; }
+.daily-set { display: flex; gap: 14px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); }
+.daily-set:first-of-type { border-top: 0; }
+.daily-set > div:first-child { flex: 1; min-width: 0; }
+.daily-set .sm { font-size: 12px; }
+.daily-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.daily-seg .daily-btn { border: 0; border-radius: 0; height: 28px; }
+.daily-seg .daily-btn.on { background: var(--accent); color: #fff; }
+.daily-newlist { display: flex; gap: 8px; margin-top: 6px; }
+.daily-input { font: inherit; padding: 5px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); color: var(--text); min-width: 240px; }
+
+/* ---- hover digest (fixed, so it floats over the chat area) ---- */
+.daily-digest { position: fixed; z-index: 60; width: 330px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.2); padding: 12px 14px; font-size: 13.5px; }
+.daily-digest.hidden { display: none; }
+.daily-digest h4 { margin: 0 0 6px; font-size: 13px; font-weight: 400; }
+.daily-dg-row { display: flex; gap: 10px; align-items: flex-start; width: 100%; font: inherit; color: var(--text); background: none; border: 0;
+  border-top: 1px solid var(--border); padding: 7px 0; text-align: left; cursor: pointer; }
+.daily-dg-row:first-of-type { border-top: 0; }
+.daily-dg-row:hover { background: var(--bg-hover); }
+.daily-dg-n { min-width: 21px; height: 21px; border-radius: 11px; color: #fff; font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.daily-dg-n.tasks { background: var(--daily-blue); } .daily-dg-n.emails { background: var(--health-warning); } .daily-dg-n.sent { background: var(--accent); }
+.daily-dg-time, .daily-dg-date { width: 38px; flex: none; font-size: 13px; line-height: 1.15; }
+.daily-dg-date { display: flex; flex-direction: column; }
+.daily-dg-txt { display: flex; flex-direction: column; min-width: 0; }
+.daily-dg-txt small { font-size: 11.5px; }
+.daily-dg-empty { padding: 6px 0; }
+.daily-dg-foot { color: var(--text-muted); font-size: 11.5px; line-height: 1.45; margin-top: 8px; }
+
+@media (max-width: 900px) {
+  .daily-two { flex-direction: column; }
+  .daily-chip { flex: 1 1 40%; min-width: 0; }
+}

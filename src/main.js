@@ -4539,6 +4539,18 @@ app.whenReady().then(() => {
   }
 });
 
+// v1.72.0 My Daily - tasks, schedule, shopping and email overview. No timers; loads on demand (see daily/main-daily.js).
+try {
+  require("./daily/main-daily").init({
+    ipcMain,
+    root: process.env.AGENT_DESKTOP_ROOT || path.resolve(__dirname, "..", ".."),
+    testMode: testMode.TEST_MODE,
+    log: (line) => logStuckWatchdog(line),
+  });
+} catch (e) {
+  console.error("my daily failed to load:", e);
+}
+
 // --- Chats panel (per-agent conversation list / switch / rename) -----------
 //
 // Each agent's `.claude-session` cwd accumulates one <sessionId>.jsonl per
