@@ -1090,6 +1090,7 @@ if (!gotSingleInstanceLock) {
     setInterval(() => {
       checkForHaltedTurns().catch((e) => logStuckWatchdog(`checkForHaltedTurns error: ${e.message}`));
       try { if (keepGoing) keepGoing.tick(); } catch (e) { logStuckWatchdog(`keepgoing tick error: ${e.message}`); }
+      try { if (keepGoingAttach) keepGoingAttach.tick().catch((e) => logStuckWatchdog(`keepgoing-attach error: ${e.message}`)); } catch (e) { logStuckWatchdog(`keepgoing-attach error: ${e.message}`); }
     }, STUCK_CHECK_INTERVAL_MS);
     setInterval(() => {
       try {
@@ -3418,6 +3419,39 @@ try {
 } catch (e) {
   console.error("keep-going failed to load:", e);
   keepGoing = null;
+}
+// v1.75.0: attach (never dispatch) to the running background agents that "Keep working regardless" is ON for, so an agent Iddo
+// does not open after an app restart can still be nudged. One agent per tick; see src/keepGoingAttach.js for the duplicate guard.
+let keepGoingAttach = null;
+try {
+  keepGoingAttach = require("./keepGoingAttach").create({
+    log: (line) => logStuckWatchdog(line),
+    fleet: () => { const s = keepGoing && keepGoing.getSettings(); return !!(s && s.relentless && s.relentless.fleet); },
+    relentlessAgents: () => { const s = keepGoing && keepGoing.getSettings(); return (s && s.relentless && s.relentless.agents) || []; },
+    listed: () => listAgents().map((a) => a.path),
+    attachedSet: () => new Set(ptySessions.keys()),
+    spawningSet: () => new Set(attachSpawning.keys()),
+    blocked: () => {
+      if (!keepGoing) return true;
+      if (testMode.TEST_MODE && !testMode.liveAgentsPermitted()) return true;
+      try { // the CPU guard's hold: no new work while the PC is overloaded
+        const SL = require("./startLimiter");
+        const info = SL.readHoldFile(path.join(require("./cpuGuardInstall").defaultStateDir(), "state", "fleet_hold.json"));
+        return !!(info && SL.holdIsActive(info, Date.now(), undefined, info.mtimeMs));
+      } catch (e) { return false; }
+    },
+    claim: (p) => { ptySessions.set(p, { starting: true, pendingInput: [] }); },
+    release: (p) => { const s = ptySessions.get(p); if (s && s.starting) ptySessions.delete(p); },
+    findAlive: async (p) => {
+      const shell = process.platform === "win32" ? resolveClaudeExecutable() : "claude";
+      const spawnEnv = { ...process.env, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", ...CLAUDE_AUTOUPDATER_DISABLE_ENV };
+      return findAliveBackgroundAgent(shell, spawnEnv, sessionCwdFor(p)); // find only: dispatching is deliberately not reachable from here
+    },
+    attach: async (p, agentId) => { await startTerminalSession(p, sessionCwdFor(p), 120, 30, agentId, false, false, "keepgoing-attach"); },
+  });
+} catch (e) {
+  console.error("keep-going attach failed to load:", e);
+  keepGoingAttach = null;
 }
 ipcMain.handle("get-connection-states", () => connHealth.getAll());
 
