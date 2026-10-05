@@ -1091,7 +1091,38 @@ function readArchivedDay(agentPath, dateKey) {
 // turn), or - deliberately - if the window it describes has already reset
 // (`resets_at` in the past), since a stale figure from an expired window is
 // actively misleading, not just imprecise.
+// 2026-10-05: the statusLine cache froze for 22 h (settings.json BOM) and the badge kept showing 74% against a
+// real 84%. When the statusLine figures are missing or older than 15 min, fall back to the Optimization agent's
+// usage model (UsageModel/data/usage_now.json, refreshed every ~5 min from real readings plus usage since).
+// Only used when that file itself is fresh; the 5h window only when its basis is not "model only". Silently
+// absent on machines without that agent (e.g. Merav's), where behaviour is unchanged.
+const FRESH_FALLBACK_SECONDS = 15 * 60;
+function usageModelFallback(kind) {
+  try {
+    const p = path.join(__dirname, "..", "..", "System Optimization & Maintenance Agent", "UsageModel", "data", "usage_now.json");
+    const d = JSON.parse(fs.readFileSync(p, "utf-8").replace(/^\uFEFF/, ""));
+    const ageSeconds = Math.max(0, Math.round((Date.now() - Date.parse(d.at)) / 1000));
+    if (!(ageSeconds <= FRESH_FALLBACK_SECONDS)) return null;
+    const w = d.windows && d.windows[kind];
+    if (!w || typeof w.usedPct !== "number") return null;
+    if (kind === "5h" && /^model only/i.test(w.basis || "")) return null;
+    const resetsAt = w.resetsAt ? Math.round(Date.parse(w.resetsAt) / 1000) : null;
+    if (resetsAt && resetsAt < Date.now() / 1000) return null;
+    return { usedPct: w.usedPct, resetsAt, ageSeconds, source: "usage-model" };
+  } catch (e) {
+    return null;
+  }
+}
+
 function getConfirmedRateLimits() {
+  const r = getConfirmedRateLimitsFromStatusLine();
+  const old = (x) => !x || typeof x.ageSeconds !== "number" || x.ageSeconds > FRESH_FALLBACK_SECONDS;
+  if (old(r.fiveHour)) r.fiveHour = usageModelFallback("5h") || r.fiveHour;
+  if (old(r.sevenDay)) r.sevenDay = usageModelFallback("7d") || r.sevenDay;
+  return r;
+}
+
+function getConfirmedRateLimitsFromStatusLine() {
   const nowSec0 = Date.now() / 1000;
   // v1.54.1: prefer statusline.cjs's per-session record. The single cache below
   // is rewritten every 60 s by EVERY open session, idle ones included, each

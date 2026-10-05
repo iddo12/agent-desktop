@@ -2771,7 +2771,7 @@ async function refreshUsageWindows() {
     const weekTooOld = typeof windows.sevenDayConfirmed.ageSeconds === "number" && windows.sevenDayConfirmed.ageSeconds > NO_NUMBER_AFTER_SECONDS;
     weeklyUsageEl.textContent = weekTooOld ? `7d: stale since ${staleSinceText(windows.sevenDayConfirmed.ageSeconds)}` : `${pct}% (7d)`;
     weeklyUsageEl.title =
-      `${pct}% of your weekly rate limit used, reported directly by Anthropic (rate_limits.seven_day), not estimated ` +
+      `${pct}% of your weekly rate limit used, ${windows.sevenDayConfirmed.source === "usage-model" ? "from the Optimization agent's usage model (real readings plus usage since; the statusLine cache is stale)" : "reported directly by Anthropic (rate_limits.seven_day), not estimated"} ` +
       `- as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while an INTERACTIVE terminal ` +
       `Claude Code session is open (this app's own attached agents, or a real terminal) - a session running through ` +
       `Claude Desktop's own native/embedded agent mode does NOT refresh this, even while actively burning real usage, ` +
