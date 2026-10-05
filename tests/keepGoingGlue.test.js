@@ -275,6 +275,10 @@ const tick = async (w, advance) => { w.t += advance == null ? 0 : advance; w.g.t
     await tick(w2);
     t("restart: relentless order survives, BLOCKED gets the next-project nudge", () => { assert.strictEqual(w2.g.relentlessFor("A"), true); assert.strictEqual(w2.sent.length, 1); assert.strictEqual(w2.sent[0].text, K.NEXT_PROJECT_TEXT); });
     t("restart: decisions survive", () => assert.ok(w2.g.snapshot("A").decisions.length >= 2));
+    // v1.74.4: a decision from before this app start is not the current reason; an unreachable agent says so
+    const w3 = world({ saved: Object.assign({}, JSON.parse(JSON.stringify(w.saved)), { decisions: { A: [{ at: 1, verdict: "blocked", reason: "fleet throttle is HOLD", kind: null }] } }) });
+    t("snapshot: a decision older than the app start is not shown as the reason", () => assert.strictEqual(w3.g.snapshot("A").why, null));
+    t("snapshot: attached / deliveryFailed fields exist", () => { const sn = w3.g.snapshot("A"); assert.strictEqual(typeof sn.attached, "boolean"); assert.strictEqual(sn.deliveryFailed, false); });
     w.g.setRelentless("A", false);
     t("switching off removes it", () => assert.deepStrictEqual(w.saved.relentless, { fleet: false, agents: {} }));
   }

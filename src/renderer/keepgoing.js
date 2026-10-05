@@ -29,8 +29,10 @@
     if (!s || !s.relentless && !s.outOfProjects) return null;
     if (s.outOfProjects) return "Out of projects: " + (s.outOfProjectsReason || "NOTHING-LEFT").replace(/^NOTHING-LEFT:\s*/, "");
     if (s.state === "stopped") return "Stopped: " + (s.reason || "nudges did not help");
+    if (s.relentless && s.attached === false) return "Not connected: the app has no terminal on this agent, so it cannot be nudged. Open the agent once.";
+    if (s.relentless && s.deliveryFailed) return "The last nudge did not reach the agent (dead terminal). Use Session > Restart Session.";
     const w = s.why;
-    if (!w) return null;
+    if (!w) return s.relentless ? "Not judged yet since the app started." : null;
     const d = new Date(w.at), hh = (x) => (x < 10 ? "0" : "") + x;
     return w.reason + " (since " + hh(d.getHours()) + ":" + hh(d.getMinutes()) + ")";
   };

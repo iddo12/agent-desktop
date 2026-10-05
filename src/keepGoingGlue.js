@@ -67,7 +67,12 @@ function create(deps) {
       mission: !!(P.mission[p] && P.mission[p].active),
       relentless: relentlessFor(p), agentRelentless: P.relentless.agents[p] === true, fleetRelentless: P.relentless.fleet === true,
       outOfProjects: !!(c.nothingLeft), outOfProjectsReason: c.nothingLeft ? c.nothingLeft.reason : "",
-      why: dec.length ? dec[dec.length - 1] : null, decisions: dec.slice() };
+      // v1.74.4: a decision made before this app start is stale (it showed "fleet throttle is HOLD" long after the HOLD was gone):
+      // not shown as the current reason. `attached` = the app has a terminal on this agent (agents it cannot reach are never judged);
+      // `deliveryFailed` = the last nudge was typed but never reached the transcript (dead terminal: Session > Restart Session).
+      why: dec.length && dec[dec.length - 1].at >= bornAt ? dec[dec.length - 1] : null, decisions: dec.slice(),
+      attached: (() => { try { return (deps.agents() || []).includes(p); } catch (e) { return true; } })(),
+      deliveryFailed: !!(R(p).failures > 0) };
   }
   // keep the last DECISIONS_KEPT decisions; an unchanged decision is not stored again (small file). Returns true when stored.
   function record(p, verdict, reason, kind) {
@@ -220,6 +225,7 @@ function create(deps) {
           return;
         }
         r.failures = (r.failures || 0) + 1;
+        emit(p);
         log("keepgoing: nudge to " + p + " NOT confirmed in the transcript (" + ((res && res.attempts) || 0) + " attempts), failure " + r.failures);
         c.consecutive = prev.consecutive; c.lastNudgeAt = prev.lastNudgeAt; c.hashes = prev.hashes; c.recent.pop(); dirty = true;
         if (r.failures >= 3) { markStopped(p, "the nudge could not be delivered (3 attempts)"); r.failures = 0; }
