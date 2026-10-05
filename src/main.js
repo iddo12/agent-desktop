@@ -27,6 +27,7 @@ const testMode = require("./testMode");
 const overview = require("./overview");
 const registry = require("./registry");
 const argus = require("./argus-data");
+const memoryData = require("./memory-data");
 const workspaceTrust = require("./workspaceTrust");
 const appUpdate = require("./app-update");
 
@@ -4351,6 +4352,8 @@ ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(
 const ARGUS_WORKSPACE = "D:\\Dropbox\\Claude stuff";
 ipcMain.handle("argus-data", (event, opts) => argus.getArgusData(ARGUS_WORKSPACE, opts || {}));
 ipcMain.handle("argus-decision-count", () => argus.getDecisionCount(ARGUS_WORKSPACE));
+ipcMain.handle("memory-data", () => memoryData.getMemoryData(ARGUS_WORKSPACE));
+ipcMain.handle("memory-open-folder", (event, key) => memoryData.openMemoryFolder(ARGUS_WORKSPACE, key));
 // Drill-down (v1.42.0): opening the report behind a number. argus-data
 // validates the path against the links the status files themselves publish,
 // so a renderer cannot ask for an arbitrary file.
