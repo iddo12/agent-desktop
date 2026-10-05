@@ -142,6 +142,7 @@ contextBridge.exposeInMainWorld("api", {
     shopping: (args) => ipcRenderer.invoke("daily-shopping", args),
     thumbs: (names) => ipcRenderer.invoke("daily-thumbs", names),
     editTask: (args) => ipcRenderer.invoke("daily-task-edit", args),
+    addTask: (task) => ipcRenderer.invoke("daily-task-add", task),
     saveDate: (item) => ipcRenderer.invoke("daily-dates-save", item),
     deleteDate: (id) => ipcRenderer.invoke("daily-dates-delete", { id }),
     saveAppointment: (item) => ipcRenderer.invoke("daily-appointment-save", item),

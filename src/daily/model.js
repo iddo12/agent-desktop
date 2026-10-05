@@ -256,6 +256,26 @@ function taskEditArgs(task, change) {
   a.push("--tags", tags.join(","));
   return a;
 }
+// New task from a voice recording (phase 4): validates, then builds the tasks.py arguments. area "Personal" adds the
+// "personal" tag (that is how the Tasks tab tells areas apart); priority 1-10 is stored the same way edits do it.
+function cleanNewTask(raw) {
+  const r = raw || {};
+  const title = String(r.title == null ? "" : r.title).replace(/\s+/g, " ").trim().slice(0, 200);
+  if (!title) return { error: "A task needs a title." };
+  const agent = String(r.agent == null ? "" : r.agent).trim();
+  if (!agent || agent.length > 60 || /^-/.test(agent) || /[\\\/:*?"<>|]/.test(agent)) return { error: "Pick which agent owns the task." };
+  const p = Number(r.priority == null ? 5 : r.priority);
+  if (!Number.isInteger(p) || p < 1 || p > 10) return { error: "Priority must be 1-10." };
+  const list = String(r.list || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  const area = r.area === "Personal" ? "Personal" : "Business";
+  const tags = ["p" + p].concat(area === "Personal" ? ["personal"] : []).concat(["voice"]);
+  return { task: { title, agent, priority: p, list, area, tags } };
+}
+function taskAddArgs(t) {
+  const a = ["--agent", t.agent, "--add", t.title, "--priority", String(t.priority >= 8 ? 1 : t.priority >= 4 ? 2 : 3), "--tags", t.tags.join(",")];
+  if (t.list) a.push("--group", t.list);
+  return a;
+}
 // The same edit applied to a mapped task in memory (fixtures in test mode).
 function applyTaskEdit(task, change) {
   const t = Object.assign({}, task);
@@ -304,6 +324,12 @@ function shoppingOp(s, op, now) {
     if (op.detailsMissing) it.detailsMissing = true;
     l.items.push(it);
     return { ok: true, item: it };
+  }
+  if (op.op === "add-many") {   // voice: several items at once, one write
+    const texts = (Array.isArray(op.texts) ? op.texts : []).map((x) => String(x || "").trim().slice(0, 200)).filter(Boolean).slice(0, 30);
+    if (!texts.length) return { ok: false, reason: "There is nothing to add." };
+    for (const text of texts) l.items.push({ id: newId("i"), text, added: iso, addedBy: String(op.addedBy || "Iddo").slice(0, 60) });
+    return { ok: true, added: texts.length };
   }
   const it = l.items.find((x) => x.id === op.itemId);
   if (!it) return { ok: false, reason: "That item no longer exists." };
@@ -377,7 +403,7 @@ function cleanAppointment(raw) {
 
 module.exports = {
   waitClass, IMPORTANCE_LABEL, emailAccountCounts, filterByAccount, dayKey, monthGrid, scheduleEntries, sixMonths, cleanAppointment, dayAt,
-  filterTasks, taskListCounts, taskEditArgs, applyTaskEdit,
+  filterTasks, taskListCounts, taskEditArgs, applyTaskEdit, cleanNewTask, taskAddArgs,
   DONE_HOLD_MS, ARCHIVE_KEEP_MS, sweepShopping, shoppingOp, shoppingCounts, shoppingShareText, findList, cleanDate,
   DAY, ageDays, priority10, taskStatus, STATUS_LABEL, mapTaskStores, fixtureTasks, placeholderEmails, placeholderEvents,
   nextOccurrence, upcomingDates, shoppingSummary, nextEvent, summarize, badge, buildDigest, clock, dateLabel, cleanSettings, DEFAULT_SETTINGS,

@@ -214,6 +214,60 @@ t("cleanAppointment: needs who and a valid start; end defaults to +1 h; fields t
   assert.strictEqual(M.cleanAppointment({ id: "k", who: "Z", start: NOW }).item.id, "k");
 });
 
+// ---- phase 4: voice transcript parsing (src/daily/voiceparse.js)
+const VP = require("../src/daily/voiceparse");
+const MON = Date.parse("2026-10-05T10:00:00");   // a Monday
+const stamp = (r) => r.label;
+t("voice shopping split: commas, and, quantities, filler", () => {
+  assert.deepStrictEqual(VP.splitItems("milk, eggs and two loaves of bread"), ["Milk", "Eggs", "2 loaves of bread"]);
+  assert.deepStrictEqual(VP.splitItems("Add apples and bananas to the shopping list."), ["Apples", "Bananas"]);
+  assert.deepStrictEqual(VP.splitItems("milk, Milk, MILK"), ["Milk"]);
+  assert.deepStrictEqual(VP.splitItems("חלב, ביצים ועוד לחם"), ["חלב", "ביצים", "לחם"]);
+  assert.deepStrictEqual(VP.splitItems("   "), []);
+  assert.strictEqual(VP.splitItems(Array.from({ length: 50 }, (_, i) => "item" + i).join(", ")).length, 30);
+});
+t("voice task title strips the spoken command", () => {
+  assert.strictEqual(VP.taskTitle("Add a task to renew the car insurance."), "Renew the car insurance");
+  assert.strictEqual(VP.taskTitle("remind me to call Dana"), "Call Dana");
+  assert.strictEqual(VP.taskTitle("pay the invoice"), "Pay the invoice");
+  assert.strictEqual(VP.taskTitle(""), "");
+});
+t("voice appointment: dates and times", () => {
+  let r = VP.parseAppointment("meeting on the 14th with Yossi at three", MON);
+  assert.strictEqual(stamp(r), "2026-10-14 15:00"); assert.strictEqual(r.who, "Meeting with Yossi");
+  assert.strictEqual(stamp(VP.parseAppointment("tomorrow at 5 dentist", MON)), "2026-10-06 17:00");
+  r = VP.parseAppointment("Tuesday 14:30 lunch with Dana", MON);
+  assert.strictEqual(stamp(r), "2026-10-06 14:30"); assert.strictEqual(r.who, "Lunch with Dana");
+  assert.strictEqual(stamp(VP.parseAppointment("Monday 9 am gym", MON)), "2026-10-12 09:00");   // same weekday = next week
+  r = VP.parseAppointment("call the accountant next week", MON);
+  assert.strictEqual(stamp(r), "2026-10-12 09:00"); assert(r.hasDate && !r.hasTime);
+  r = VP.parseAppointment("meet Yossi on October 20th at 3:30 pm for two hours", MON);
+  assert.strictEqual(stamp(r), "2026-10-20 15:30"); assert.strictEqual((r.end - r.start) / 60000, 120);
+  assert.strictEqual(stamp(VP.parseAppointment("14/10 dentist at 11", MON)), "2026-10-14 11:00");
+  assert.strictEqual(stamp(VP.parseAppointment("פגישה מחר בשעה 4 עם דנה", MON)), "2026-10-06 16:00");
+  assert.strictEqual(stamp(VP.parseAppointment("יום חמישי בשעה 10 רופא", MON)), "2026-10-08 10:00");
+});
+t("voice appointment: nothing understood leaves the date empty; a time already past means tomorrow", () => {
+  const r = VP.parseAppointment("dentist", MON);
+  assert(!r.hasDate && !r.hasTime && r.start === 0); assert.strictEqual(r.who, "Dentist");
+  assert.strictEqual(stamp(VP.parseAppointment("coffee at 9 am", MON)), "2026-10-06 09:00");
+  assert.strictEqual(stamp(VP.parseAppointment("coffee at 9 am today", MON)), "2026-10-05 09:00");
+});
+t("voice: task add validation and tasks.py arguments", () => {
+  assert(M.cleanNewTask({ title: "  ", agent: "Security" }).error);
+  assert(M.cleanNewTask({ title: "x", agent: "--delete" }).error);
+  assert(M.cleanNewTask({ title: "x", agent: "a" + String.fromCharCode(92) + "b" }).error); assert(M.cleanNewTask({ title: "x", agent: "a/b" }).error);
+  assert(M.cleanNewTask({ title: "x", agent: "A", priority: 11 }).error);
+  const c = M.cleanNewTask({ title: "Renew insurance", agent: "Personal Assistant", priority: 6, area: "Personal", list: "Home" });
+  assert.deepStrictEqual(M.taskAddArgs(c.task), ["--agent", "Personal Assistant", "--add", "Renew insurance", "--priority", "2", "--tags", "p6,personal,voice", "--group", "Home"]);
+});
+t("voice: shopping add-many adds all items with added-by Voice in one go", () => {
+  const s = { lists: [{ id: "l1", name: "Groceries", items: [] }] };
+  const r = M.shoppingOp(s, { op: "add-many", listId: "l1", texts: ["Milk", " ", "Eggs"], addedBy: "Voice" }, NOW);
+  assert(r.ok && r.added === 2); assert.deepStrictEqual(s.lists[0].items.map((i) => i.text + "/" + i.addedBy), ["Milk/Voice", "Eggs/Voice"]);
+  assert(!M.shoppingOp(s, { op: "add-many", listId: "l1", texts: [] }, NOW).ok);
+});
+
 (async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "daily-test-"));
   fs.mkdirSync(path.join(root, "shared_reports", "tasks"), { recursive: true });
@@ -276,6 +330,11 @@ t("cleanAppointment: needs who and a valid start; end defaults to +1 h; fields t
       assert.deepStrictEqual(ran[0], ["--agent", "Security", "--update", "a", "--status", "blocked", "--set-needs-iddo", "no", "--priority", "2", "--tags", "p6"]);
       assert(!(await h2["daily-task-edit"](null, { agent: "Security", id: "zzz", status: "needs" })).ok);
       assert(!(await h2["daily-task-edit"](null, { agent: "Security", id: "a", priority: 99 })).ok);
+      // voice: add a task through the same runner (real store mode); bad agent names never reach it
+      ran.length = 0;
+      assert((await h2["daily-task-add"](null, { title: "Call Dana", agent: "Security", priority: 7, area: "Business" })).ok);
+      assert.deepStrictEqual(ran[0], ["--agent", "Security", "--add", "Call Dana", "--priority", "2", "--tags", "p7,voice"]);
+      assert(!(await h2["daily-task-add"](null, { title: "x", agent: "-bad" })).ok); assert.strictEqual(ran.length, 1);
       // dates
       assert((await h2["daily-dates-save"](null, { title: "Yossi", month: 3, day: 22, kind: "birthday" })).ok);
       assert(!(await h2["daily-dates-save"](null, { title: "", month: 3, day: 22 })).ok);

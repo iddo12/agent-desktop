@@ -255,3 +255,20 @@ button.daily-st { border: 0; font: inherit; font-size: 11px; font-weight: 600; c
 #daily-view.narrow .daily-mon-c { min-height: 60px; }
 #daily-view.narrow .daily-chipx { font-size: 10.5px; }
 #daily-view.narrow .daily-appt, #daily-view.more .daily-appt { right: 0; left: 0; width: auto; }
+
+/* ---- voice record (phase 4) ---- */
+.daily-voice { margin: 8px 0; }
+.daily-voice-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.daily-voice.recording { border-color: #c93a2a; background: #fdf1ee; }
+.daily-voice.error { border-color: #c93a2a; }
+.daily-voice-err { color: #b3261e; font-weight: 600; }
+.daily-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); flex: none; }
+.daily-rec-dot.on { background: #c93a2a; box-shadow: 0 0 0 3px rgba(201, 58, 42, .25); }
+.daily-btn.recording { background: #c93a2a; border-color: #c93a2a; color: #fff; }
+.daily-review { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.daily-review-items { display: flex; flex-direction: column; gap: 6px; }
+.daily-review-item { display: flex; gap: 6px; align-items: center; }
+.daily-review .daily-input { min-width: 0; }
+.daily-review select.daily-input { width: auto; align-self: flex-start; }
+.daily-voice-note { background: var(--daily-blue-bg); border: 1px solid var(--daily-blue); border-radius: 8px; padding: 6px 10px; margin-bottom: 8px; font-size: 13px; }
+@media (prefers-color-scheme: dark) { .daily-voice.recording { background: #3a1f1a; } }

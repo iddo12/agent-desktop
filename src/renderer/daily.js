@@ -111,6 +111,7 @@
   // Width watcher: event-driven (no timer) and only attached while My Daily is open.
   let ro = null;
   function closeView() {
+    cancelVoice();
     closePop();
     if (ro) { ro.disconnect(); ro = null; }
     document.body.classList.remove("daily-open");
@@ -353,6 +354,151 @@
     return false;
   }
 
+  // ---------------------------------------------------------------- Voice record (phase 4)
+  // One recording at a time. voice = {kind: "tasks"|"shopping"|"schedule", phase: starting|recording|transcribing|error|review, handle, text, msg, review}.
+  // The microphone exists only while phase is "recording"; leaving the tab, closing My Daily or Cancel releases it.
+  let voice = null;
+  const VP = () => window.dailyVoiceParse;
+  function cancelVoice() {
+    if (voice && voice.handle) { try { voice.handle.cancel(); } catch (e) { /* already released */ } }
+    voice = null;
+  }
+  async function startVoice(kind) {
+    if (voice && voice.kind === kind && voice.phase === "recording") { stopVoice(); return; }
+    if (voice && (voice.phase === "starting" || voice.phase === "transcribing")) return;
+    cancelVoice();
+    if (!window.dailyVoice) { say("Voice recording is not available in this build."); return; }
+    const mine = (voice = { kind, phase: "starting" });
+    render();
+    let r;
+    try { r = await window.dailyVoice.begin(() => { if (voice === mine) stopVoice(); }); } catch (e) { r = { ok: false, error: "Could not start recording." }; }
+    if (voice !== mine) { if (r && r.ok) r.cancel(); return; }    // cancelled while the mic was starting
+    if (!r.ok) { mine.phase = "error"; mine.msg = r.error; render(); return; }
+    mine.handle = r; mine.phase = "recording"; render();
+  }
+  async function stopVoice() {
+    const mine = voice;
+    if (!mine || mine.phase !== "recording") return;
+    mine.phase = "transcribing"; render();
+    let res;
+    try { res = await mine.handle.stop(); } catch (e) { res = { ok: false, error: "Transcription failed." }; }
+    if (voice !== mine) return;                                   // cancelled meanwhile
+    mine.handle = null;
+    if (!res.ok) { mine.phase = "error"; mine.msg = res.error; render(); return; }
+    mine.text = res.text;
+    try {
+      if (mine.kind === "shopping") {
+        const items = VP().splitItems(res.text);
+        if (!items.length) { mine.phase = "error"; mine.msg = "I could not find any items in what was said."; render(); return; }
+        mine.review = { items };
+      } else if (mine.kind === "tasks") {
+        const title = VP().taskTitle(res.text);
+        if (!title) { mine.phase = "error"; mine.msg = "I could not find a task in what was said."; render(); return; }
+        const agents = Array.from(new Set((payload.data.tasks || []).map((t) => t.agent).concat(["Personal Assistant"])));
+        mine.review = { title, agent: "Personal Assistant", agents, area: tf.area === "Business" ? "Business" : "Personal", priority: 5, list: tf.list === "(no list)" ? "" : tf.list };
+      } else {
+        const p = VP().parseAppointment(res.text, payload.now);
+        const keep = apptForm && apptForm.id ? { id: apptForm.id } : {};
+        apptForm = Object.assign(keep, { who: p.who, voiceText: res.text, voiceMissing: [p.hasDate ? "" : "date", p.hasTime ? "" : "time"].filter(Boolean) });
+        if (p.start) { apptForm.start = p.start; apptForm.end = p.end; } else apptForm.start = apptForm.start || cursor || payload.now;
+        voice = null; tab = "schedule"; render(); return;
+      }
+      mine.phase = "review";
+    } catch (e) {
+      console.error("daily voice parse", e);
+      mine.phase = "error"; mine.msg = "I could not make sense of that recording.";
+    }
+    render();
+  }
+  function recBtn(kind, cls, label) {
+    const on = voice && voice.kind === kind && voice.phase === "recording";
+    const b = btn(on ? "■ Stop" : label || "Record ●", (cls || "daily-btn") + (on ? " recording" : ""), () => startVoice(kind));
+    b.title = on ? "Stop recording" : "Record by voice";
+    return b;
+  }
+  // The strip under the toolbar: progress, errors and the check-before-saving step.
+  function voicePanel(kind, ctx) {
+    if (!voice || voice.kind !== kind) return null;
+    const box = el("section", "daily-card daily-voice " + voice.phase);
+    const row = el("div", "daily-voice-row");
+    if (voice.phase === "starting") { row.append(el("span", "daily-rec-dot"), el("span", null, "Starting the microphone...")); }
+    else if (voice.phase === "recording") {
+      row.append(el("span", "daily-rec-dot on"), el("b", null, "Recording - speak now."), el("span", "daily-muted", kind === "shopping" ? "e.g. \"milk, eggs and two loaves of bread\"" : kind === "tasks" ? "e.g. \"renew the car insurance\"" : "e.g. \"dentist tomorrow at 5\""), el("span", "daily-sp"),
+        btn("■ Stop", "daily-btn pri", stopVoice), btn("Cancel", "daily-btn", () => { cancelVoice(); render(); }));
+    } else if (voice.phase === "transcribing") { row.append(el("span", "daily-rec-dot"), el("span", null, "Transcribing on this PC..."), el("span", "daily-sp"), btn("Cancel", "daily-btn", () => { cancelVoice(); render(); })); }
+    else if (voice.phase === "error") {
+      row.append(el("span", "daily-voice-err", voice.msg || "Something went wrong."), el("span", "daily-sp"),
+        btn("Try again", "daily-btn", () => { voice = null; startVoice(kind); }), btn("Dismiss", "daily-btn", () => { voice = null; render(); }));
+    } else if (voice.phase === "review") {
+      row.append(el("span", "daily-muted", "You said: "), el("i", null, "“" + voice.text + "”"));
+      box.append(row);
+      box.append(kind === "shopping" ? shoppingReview(ctx) : taskReview());
+      return box;
+    }
+    box.append(row);
+    return box;
+  }
+  function shoppingReview(cur) {
+    const rv = voice.review;
+    const wrap = el("div", "daily-review");
+    wrap.append(el("div", "daily-muted sm", `Check the items, fix anything wrong, then add them to ${cur.name}.`));
+    const list = el("div", "daily-review-items");
+    rv.items.forEach((text, i) => {
+      const r = el("div", "daily-review-item");
+      const inp = el("input", "daily-input grow"); inp.value = text; inp.maxLength = 200;
+      inp.addEventListener("input", () => { rv.items[i] = inp.value; });
+      const rm = btn("✕", "daily-btn sm", () => { rv.items.splice(i, 1); render(); }); rm.title = "Remove this item";
+      r.append(inp, rm);
+      list.append(r);
+    });
+    wrap.append(list);
+    const acts = el("div", "daily-newlist");
+    const n = rv.items.filter((x) => x.trim()).length;
+    const save = btn(n ? `Add ${n} item${n === 1 ? "" : "s"} to ${cur.name}` : "Nothing to add", "daily-btn pri", async () => {
+      const texts = rv.items.map((x) => x.trim()).filter(Boolean);
+      if (!texts.length) return;
+      const mine = voice;
+      const r = await api.shopping({ op: "add-many", listId: cur.id, texts, addedBy: "Voice" });
+      if (r && r.ok) { if (voice === mine) voice = null; await after(r, `Added ${texts.length} item${texts.length === 1 ? "" : "s"} to ${cur.name}.`); } else say((r && r.reason) || "Could not add the items.");
+    });
+    if (!n) save.disabled = true;
+    acts.append(save, btn("Cancel", "daily-btn", () => { voice = null; render(); }));
+    wrap.append(acts);
+    return wrap;
+  }
+  function taskReview() {
+    const rv = voice.review;
+    const wrap = el("div", "daily-review");
+    wrap.append(el("div", "daily-muted sm", "Check the task, then save it. It is filed with the agent you pick."));
+    const field = (label, node) => { const w = el("label", "daily-field"); w.append(el("span", "daily-muted", label), node); return w; };
+    const title = el("input", "daily-input"); title.value = rv.title; title.maxLength = 200;
+    title.addEventListener("input", () => { rv.title = title.value; });
+    const agent = el("select", "daily-input");
+    for (const a of rv.agents) { const o = el("option", null, a); o.value = a; if (a === rv.agent) o.selected = true; agent.append(o); }
+    agent.addEventListener("change", () => { rv.agent = agent.value; });
+    const area = el("div", "daily-seg");
+    for (const a of ["Personal", "Business"]) area.append(btn(a, "daily-btn" + (rv.area === a ? " on" : ""), () => { rv.area = a; render(); }));
+    const pri = el("select", "daily-input");
+    for (let i = 10; i >= 1; i--) { const o = el("option", null, i === 10 ? "10 (highest)" : i === 1 ? "1 (lowest)" : String(i)); o.value = String(i); if (i === rv.priority) o.selected = true; pri.append(o); }
+    pri.addEventListener("change", () => { rv.priority = Number(pri.value); });
+    const list = el("input", "daily-input"); list.value = rv.list || ""; list.maxLength = 60; list.placeholder = "Optional list name, e.g. Home";
+    list.addEventListener("input", () => { rv.list = list.value; });
+    wrap.append(field("Task", title), field("Owner agent", agent), field("Area", area), field("Priority (1-10)", pri), field("List", list));
+    const acts = el("div", "daily-newlist");
+    acts.append(btn("Save task", "daily-btn pri", async () => {
+      const mine = voice;
+      const r = await api.addTask({ title: rv.title, agent: rv.agent, area: rv.area, priority: rv.priority, list: rv.list });
+      if (r && r.ok) {
+        if (voice === mine) voice = null;
+        if (tf.area !== "all" && tf.area !== rv.area) tf.area = rv.area;   // make sure the new task is visible
+        tf.status = "all"; if (tf.list && tf.list !== rv.list.trim()) tf.list = "";
+        await after(r, `Task saved for ${rv.agent}.`);
+      } else say((r && r.reason) || "Could not save the task.");
+    }), btn("Cancel", "daily-btn", () => { voice = null; render(); }));
+    wrap.append(acts);
+    return wrap;
+  }
+
   // ---------------------------------------------------------------- Tasks
   const tf = { area: "all", status: "all", list: "" };
   const STATUS_FILTERS = [["all", "All statuses"], ["needs", "Needs you"], ["working", "Working"], ["waiting", "Waiting"], ["queued", "Queued"]];
@@ -363,7 +509,7 @@
   function renderTasks() {
     const all = payload.data.tasks || [];
     const wrap = el("div", "daily-plain");
-    if (!all.length) { wrap.append(emptyState("No open tasks", "Tasks that agents file for you or work on show up here.")); return wrap; }
+    if (!all.length) { wrap.append(emptyState("No open tasks", "Tasks that agents file for you or work on show up here.", "Record a task ●", () => startVoice("tasks"))); const vp0 = voicePanel("tasks"); if (vp0) wrap.append(vp0); return wrap; }
 
     // row 1: area + status + Record
     const r1 = el("div", "daily-frow");
@@ -376,10 +522,11 @@
         for (const [v, label] of STATUS_FILTERS) p.append(btn(label, "daily-pop-item" + (tf.status === v ? " on" : ""), () => { tf.status = v; closePop(); render(); }));
       });
     });
-    const rec = btn("Record ●", "daily-btn pri", () => say("Voice recording for tasks arrives in a later build."));
+    const rec = recBtn("tasks", "daily-btn pri");
     const narrow = layout === "narrow";
     if (narrow) r1.append(seg); else r1.append(seg, stBtn, el("span", "daily-sp"), rec);
     wrap.append(r1);
+    const vpT = voicePanel("tasks");
 
     // row 2: lists (counts follow the area and status filters)
     const lc = taskListCounts(all);
@@ -419,6 +566,7 @@
     wrap.append(r2);
     }
 
+    if (vpT) wrap.append(vpT);
     // the list
     const rows = filterTasks(all).slice().sort((a, b) => b.priority - a.priority || b.ageDays - a.ageDays);
     const c = card("Open tasks", [el("span", "daily-sp"), el("span", "daily-muted daily-sort", "sorted by priority, 10 first")]);
@@ -548,7 +696,8 @@
     inp.maxLength = 200;
     const add = async () => { const v = inp.value.trim(); if (!v) return; await after(await api.shopping({ op: "add", listId: cur.id, text: v, addedBy: "Iddo" })); const i2 = body.querySelector(".daily-shop-r input"); if (i2) i2.focus(); };
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
-    addRow.append(inp, btn("Add", "daily-btn pri", add), btn("Record ●", "daily-btn", () => say("Voice recording for shopping arrives in a later build.")));
+    addRow.append(inp, btn("Add", "daily-btn pri", add), recBtn("shopping", "daily-btn"));
+    const vpS = voicePanel("shopping", cur);
     const linkRow = el("div", "daily-addrow");
     const link = el("input", "daily-input grow");
     link.placeholder = "or paste a product link (Amazon, B&H, AliExpress, eBay)";
@@ -564,7 +713,9 @@
     const lb = btn("Add from link", "daily-btn pri", addLink);
     link.addEventListener("keydown", (e) => { if (e.key === "Enter") addLink(); });
     linkRow.append(link, lb);
-    right.append(addRow, linkRow);
+    right.append(addRow);
+    if (vpS) right.append(vpS);
+    right.append(linkRow);
 
     const need = open.filter((i) => i.thumb && !thumbCache.has(i.thumb)).map((i) => i.thumb).concat(items.filter((i) => i.archivedAt && i.thumb && !thumbCache.has(i.thumb)).map((i) => i.thumb));
     if (need.length) api.thumbs(need).then((m) => { let any = false; for (const k of Object.keys(m || {})) { thumbCache.set(k, m[k]); any = true; } if (any && isOpen() && tab === "shopping") render(); }).catch(() => {});
@@ -876,11 +1027,13 @@
     const prev = btn("‹", "daily-btn sm", () => shift(-1)); prev.title = "Previous";
     const next = btn("›", "daily-btn sm", () => shift(1)); next.title = "Next";
     bar.append(seg, prev, el("b", "daily-sched-title", title), next, btn("Today", "daily-btn sm", () => { cursor = now; render(); }), el("span", "daily-sp"),
-      btn("Record by voice ●", "daily-btn", () => say("Voice recording for appointments arrives in a later build.")));
+      recBtn("schedule", "daily-btn", "Record by voice ●"));
     wrap.append(bar);
     const add = el("div", "daily-frow");
     add.append(btn("+ Add appointment", "daily-btn pri", () => { apptForm = { start: sv === "six" ? now : cursor }; render(); }));
     wrap.append(add);
+    const vpA = voicePanel("schedule");
+    if (vpA) wrap.append(vpA);
 
     const events = payload.data.events || [], dates = payload.data.dates || [];
     const openEntry = (e) => {
@@ -990,9 +1143,15 @@
     h.append(el("span", null, f.id ? "Edit appointment" : "Add appointment"), el("span", "daily-sp"));
     const rec = el("button", "daily-linkbtn", "or record by voice");
     rec.type = "button";
-    rec.addEventListener("click", () => say("Voice recording for appointments arrives in a later build."));
+    rec.addEventListener("click", () => { snap(); startVoice("schedule"); });
     h.append(rec);
     box.append(h);
+    if (f.voiceText) {
+      const vn = el("div", "daily-voice-note");
+      vn.append(el("span", "daily-muted", "Filled in from your recording: "), el("i", null, "\u201c" + f.voiceText + "\u201d"));
+      vn.append(el("div", null, (f.voiceMissing && f.voiceMissing.length ? `I did not catch the ${f.voiceMissing.join(" or ")} - please set it. ` : "") + "Check everything, then press Save to calendar. Nothing is saved until you do."));
+      box.append(vn);
+    }
     const field = (label, node) => { const w = el("label", "daily-field"); w.append(el("span", "daily-muted", label), node); return w; };
     const st = new Date(f.start || payload.now);
     const en = new Date(f.end || (st.getTime() + 3600000));
@@ -1008,6 +1167,12 @@
     ckL.append(ck, document.createTextNode("Merav can see this entry"));
     box.append(field("Date and time", dt), field("Who", who), field("Notes on the person", notes), field("Contact details", contact), field("Location and meeting place", loc), ckL);
     const acts = el("div", "daily-newlist");
+    // keep what was typed when a recording replaces the form (Record from inside the form)
+    const snap = () => {
+      f.who = who.value; f.notes = notes.value; f.contact = contact.value; f.location = loc.value; f.shareMerav = ck.checked;
+      const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.value), a = /^(\d{2}):(\d{2})$/.exec(t1.value), b = /^(\d{2}):(\d{2})$/.exec(t2.value);
+      if (dm && a) { f.start = new Date(+dm[1], +dm[2] - 1, +dm[3], +a[1], +a[2]).getTime(); f.end = b ? new Date(+dm[1], +dm[2] - 1, +dm[3], +b[1], +b[2]).getTime() : 0; }
+    };
     const save = async () => {
       const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.value), a = /^(\d{2}):(\d{2})$/.exec(t1.value), b = /^(\d{2}):(\d{2})$/.exec(t2.value);
       if (!dm || !a) { say("Pick a date and a start time."); return; }
@@ -1018,7 +1183,8 @@
     };
     acts.append(btn("Save to calendar", "daily-btn pri", save), btn("Cancel", "daily-btn", () => { apptForm = null; render(); }));
     if (f.id) acts.append(btn("Delete", "daily-btn", async () => { if (!confirm("Delete this appointment?")) return; const r = await api.deleteAppointment(f.id); if (r && r.ok) { apptForm = null; await load(true); render(); } else say((r && r.reason) || "Could not delete."); }));
-    acts.append(el("span", "daily-sp"), btn("Record ●", "daily-btn", () => say("Voice recording for appointments arrives in a later build.")));
+    const rb = recBtn("schedule", "daily-btn"); rb.addEventListener("click", snap, true);
+    acts.append(el("span", "daily-sp"), rb);
     box.append(acts, el("div", "daily-leg", "Voice example: \"meeting on the 14th with Yossi at three\" fills the form; Iddo checks and saves."));
     setTimeout(() => who.focus(), 0);
     return box;
@@ -1067,6 +1233,7 @@
     layout = computeLayout();
     view.classList.toggle("narrow", layout === "narrow");
     view.classList.toggle("more", layout === "more");
+    if (voice && (showSettings || voice.kind !== tab)) cancelVoice();   // a recording never outlives its tab
     body.replaceChildren();
     if (!payload) { renderTabs(); body.append(el("div", "daily-muted daily-pad", "Loading...")); return; }
     renderTabs();

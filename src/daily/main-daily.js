@@ -52,6 +52,7 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
   let cache = null;
   const thumbDir = path.join(dir, "thumbs");
   const tasksPy = path.join(root, "shared_tools", "tasks", "tasks.py");
+  const fixtureAdded = [];          // test mode: tasks added by voice live in memory only
   const fixtureEdits = new Map();   // test mode: edits to fixture tasks live in memory only
   const run = runPython || ((args) => new Promise((resolve, reject) => {
     execFile("python", [tasksPy].concat(args), { timeout: 30000, windowsHide: true }, (err, out, errOut) => (err ? reject(new Error(String(errOut || err.message).trim().slice(0, 200))) : resolve(out)));
@@ -69,7 +70,7 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
 
   async function loadTasks(now) {
     if (testMode && process.env.AGENT_DESKTOP_DAILY_REAL_TASKS !== "1") {
-      return { tasks: model.fixtureTasks(now).map((t) => (fixtureEdits.has(t.id) ? model.applyTaskEdit(t, fixtureEdits.get(t.id)) : t)), source: "fixture" };
+      return { tasks: model.fixtureTasks(now).concat(fixtureAdded).map((t) => (fixtureEdits.has(t.id) ? model.applyTaskEdit(t, fixtureEdits.get(t.id)) : t)), source: "fixture" };
     }
     let names = [];
     try { names = (await fs.promises.readdir(taskDir)).filter((n) => n.endsWith(".json")); } catch (e) { return { tasks: [], source: "missing" }; }
@@ -215,6 +216,23 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
       const cliArgs = model.taskEditArgs(t, change);   // validates the change
       if (source === "fixture") fixtureEdits.set(t.id, Object.assign({}, fixtureEdits.get(t.id), change));
       else await run(cliArgs);
+      cache = null;
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: err.message };
+    }
+  });
+
+  // Voice: a new task through the same tasks.py runner the edits use (test mode: in-memory fixture, nothing is written).
+  ipcMain.handle("daily-task-add", async (e, raw) => {
+    try {
+      const c = model.cleanNewTask(raw);
+      if (c.error) return { ok: false, reason: c.error };
+      const t = c.task;
+      if (testMode && process.env.AGENT_DESKTOP_DAILY_REAL_TASKS !== "1") {
+        const now = clockNow();
+        fixtureAdded.push({ id: "v" + (fixtureAdded.length + 1), agent: t.agent, title: t.title, detail: "", status: "working", priority: t.priority, tags: t.tags, area: t.area, list: t.list, created: new Date(now).toISOString(), ageDays: 0 });
+      } else await run(model.taskAddArgs(t));
       cache = null;
       return { ok: true };
     } catch (err) {
