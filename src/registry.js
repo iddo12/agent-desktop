@@ -281,4 +281,4 @@ async function openLocalPdf(rawPath, allowedRoots, log) {
   return { ok: true };
 }
 
-module.exports = { listRegistry, registryAction, openLocalPdf };
+module.exports = { listRegistry, registryAction, openLocalPdf, loadEntries };

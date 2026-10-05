@@ -758,6 +758,7 @@ function selectAgent(agent) {
   chatAvatarSlotEl.appendChild(renderAvatarEl(agent));
   chatNameEl.textContent = agent.displayName;
   setChatRoleText(chatRoleEl, agent.role);
+  if (window.agentDocsPanel) window.agentDocsPanel.setAgent(agent.path, { name: agent.displayName, avatar: agent.avatar || "" });
 
   setHistoryMode(false);
   setConversationsMode(false);

@@ -4411,6 +4411,37 @@ ipcMain.handle("registry-action", (event, { id, action }) =>
 const libraryState = require("./libraryState").create(path.join(app.getPath("userData"), "library-state.json"));
 ipcMain.handle("library-state-get", () => libraryState.get());
 ipcMain.handle("library-state-op", (event, op) => libraryState.apply(op));
+// Per-agent "Agent documents" panel (v1.75.0): read-only list of what one agent produced; opening goes by id.
+const agentDocs = require("./agentDocs").create({
+  outputRoot: "E:\Claude work",
+  loadRegistry: () => registry.loadEntries(ARGUS_WORKSPACE),
+  libraryState,
+  shell,
+  nativeImage: require("electron").nativeImage,
+  thumbDir: path.join(app.getPath("userData"), "agent-docs-thumbs"),
+});
+function agentForDocs(agentPath) {
+  try {
+    const want = path.resolve(String(agentPath || "")).toLowerCase();
+    return listAgents({ noAvatar: true }).find((a) => path.resolve(a.path).toLowerCase() === want) || null;
+  } catch (e) { return null; }
+}
+ipcMain.handle("agent-docs-list", async (event, { agentPath, query } = {}) => {
+  const agent = agentForDocs(agentPath);
+  return agent ? agentDocs.list(agent, query) : { items: [], total: 0 };
+});
+ipcMain.handle("agent-docs-summary", async (event, { agentPath } = {}) => {
+  const agent = agentForDocs(agentPath);
+  return agent ? agentDocs.summary(agent) : { total: 0 };
+});
+ipcMain.handle("agent-docs-open", async (event, { agentPath, id, how } = {}) => {
+  const agent = agentForDocs(agentPath);
+  return agent ? agentDocs.open(agent, String(id || ""), how) : { ok: false };
+});
+ipcMain.handle("agent-docs-thumb", async (event, { agentPath, id } = {}) => {
+  const agent = agentForDocs(agentPath);
+  return agent ? agentDocs.thumbnail(agent, String(id || "")) : { ok: false };
+});
 // Clickable PDF paths in chat bubbles (v1.52.0). The path comes from an
 // agent's reply, so registry.openLocalPdf treats it as untrusted: existing
 // .pdf files under the workspace or E:\Claude work only; refusals logged.
