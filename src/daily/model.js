@@ -77,29 +77,52 @@ function placeholderEmails(now) {
   const t = (h, m) => hm(now, h, m);
   return {
     top: [
-      { id: "e1", account: "LensVid contact", subject: "Sony: review unit shipping details", at: t(9, 12), importance: 3 },
-      { id: "e2", account: "Editor", subject: "Press embargo lifts Tuesday", at: t(8, 40), importance: 3 },
-      { id: "e3", account: "Zorg", subject: "Merav: dentist reschedule?", at: t(7, 55), importance: 2 },
+      { id: "e1", account: "LensVid contact", from: "Sony PR", subject: "Sony: review unit shipping details", at: t(9, 12), importance: 3 },
+      { id: "e2", account: "Editor", from: "Canon comms", subject: "Press embargo lifts Tuesday", at: t(8, 40), importance: 3 },
+      { id: "e3", account: "Zorg", from: "Merav", subject: "Merav: dentist reschedule?", at: t(7, 55), importance: 2 },
+      { id: "e4", account: "Zorg", from: "Dan (photographer)", subject: "Lunch Monday?", at: t(7, 20), importance: 1 },
     ],
     needAnswer: [
-      { id: "n1", account: "LensVid contact", subject: "Sony: review unit shipping details", ageDays: 1, owner: "Personal Assistant" },
-      { id: "n2", account: "Zorg", subject: "Accountant: missing invoice", ageDays: 6, owner: "Personal Assistant" },
-      { id: "n3", account: "Editor", subject: "Guest article, can you check the draft?", ageDays: 2, owner: "Personal Assistant" },
+      { id: "n1", account: "Editor", from: "Expo organiser", subject: "Trade show booth contract", ageDays: 6, owner: "Personal Assistant" },
+      { id: "n2", account: "Zorg", from: "Migdal", subject: "Insurance quote, Migdal", ageDays: 4, owner: "Personal Assistant" },
+      { id: "n3", account: "LensVid contact", from: "Reader", subject: "Question about the 24-70 review", ageDays: 3, owner: "Personal Assistant" },
     ],
     sentNoReply: [
-      { id: "s1", account: "Zorg", subject: "Quote request for lens rental", ageDays: 5, owner: "Personal Assistant" },
-      { id: "s2", account: "LensVid contact", subject: "Sponsorship follow-up", ageDays: 3, owner: "Personal Assistant" },
+      { id: "s1", account: "Zorg", to: "landlord", subject: "Lease renewal", ageDays: 5, owner: "Personal Assistant" },
+      { id: "s2", account: "Zorg", to: "mechanic", subject: "Brakes quote", ageDays: 3, owner: "Personal Assistant" },
+      { id: "s3", account: "Zorg", to: "bank", subject: "Transfer confirmation", ageDays: 1, owner: "Personal Assistant" },
     ],
-    peopleToWrite: [],
+    peopleToWrite: [
+      { id: "w1", text: "Thank Dan for the Berlin intro", by: "assistant", ageDays: 3 },
+      { id: "w2", text: "Answer Yossi's wedding invitation", by: "Iddo", ageDays: 6 },
+    ],
+    hidden: 14,
   };
 }
+// day offset from today (DST-safe), at h:m
+function dayAt(now, off, h, m) { const d = new Date(now); d.setDate(d.getDate() + off); d.setHours(h, m || 0, 0, 0); return d.getTime(); }
+// cal = which colour the entry gets on Schedule: iddo | merav | google
 function placeholderEvents(now) {
-  const t = (h, m) => hm(now, h, m);
+  const E = (id, off, h, m, h2, m2, title, cal, extra) => Object.assign({ id, title, start: dayAt(now, off, h, m), end: dayAt(now, off, h2, m2), source: "placeholder", cal }, extra || {});
   return [
-    { id: "p1", title: "Standup with Merav", start: t(9, 0), end: t(9, 30), source: "placeholder" },
-    { id: "p2", title: "Dentist, Dr. Levi", start: t(11, 0), end: t(12, 0), leaveBy: "10:30", source: "placeholder" },
-    { id: "p3", title: "Call: supplier", start: t(14, 0), end: t(14, 30), source: "placeholder" },
-    { id: "p4", title: "Dinner with parents", start: t(20, 0), end: t(22, 0), source: "placeholder" },
+    E("p0", -4, 10, 0, 10, 30, "Bank", "google"),
+    E("p0b", -1, 20, 0, 22, 0, "Dinner with parents", "iddo"),
+    E("p1", 0, 9, 0, 9, 30, "Standup with Merav", "merav"),
+    E("p2", 0, 11, 0, 12, 0, "Dentist, Dr. Levi", "iddo", { leaveBy: "10:30" }),
+    E("p3", 0, 14, 0, 14, 30, "Call: supplier", "iddo"),
+    E("p4", 0, 20, 0, 22, 0, "Dinner with parents", "iddo"),
+    E("p5", 1, 9, 0, 10, 0, "Trade show prep", "google"),
+    E("p6", 2, 10, 0, 11, 0, "Dr. Cohen", "merav"),
+    E("p7", 3, 7, 40, 11, 0, "Flight Berlin", "iddo"),
+    E("p8", 4, 9, 0, 18, 0, "Berlin: expo", "iddo"),
+    E("p9", 6, 12, 0, 13, 0, "Back from Berlin", "iddo"),
+    E("p10", 15, 10, 0, 16, 0, "Studio shoot", "iddo"),
+    E("p11", 21, 9, 0, 10, 0, "Review due: Sony 24-70", "iddo"),
+    E("p12", 29, 10, 0, 11, 0, "Accountant", "iddo"),
+    E("p13", 38, 15, 0, 16, 0, "Lens rental pickup", "google"),
+    E("p14", 76, 11, 0, 12, 0, "Year-end review", "iddo"),
+    E("p15", 127, 10, 0, 11, 0, "Dentist check-up", "merav"),
+    E("p16", 160, 9, 0, 12, 0, "Photo expo", "google"),
   ];
 }
 
@@ -152,7 +175,7 @@ function summarize(d, now) {
     tasksOldest: oldest(tasks, "ageDays", "agent"),
     emailsNeedAnswer: (em.needAnswer || []).length, emailsNeedOldest: oldest(em.needAnswer || [], "ageDays", "owner"),
     sentNoReply: late.length, sentOldest: oldest(late, "ageDays", "owner"),
-    emailsAttention: (em.needAnswer || []).length + (em.sentNoReply || []).length,
+    emailsAttention: (em.needAnswer || []).length + late.length,
     emailsTop: (em.top || []).length,
     shopLists: shop.lists, shopOldest: shop.oldest,
     datesNext: dates[0] || null, datesCount: dates.length,
@@ -321,7 +344,39 @@ function cleanDate(raw) {
   return { item: out };
 }
 
+// ---------------------------------------------------------------- Emails tab
+const IMPORTANCE_LABEL = { 3: "High", 2: "Med", 1: "Low" };
+// Counts per account for the account chips: items that need attention (needs an answer + sent 3+ days with no reply).
+function emailAccountCounts(em, accounts) {
+  const out = {};
+  for (const a of accounts || []) out[a] = 0;
+  for (const x of (em && em.needAnswer) || []) out[x.account] = (out[x.account] || 0) + 1;
+  for (const x of (em && em.sentNoReply) || []) if (x.ageDays >= 3) out[x.account] = (out[x.account] || 0) + 1;
+  return out;
+}
+function filterByAccount(list, account) { return (list || []).filter((x) => !account || account === "all" || x.account === account); }
+
+const SCH = require("./schedule");
+const { waitClass, dayKey, monthGrid, scheduleEntries, sixMonths } = SCH;
+
+// ---------------------------------------------------------------- Schedule tab
+// Add-appointment form -> stored item (own store appointments.json). start/end are ms since epoch from the renderer.
+function cleanAppointment(raw) {
+  const r = raw || {};
+  const who = String(r.who || "").trim().slice(0, 100);
+  if (!who) return { error: "Say who the appointment is with." };
+  const start = Number(r.start);
+  if (!Number.isFinite(start) || start < 946684800000 || start > 7258118400000) return { error: "Pick a valid date and time." };
+  let end = Number(r.end);
+  if (!Number.isFinite(end) || end <= start) end = start + 3600000;
+  return { item: {
+    id: String(r.id || newId("a")), title: who, who, start, end, notes: String(r.notes || "").slice(0, 500), contact: String(r.contact || "").slice(0, 200),
+    location: String(r.location || "").slice(0, 300), shareMerav: r.shareMerav !== false, cal: "iddo", own: true,
+  } };
+}
+
 module.exports = {
+  waitClass, IMPORTANCE_LABEL, emailAccountCounts, filterByAccount, dayKey, monthGrid, scheduleEntries, sixMonths, cleanAppointment, dayAt,
   filterTasks, taskListCounts, taskEditArgs, applyTaskEdit,
   DONE_HOLD_MS, ARCHIVE_KEEP_MS, sweepShopping, shoppingOp, shoppingCounts, shoppingShareText, findList, cleanDate,
   DAY, ageDays, priority10, taskStatus, STATUS_LABEL, mapTaskStores, fixtureTasks, placeholderEmails, placeholderEvents,

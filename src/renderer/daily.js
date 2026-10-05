@@ -5,7 +5,7 @@
 // textContent only: titles and names come from files, mail and the web and are never parsed as HTML.
 (function () {
   "use strict";
-  if (!window.api || !window.api.daily) return;
+  if (!window.api || !window.api.daily || !window.dailySchedule) return;
   const api = window.api.daily;
 
   const TABS = [
@@ -105,10 +105,14 @@
     const lib = document.getElementById("library-view");
     if (lib && !lib.classList.contains("hidden")) document.querySelector("#library-view .library-close")?.click();
     render();
+    if (!ro && typeof ResizeObserver === "function") { ro = new ResizeObserver(() => { if (isOpen() && computeLayout() !== layout) render(); }); ro.observe(view); }
     load(false).then(render);
   }
+  // Width watcher: event-driven (no timer) and only attached while My Daily is open.
+  let ro = null;
   function closeView() {
     closePop();
+    if (ro) { ro.disconnect(); ro = null; }
     document.body.classList.remove("daily-open");
     view.classList.add("hidden");
     nav.classList.remove("active");
@@ -205,10 +209,15 @@
       dates: [s.datesCount, "", s.datesNext ? `next in ${s.datesNext.inDays}d` : ""],
     };
   }
+  // Layout follows the width of the My Daily view itself (not the window): full tab bar, "More" menu, or sideways-scrolling tabs.
+  let layout = "full";
+  function computeLayout() { const w = view.clientWidth || 1000; return w >= 770 ? "full" : w >= 540 ? "more" : "narrow"; }
   function renderTabs() {
     tabsEl.replaceChildren();
     const counts = tabCounts();
+    const hidden = layout === "more" ? ["dates"] : [];
     for (const [id, label] of TABS) {
+      if (hidden.includes(id)) continue;
       const b = el("button", "daily-tab" + (!showSettings && tab === id ? " on" : ""));
       b.type = "button";
       b.append(el("span", null, label));
@@ -216,6 +225,29 @@
       if (c && c[0]) b.append(num(c[0], c[1], c[2]));
       b.addEventListener("click", () => { tab = id; showSettings = false; render(); });
       tabsEl.append(b);
+    }
+    if (hidden.length) {
+      const on = !showSettings && hidden.includes(tab);
+      const mb = el("button", "daily-tab daily-popper" + (on ? " on" : ""));
+      mb.type = "button";
+      mb.append(el("span", null, "More ▾"));
+      const total = hidden.reduce((a, id) => a + ((counts[id] && counts[id][0]) || 0), 0);
+      if (total) mb.append(num(total, "", "Items in the tabs under More"));
+      mb.addEventListener("click", () => openPop(mb, (p) => {
+        for (const id of hidden) {
+          const lab = TABS.find((x) => x[0] === id)[1];
+          const c = counts[id];
+          const it = btn("", "daily-pop-item daily-more-item" + (tab === id && !showSettings ? " on" : ""), () => { closePop(); tab = id; showSettings = false; render(); });
+          it.append(el("span", null, lab));
+          if (c && c[0]) it.append(el("span", "daily-n", String(c[0])));
+          if (c && c[2]) it.append(el("small", "daily-muted", c[2]));
+          p.append(it);
+        }
+        const st = btn("", "daily-pop-item daily-more-item" + (showSettings ? " on" : ""), () => { closePop(); showSettings = true; render(); });
+        st.append(el("span", null, "Settings: calendar sharing & sync"), el("small", "daily-muted", "gear"));
+        p.append(st);
+      }));
+      tabsEl.append(mb);
     }
   }
 
@@ -264,7 +296,7 @@
     // Top emails
     const mails = card("Top emails today", [num(s.emailsAttention, "blue", "Open Emails", () => { tab = "emails"; render(); }), el("span", "daily-sp"), btn("Emails", "daily-btn sm", () => { tab = "emails"; render(); })]);
     mails.classList.add("grow");
-    for (const m of d.emails.top) {
+    for (const m of d.emails.top.slice(0, 3)) {
       const row = el("div", "daily-tk");
       const ti = el("div", "daily-ti");
       const meta = el("small", "daily-muted");
@@ -345,12 +377,26 @@
       });
     });
     const rec = btn("Record ●", "daily-btn pri", () => say("Voice recording for tasks arrives in a later build."));
-    r1.append(seg, stBtn, el("span", "daily-sp"), rec);
+    const narrow = layout === "narrow";
+    if (narrow) r1.append(seg); else r1.append(seg, stBtn, el("span", "daily-sp"), rec);
     wrap.append(r1);
 
     // row 2: lists (counts follow the area and status filters)
     const lc = taskListCounts(all);
     const r2 = el("div", "daily-frow");
+    if (narrow) {
+      // narrow window (mockup 12): Status and a single Lists menu beside Record; the list chips would not fit
+      const lb = btn("", "daily-btn pill daily-popper", () => openPop(lb, (p) => {
+        const all = btn("", "daily-pop-item" + (!tf.list ? " on" : ""), () => { tf.list = ""; closePop(); render(); });
+        all.append(el("span", null, "All lists"), el("span", "daily-muted", " " + lc.total));
+        p.append(all);
+        for (const l of lc.lists) { const b = btn("", "daily-pop-item" + (tf.list === l.name ? " on" : ""), () => { tf.list = l.name; closePop(); render(); }); b.append(el("span", null, l.name), el("span", "daily-muted", " " + l.count)); p.append(b); }
+      }));
+      lb.append(el("span", null, tf.list ? "List: " + tf.list + " ▾" : "Lists ▾"));
+      if (lc.lists.length) lb.append(el("span", "daily-n", String(lc.lists.length)));
+      r2.append(stBtn, lb, el("span", "daily-sp"), rec);
+      wrap.append(r2);
+    } else {
     r2.append(el("span", "daily-lbl", "LISTS"));
     const chip = (label, count, on, fn) => {
       const b = btn("", "daily-chip2" + (on ? " on" : ""), fn);
@@ -371,6 +417,7 @@
       r2.append(mb);
     }
     wrap.append(r2);
+    }
 
     // the list
     const rows = filterTasks(all).slice().sort((a, b) => b.priority - a.priority || b.ageDays - a.ageDays);
@@ -382,7 +429,10 @@
       const meta = el("small", "daily-muted");
       meta.append(document.createTextNode(`${t.ageDays}d · ${t.agent} · `), el("span", "daily-scope " + (t.area === "Personal" ? "per" : "biz"), t.area));
       if (t.list) meta.append(document.createTextNode(" · "), el("span", "daily-cat", t.list));
-      ti.append(el("div", null, t.title), meta);
+      const ttl = el("div", "daily-ttl", t.title);
+      ttl.addEventListener("click", () => { if (layout === "narrow") jumpToAgent(t.agent); });
+      if (layout === "narrow") ttl.title = "Open " + t.agent;
+      ti.append(ttl, meta);
       const pb = priBar(t.priority);
       pb.classList.add("daily-popper", "daily-clickable");
       pb.title = `Priority ${t.priority} of 10 - click to change`;
@@ -608,13 +658,7 @@
     }
     wrap.append(left);
     if (dateForm) wrap.append(dateEditor());
-    const lg = el("div", "daily-legendcard daily-card daily-datesleg");
-    lg.append(el("b", null, "Schedule"));
-    for (const [cls, label] of [["iddo", "Iddo"], ["merav", "Added by Merav"], ["bday", "Birthday / date"], ["goog", "Google Calendar"]]) {
-      const s = el("span", "daily-leg-item");
-      s.append(el("span", "daily-sw2 " + cls), document.createTextNode(label));
-      lg.append(s);
-    }
+    const lg = scheduleLegend();
     const out = el("div", "daily-plain");
     out.append(wrap, lg);
     return out;
@@ -668,12 +712,316 @@
     return side;
   }
 
-  function renderSoon(title, text) {
-    const w = el("div", "daily-plain");
-    const c = card(title);
-    c.append(el("div", "daily-muted daily-pad", text));
-    w.append(c);
-    return w;
+  // ---------------------------------------------------------------- Emails (placeholder provider only)
+  let emailAcct = "all";
+  const DAY_MS = 86400000;
+  const shortDate = (ms) => `${new Date(ms).getDate()} ${MONTHS[new Date(ms).getMonth()]}`;
+  const NOT_CONNECTED = "Email is not connected yet, so this is demo data. Reading and replying arrive when it is connected.";
+  function dayBadge(days) {
+    const b = el("span", "daily-dayb " + waitCls(days), `${days} d`);
+    b.title = `${days} day${days === 1 ? "" : "s"} waiting`;
+    return b;
+  }
+  const waitCls = (d) => window.dailySchedule.waitClass(d);
+  function renderEmails() {
+    const em = payload.data.emails || { top: [], needAnswer: [], sentNoReply: [], peopleToWrite: [] };
+    const accounts = payload.provider.accounts || [];
+    const now = payload.now;
+    const wrap = el("div", "daily-plain");
+    if (!payload.provider.connected) wrap.append(demoBanner());
+
+    // accounts row: counts = items that need attention per account
+    const counts = {};
+    for (const a of accounts) counts[a] = 0;
+    for (const x of em.needAnswer || []) counts[x.account] = (counts[x.account] || 0) + 1;
+    for (const x of em.sentNoReply || []) if (x.ageDays >= 3) counts[x.account] = (counts[x.account] || 0) + 1;
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    const row = el("div", "daily-frow");
+    row.append(el("span", "daily-lbl", "ACCOUNTS"));
+    const chip = (label, n, id) => {
+      const b = btn("", "daily-chip2" + (emailAcct === id ? " on" : ""), () => { emailAcct = id; render(); });
+      b.append(el("span", null, label));
+      if (n) b.append(el("span", "daily-n", String(n)));
+      b.title = `Show ${id === "all" ? "all accounts" : label}`;
+      return b;
+    };
+    row.append(chip("All", total, "all"));
+    for (const a of accounts) row.append(chip(a, counts[a], a));
+    row.append(el("span", "daily-sp"));
+    if (em.hidden) row.append(el("span", "daily-muted sm", `${em.hidden} promotions and spam hidden`));
+    wrap.append(row);
+
+    const by = (list) => (emailAcct === "all" ? list || [] : (list || []).filter((x) => x.account === emailAcct));
+    const notYet = () => say(NOT_CONNECTED);
+    const meta = (lead, acct, tail) => {
+      const m = el("small", "daily-muted");
+      m.append(document.createTextNode(lead ? lead + " · " : ""), el("span", "daily-acct", acct), document.createTextNode(tail ? " · " + tail : ""));
+      return m;
+    };
+    const mk = (title, n, cls, sub2) => {
+      const c = el("section", "daily-card");
+      const h = el("h3", "daily-card-h");
+      h.append(el("span", null, title));
+      if (n) h.append(num(n, cls, `Show the ${n} below`, () => c.scrollIntoView({ block: "nearest", behavior: "smooth" })));
+      h.append(el("span", "daily-sp"));
+      if (sub2) h.append(el("span", "daily-muted sm daily-nocaps", sub2));
+      c.append(h);
+      return c;
+    };
+    const none = (c, t) => c.append(el("div", "daily-muted daily-pad", t));
+
+    const top = by(em.top);
+    const c1 = mk("1. Today's top emails", top.length, "blue", "most important first");
+    if (!top.length) none(c1, "No important email today.");
+    for (const m of top) {
+      const r = el("div", "daily-tk");
+      const ti = el("div", "daily-ti");
+      ti.append(el("div", null, m.subject), meta(m.from, m.account, clock(m.at)));
+      const imp = el("span", "daily-imp", "●".repeat(m.importance) + "○".repeat(3 - m.importance) + " " + (IMP_LABEL[m.importance] || ""));
+      imp.title = `Importance ${m.importance} of 3`;
+      r.append(ti, imp, btn("Open", "daily-btn sm", notYet));
+      c1.append(r);
+    }
+    const na = by(em.needAnswer);
+    const c2 = mk("2. Open, needs your answer", na.length, "warn");
+    if (!na.length) none(c2, "Nothing is waiting for your answer.");
+    for (const m of na) {
+      const r = el("div", "daily-tk");
+      const ti = el("div", "daily-ti");
+      ti.append(el("div", null, m.subject), meta(m.from, m.account, "received " + shortDate(now - m.ageDays * DAY_MS)));
+      r.append(ti, dayBadge(m.ageDays), btn("Reply", "daily-btn sm", notYet));
+      c2.append(r);
+    }
+    const sn = by(em.sentNoReply);
+    const c3 = mk("3. Sent, no reply yet", sn.length, "warn");
+    if (!sn.length) none(c3, "Everything you sent has an answer.");
+    for (const m of sn) {
+      const r = el("div", "daily-tk");
+      const ti = el("div", "daily-ti");
+      ti.append(el("div", null, m.subject), meta(m.to ? "To " + m.to : "", m.account, "sent " + shortDate(now - m.ageDays * DAY_MS)));
+      r.append(ti, dayBadge(m.ageDays), btn("Draft reminder", "daily-btn sm" + (m.ageDays >= 3 ? " pri" : ""), notYet));
+      c3.append(r);
+    }
+    c3.append(el("div", "daily-leg", "\"Draft reminder\" opens a ready follow-up to the recipient for Iddo to edit and send. Nothing is sent by itself."));
+    const pw = em.peopleToWrite || [];
+    const c4 = mk("4. People to write to", pw.length, "", "optional section");
+    if (!pw.length) none(c4, "No one to write to.");
+    for (const w of pw) {
+      const r = el("div", "daily-tk");
+      const ti = el("div", "daily-ti");
+      ti.append(el("div", null, w.text), el("small", "daily-muted", `added by ${w.by} · ${w.ageDays}d`));
+      r.append(ti, btn("Write", "daily-btn sm", notYet));
+      c4.append(r);
+    }
+    const cols = el("div", "daily-two daily-emailcols");
+    const l = el("div", "daily-col"); l.append(c1, c2);
+    const r = el("div", "daily-col"); r.append(c3, c4);
+    cols.append(l, r);
+    wrap.append(cols);
+    const lg = el("section", "daily-card daily-legendcard daily-wlegend");
+    lg.append(el("b", null, "Days waiting"), el("span", "daily-g", "1-2 d grey"), el("span", "daily-g d3", "3-4 d amber"), el("span", "daily-g d5", "5+ d red"), el("span", "daily-muted", "(the number is always shown)"));
+    wrap.append(lg);
+    return wrap;
+  }
+  const IMP_LABEL = { 3: "High", 2: "Med", 1: "Low" };
+
+  // ---------------------------------------------------------------- Schedule
+  let sv = "month";          // day | week | month | six
+  let cursor = null;         // ms; the day/week/month being shown
+  let apptForm = null;       // null = closed; {} or an own appointment being edited
+  const CAL_LABEL = { iddo: "Iddo", merav: "Added by Merav", bday: "Birthday / date", google: "Google Calendar" };
+  const WEEKDAY_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  function scheduleLegend() {
+    const lg = el("div", "daily-legendcard daily-card daily-datesleg");
+    lg.append(el("b", null, "Schedule"));
+    for (const cls of ["iddo", "merav", "bday", "google"]) {
+      const s = el("span", "daily-leg-item");
+      s.append(el("span", "daily-sw2 " + cls), document.createTextNode(CAL_LABEL[cls]));
+      lg.append(s);
+    }
+    return lg;
+  }
+  const dKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  function entryText(e, withTime) {
+    return e.kind === "appt" && withTime ? `${clock(e.start)} ${e.title}` : e.title;
+  }
+  function renderSchedule() {
+    const now = payload.now;
+    if (cursor == null) cursor = now;
+    const cur = new Date(cursor);
+    const wrap = el("div", "daily-plain daily-sched");
+    if (!payload.provider.connected) wrap.append(demoBanner());
+
+    const bar = el("div", "daily-frow");
+    const seg = el("div", "daily-seg");
+    for (const [v, label] of [["day", "Day"], ["week", "Week"], ["month", "Month"], ["six", "6 months"]]) {
+      seg.append(btn(label, "daily-btn" + (sv === v ? " on" : ""), () => { sv = v; render(); }));
+    }
+    const shift = (dir) => {
+      const d = new Date(cursor);
+      if (sv === "day") d.setDate(d.getDate() + dir);
+      else if (sv === "week") d.setDate(d.getDate() + 7 * dir);
+      else if (sv === "month") d.setMonth(d.getMonth() + dir, 1);
+      else d.setMonth(d.getMonth() + 6 * dir, 1);
+      cursor = d.getTime();
+      render();
+    };
+    const wk0 = new Date(cur); wk0.setDate(cur.getDate() - cur.getDay());
+    const wk6 = new Date(wk0); wk6.setDate(wk0.getDate() + 6);
+    const six = new Date(cur.getFullYear(), cur.getMonth() + 5, 1);
+    const title = sv === "day" ? `${WEEKDAYS[cur.getDay()]} ${cur.getDate()} ${MONTHS[cur.getMonth()]} ${cur.getFullYear()}`
+      : sv === "week" ? `${wk0.getDate()} ${MONTHS[wk0.getMonth()]} – ${wk6.getDate()} ${MONTHS[wk6.getMonth()]} ${wk6.getFullYear()}`
+      : sv === "month" ? `${DATE_LONG[cur.getMonth()]} ${cur.getFullYear()}`
+      : `${MONTHS[cur.getMonth()]} ${cur.getFullYear()} – ${MONTHS[six.getMonth()]} ${six.getFullYear()}`;
+    const prev = btn("‹", "daily-btn sm", () => shift(-1)); prev.title = "Previous";
+    const next = btn("›", "daily-btn sm", () => shift(1)); next.title = "Next";
+    bar.append(seg, prev, el("b", "daily-sched-title", title), next, btn("Today", "daily-btn sm", () => { cursor = now; render(); }), el("span", "daily-sp"),
+      btn("Record by voice ●", "daily-btn", () => say("Voice recording for appointments arrives in a later build.")));
+    wrap.append(bar);
+    const add = el("div", "daily-frow");
+    add.append(btn("+ Add appointment", "daily-btn pri", () => { apptForm = { start: sv === "six" ? now : cursor }; render(); }));
+    wrap.append(add);
+
+    const events = payload.data.events || [], dates = payload.data.dates || [];
+    const openEntry = (e) => {
+      if (e.kind === "appt" && e.own) { apptForm = Object.assign({}, e); render(); }
+      else { cursor = e.start || cursor; sv = "day"; render(); }
+    };
+    const gotoDay = (d) => { cursor = d.getTime ? d.getTime() : d; sv = "day"; render(); };
+    const rowFor = (e) => {
+      const r = el("div", "daily-ev");
+      r.append(el("span", "daily-tm", e.kind === "appt" ? `${clock(e.start)}–${clock(e.end || e.start)}` : e.dateKind === "birthday" ? "Birthday" : "Date"));
+      const t = el("span", "daily-ev-t");
+      t.append(el("span", "daily-sw2 " + (e.cal || "iddo")), document.createTextNode(" " + e.title));
+      if (e.leaveBy) t.append(el("small", "daily-muted", " · leave by " + e.leaveBy));
+      if (e.location) t.append(el("small", "daily-muted", " · " + e.location));
+      r.append(t);
+      if (e.own) r.append(el("span", "daily-sp"), btn("Edit", "daily-btn sm", () => openEntry(e)));
+      return r;
+    };
+
+    if (sv === "month") {
+      const weeks = monthGridLocal(cur.getFullYear(), cur.getMonth() + 1);
+      const from = new Date(weeks[0][0].year, weeks[0][0].month - 1, weeks[0][0].day).getTime();
+      const lastC = weeks[weeks.length - 1][6];
+      const map = scheduleEntriesLocal(events, dates, from, new Date(lastC.year, lastC.month - 1, lastC.day + 1).getTime());
+      const grid = el("div", "daily-mon");
+      for (const w of WEEKDAYS) grid.append(el("div", "daily-mon-h", w));
+      const todayKey = dKey(new Date(now));
+      for (const week of weeks) for (const c of week) {
+        const cell = el("div", "daily-mon-c" + (c.inMonth ? "" : " out") + (c.key === todayKey ? " today" : ""));
+        cell.addEventListener("click", () => gotoDay(new Date(c.year, c.month - 1, c.day)));
+        cell.append(el("b", null, String(c.day)));
+        const list = map.get(c.key) || [];
+        for (const e of list.slice(0, 2)) {
+          const ch = el("span", "daily-chipx " + (e.cal || "iddo"), entryText(e, true));
+          ch.title = e.title;
+          ch.addEventListener("click", (ev) => { ev.stopPropagation(); openEntry(e); });
+          cell.append(ch);
+        }
+        if (list.length > 2) { const more = el("span", "daily-more", `+${list.length - 2} more`); more.setAttribute("role", "button"); cell.append(more); }
+        grid.append(cell);
+      }
+      wrap.append(grid);
+    } else if (sv === "six") {
+      const months = sixMonthsLocal(events, dates, cur.getFullYear(), cur.getMonth() + 1);
+      const g = el("div", "daily-six");
+      for (const m of months) {
+        const c = el("section", "daily-card daily-mini");
+        const h = el("h4", "daily-mini-h");
+        h.append(el("b", null, DATE_LONG[m.month - 1] + (m.year !== cur.getFullYear() ? " " + m.year : "")));
+        if (m.count) h.append(num(m.count, "", `${m.count} entr${m.count === 1 ? "y" : "ies"} in ${DATE_LONG[m.month - 1]} - open the month`, () => { cursor = new Date(m.year, m.month - 1, 1).getTime(); sv = "month"; render(); }));
+        h.addEventListener("click", () => { cursor = new Date(m.year, m.month - 1, 1).getTime(); sv = "month"; render(); });
+        c.append(h);
+        const mg = el("div", "daily-minigrid");
+        const lead = new Date(m.year, m.month - 1, 1).getDay();
+        for (let i = 0; i < lead; i++) mg.append(el("span"));
+        const dim = new Date(m.year, m.month, 0).getDate();
+        for (let d = 1; d <= dim; d++) {
+          const k = m.days[d];
+          const s = el("span", "daily-minid" + (k ? " has " + k : ""), String(d));
+          if (k) { s.setAttribute("role", "button"); s.addEventListener("click", () => gotoDay(new Date(m.year, m.month - 1, d))); }
+          mg.append(s);
+        }
+        c.append(mg);
+        g.append(c);
+      }
+      wrap.append(g);
+      wrap.append(el("div", "daily-muted sm", "Blue = appointment, pink = birthday or date. Click a day or a month to open it."));
+    } else if (sv === "week") {
+      const from = new Date(wk0.getFullYear(), wk0.getMonth(), wk0.getDate()).getTime();
+      const map = scheduleEntriesLocal(events, dates, from, new Date(wk0.getFullYear(), wk0.getMonth(), wk0.getDate() + 7).getTime());
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(wk0.getFullYear(), wk0.getMonth(), wk0.getDate() + i);
+        const list = map.get(dKey(d)) || [];
+        const c = el("section", "daily-card daily-weekday" + (dKey(d) === dKey(new Date(now)) ? " today" : ""));
+        const h = el("h3", "daily-card-h");
+        h.append(el("span", null, `${WEEKDAY_LONG[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`));
+        if (list.length) h.append(num(list.length, "", "Open this day", () => gotoDay(d)));
+        c.append(h);
+        if (!list.length) c.append(el("div", "daily-muted sm", "Nothing scheduled."));
+        for (const e of list) c.append(rowFor(e));
+        wrap.append(c);
+      }
+    } else {
+      const from = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate()).getTime();
+      const list = (scheduleEntriesLocal(events, dates, from, new Date(cur.getFullYear(), cur.getMonth(), cur.getDate() + 1).getTime()).get(dKey(cur))) || [];
+      const c = el("section", "daily-card");
+      const h = el("h3", "daily-card-h");
+      h.append(el("span", null, `${WEEKDAY_LONG[cur.getDay()]} ${cur.getDate()} ${DATE_LONG[cur.getMonth()]}`));
+      if (list.length) h.append(num(list.length, "", `${list.length} on this day`));
+      c.append(h);
+      if (!list.length) c.append(el("div", "daily-muted daily-pad", "Nothing scheduled this day."));
+      for (const e of list) c.append(rowFor(e));
+      wrap.append(c);
+    }
+    wrap.append(scheduleLegend());
+    if (apptForm) wrap.append(apptEditor());
+    return wrap;
+  }
+  const monthGridLocal = (y, m) => window.dailySchedule.monthGrid(y, m);
+  const scheduleEntriesLocal = (...a) => window.dailySchedule.scheduleEntries(...a);
+  const sixMonthsLocal = (...a) => window.dailySchedule.sixMonths(...a);
+
+  function apptEditor() {
+    const f = apptForm;
+    const box = el("section", "daily-card daily-appt");
+    const h = el("h3", "daily-card-h");
+    h.append(el("span", null, f.id ? "Edit appointment" : "Add appointment"), el("span", "daily-sp"));
+    const rec = el("button", "daily-linkbtn", "or record by voice");
+    rec.type = "button";
+    rec.addEventListener("click", () => say("Voice recording for appointments arrives in a later build."));
+    h.append(rec);
+    box.append(h);
+    const field = (label, node) => { const w = el("label", "daily-field"); w.append(el("span", "daily-muted", label), node); return w; };
+    const st = new Date(f.start || payload.now);
+    const en = new Date(f.end || (st.getTime() + 3600000));
+    const date = el("input", "daily-input"); date.type = "date"; date.value = dKey(st);
+    const t1 = el("input", "daily-input"); t1.type = "time"; t1.value = f.id || f.end ? clock(st.getTime()) : "09:00";
+    const t2 = el("input", "daily-input"); t2.type = "time"; t2.value = f.id || f.end ? clock(en.getTime()) : "10:00";
+    const dt = el("div", "daily-dtrow"); dt.append(date, t1, el("span", "daily-muted", "–"), t2);
+    const who = el("input", "daily-input"); who.value = f.who || ""; who.maxLength = 100; who.placeholder = "Who or what";
+    const notes = el("textarea", "daily-input"); notes.rows = 2; notes.value = f.notes || ""; notes.maxLength = 500; notes.placeholder = "Anything worth remembering about the person";
+    const contact = el("input", "daily-input"); contact.value = f.contact || ""; contact.maxLength = 200; contact.placeholder = "Phone and email";
+    const loc = el("textarea", "daily-input"); loc.rows = 2; loc.value = f.location || ""; loc.maxLength = 300; loc.placeholder = "Where, and where exactly to meet";
+    const ckL = el("label", "daily-check"); const ck = document.createElement("input"); ck.type = "checkbox"; ck.checked = f.shareMerav !== false;
+    ckL.append(ck, document.createTextNode("Merav can see this entry"));
+    box.append(field("Date and time", dt), field("Who", who), field("Notes on the person", notes), field("Contact details", contact), field("Location and meeting place", loc), ckL);
+    const acts = el("div", "daily-newlist");
+    const save = async () => {
+      const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.value), a = /^(\d{2}):(\d{2})$/.exec(t1.value), b = /^(\d{2}):(\d{2})$/.exec(t2.value);
+      if (!dm || !a) { say("Pick a date and a start time."); return; }
+      const start = new Date(+dm[1], +dm[2] - 1, +dm[3], +a[1], +a[2]).getTime();
+      const end = b ? new Date(+dm[1], +dm[2] - 1, +dm[3], +b[1], +b[2]).getTime() : 0;
+      const r = await api.saveAppointment({ id: f.id, who: who.value, notes: notes.value, contact: contact.value, location: loc.value, shareMerav: ck.checked, start, end });
+      if (r && r.ok) { apptForm = null; cursor = start; await load(true); render(); say("Saved to your calendar."); } else say((r && r.reason) || "Could not save.");
+    };
+    acts.append(btn("Save to calendar", "daily-btn pri", save), btn("Cancel", "daily-btn", () => { apptForm = null; render(); }));
+    if (f.id) acts.append(btn("Delete", "daily-btn", async () => { if (!confirm("Delete this appointment?")) return; const r = await api.deleteAppointment(f.id); if (r && r.ok) { apptForm = null; await load(true); render(); } else say((r && r.reason) || "Could not delete."); }));
+    acts.append(el("span", "daily-sp"), btn("Record ●", "daily-btn", () => say("Voice recording for appointments arrives in a later build.")));
+    box.append(acts, el("div", "daily-leg", "Voice example: \"meeting on the 14th with Yossi at three\" fills the form; Iddo checks and saves."));
+    setTimeout(() => who.focus(), 0);
+    return box;
   }
 
   // ---------------------------------------------------------------- Settings
@@ -716,6 +1064,9 @@
     dateEl.textContent = payload ? (() => { const d = new Date(payload.now); return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`; })() : "";
     settingsBtn.classList.toggle("on", showSettings);
     closePop();
+    layout = computeLayout();
+    view.classList.toggle("narrow", layout === "narrow");
+    view.classList.toggle("more", layout === "more");
     body.replaceChildren();
     if (!payload) { renderTabs(); body.append(el("div", "daily-muted daily-pad", "Loading...")); return; }
     renderTabs();
@@ -724,8 +1075,8 @@
       if (showSettings) body.append(renderSettings());
       else if (tab === "today") body.append(renderToday());
       else if (tab === "shopping") body.append(renderShopping());
-      else if (tab === "emails") body.append(renderSoon("Emails", "Needs-your-answer, sent-no-reply and people-to-write-to arrive in a later build."));
-      else if (tab === "schedule") body.append(renderSoon("Schedule", "Month and six-month calendars and the Add appointment form arrive in a later build."));
+      else if (tab === "emails") body.append(renderEmails());
+      else if (tab === "schedule") body.append(renderSchedule());
       else if (tab === "tasks") body.append(renderTasks());
       else if (tab === "dates") body.append(renderDates());
     } catch (e) {

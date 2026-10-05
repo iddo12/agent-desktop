@@ -144,6 +144,8 @@ contextBridge.exposeInMainWorld("api", {
     editTask: (args) => ipcRenderer.invoke("daily-task-edit", args),
     saveDate: (item) => ipcRenderer.invoke("daily-dates-save", item),
     deleteDate: (id) => ipcRenderer.invoke("daily-dates-delete", { id }),
+    saveAppointment: (item) => ipcRenderer.invoke("daily-appointment-save", item),
+    deleteAppointment: (id) => ipcRenderer.invoke("daily-appointment-delete", { id }),
   },
   // v1.55.0 IRIS (renderer/iris.js)
   iris: {

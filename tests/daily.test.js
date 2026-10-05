@@ -64,7 +64,8 @@ t("upcomingDates sorted and invalid rows dropped", () => {
 t("nextEvent skips finished events", () => {
   const e = M.placeholderEvents(NOW);
   assert.strictEqual(M.nextEvent(e, NOW).title, "Dentist, Dr. Levi");
-  assert.strictEqual(M.nextEvent(e, Date.parse("2026-10-05T23:00:00")), null);
+  assert.strictEqual(M.nextEvent(e, Date.parse("2026-10-05T23:00:00")).title, "Trade show prep");
+  assert.strictEqual(M.nextEvent(e.slice(0, 4), Date.parse("2026-10-05T23:00:00")), null);
 });
 t("shoppingSummary ignores done and archived items", () => {
   const s = M.shoppingSummary({ lists: [{ items: [{ added: iso(6), addedBy: "PA" }, { added: iso(9), doneAt: iso(1) }, { added: iso(9), archivedAt: iso(1) }] }, { items: [] }] }, NOW);
@@ -176,6 +177,43 @@ t("sourceTag names known stores and falls back to the domain", () => {
 });
 
 // ---- main-process loader: real task-store reading, atomic writes, caching (fake ipcMain)
+// ---- Phase 3: emails + schedule logic
+t("waitClass: 1-2 d grey, 3-4 d amber, 5+ d red", () => {
+  assert.deepStrictEqual([1, 2, 3, 4, 5, 9].map(M.waitClass), ["d0", "d0", "d3", "d3", "d5", "d5"]);
+});
+t("placeholder emails reproduce the mockup sections; attention = needs answer + sent 3+ d", () => {
+  const e = M.placeholderEmails(NOW);
+  assert.strictEqual(e.top.length, 4); assert.strictEqual(e.needAnswer.length, 3); assert.strictEqual(e.sentNoReply.length, 3); assert.strictEqual(e.peopleToWrite.length, 2);
+  assert.deepStrictEqual(M.emailAccountCounts(e, ["Zorg", "Editor", "LensVid contact"]), { Zorg: 3, Editor: 1, "LensVid contact": 1 });
+  assert.strictEqual(M.filterByAccount(e.top, "Editor").length, 1); assert.strictEqual(M.filterByAccount(e.top, "all").length, 4);
+});
+t("monthGrid: October 2026 starts Sunday 27 Sep and has 5 weeks; Feb 2026 has 4", () => {
+  const g = M.monthGrid(2026, 10);
+  assert.strictEqual(g.length, 5); assert.strictEqual(g[0][0].key, "2026-09-27"); assert.strictEqual(g[0][0].inMonth, false); assert.strictEqual(g[0][4].key, "2026-10-01"); assert.strictEqual(g[4][6].key, "2026-10-31");
+  assert.strictEqual(M.monthGrid(2026, 2).length >= 4, true); assert.strictEqual(M.monthGrid(2026, 8).length, 6);
+});
+t("scheduleEntries: appointments by day, birthdays repeat yearly, dates sort first, showOnSchedule:false hidden, one-offs only in their year", () => {
+  const ev = [{ id: "a", title: "B", start: Date.parse("2026-10-09T09:00:00"), end: Date.parse("2026-10-09T10:00:00"), cal: "iddo" }, { id: "a2", title: "A", start: Date.parse("2026-10-09T07:00:00"), cal: "google" }];
+  const dates = [{ id: "d1", title: "Mum", month: 10, day: 9, kind: "birthday" }, { id: "d2", title: "hidden", month: 10, day: 9, showOnSchedule: false }, { id: "d3", title: "once", month: 10, day: 20, repeat: false, year: 2025 }, { id: "d4", title: "next yr", month: 1, day: 3 }];
+  const m = M.scheduleEntries(ev, dates, new Date(2026, 9, 1).getTime(), new Date(2026, 10, 1).getTime());
+  assert.deepStrictEqual(m.get("2026-10-09").map((x) => x.title), ["Mum", "A", "B"]);
+  assert(!m.has("2026-10-20")); assert.strictEqual(m.size, 1);
+  const y = M.scheduleEntries([], dates, new Date(2026, 11, 1).getTime(), new Date(2027, 2, 1).getTime());
+  assert.deepStrictEqual([...y.keys()], ["2027-01-03"]);
+});
+t("sixMonths: counts and day kinds across a year boundary", () => {
+  const ev = [{ start: Date.parse("2026-12-20T10:00:00") }, { start: Date.parse("2026-12-24T10:00:00") }];
+  const six = M.sixMonths(ev, [{ id: "x", title: "Xmas", month: 12, day: 24 }, { id: "y", title: "Dan", month: 1, day: 3 }], 2026, 11);
+  assert.deepStrictEqual(six.map((m) => m.month), [11, 12, 1, 2, 3, 4]); assert.strictEqual(six[2].year, 2027);
+  assert.strictEqual(six[1].count, 3); assert.deepStrictEqual(six[1].days, { 20: "appt", 24: "both" }); assert.deepStrictEqual(six[2].days, { 3: "date" });
+});
+t("cleanAppointment: needs who and a valid start; end defaults to +1 h; fields trimmed", () => {
+  assert(M.cleanAppointment({ who: " ", start: NOW }).error); assert(M.cleanAppointment({ who: "Y", start: "x" }).error);
+  const a = M.cleanAppointment({ who: " Yossi ", start: NOW, end: NOW - 5, notes: "n", shareMerav: false }).item;
+  assert.strictEqual(a.who, "Yossi"); assert.strictEqual(a.title, "Yossi"); assert.strictEqual(a.end, NOW + 3600000); assert.strictEqual(a.shareMerav, false); assert.strictEqual(a.own, true);
+  assert.strictEqual(M.cleanAppointment({ id: "k", who: "Z", start: NOW }).item.id, "k");
+});
+
 (async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "daily-test-"));
   fs.mkdirSync(path.join(root, "shared_reports", "tasks"), { recursive: true });

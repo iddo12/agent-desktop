@@ -93,7 +93,7 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
     const p = providers.placeholder;
     const { tasks, source } = await loadTasks(now);
     const own = readJson(f("appointments.json"), { items: [] });
-    const ownEvents = (Array.isArray(own.items) ? own.items : []).filter((e) => e && Number.isFinite(e.start));
+    const ownEvents = (Array.isArray(own.items) ? own.items : []).filter((e) => e && Number.isFinite(e.start)).map((e) => Object.assign({ cal: "iddo" }, e, { own: true }));
     const events = p.events(now).concat(ownEvents).sort((a, b) => a.start - b.start);
     const data = {
       tasks, emails: p.emails(now), events,
@@ -215,6 +215,34 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
       const cliArgs = model.taskEditArgs(t, change);   // validates the change
       if (source === "fixture") fixtureEdits.set(t.id, Object.assign({}, fixtureEdits.get(t.id), change));
       else await run(cliArgs);
+      cache = null;
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: err.message };
+    }
+  });
+
+  // Own appointments (appointments.json). Placeholder/provider events are never written here.
+  ipcMain.handle("daily-appointment-save", (e, raw) => {
+    try {
+      const c = model.cleanAppointment(raw || {});
+      if (c.error) return { ok: false, reason: c.error };
+      const d = readJson(f("appointments.json"), { items: [] });
+      if (!Array.isArray(d.items)) d.items = [];
+      const i = d.items.findIndex((x) => x.id === c.item.id);
+      if (i >= 0) d.items[i] = c.item; else d.items.push(c.item);
+      writeJsonAtomic(f("appointments.json"), d);
+      cache = null;
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: err.message };
+    }
+  });
+  ipcMain.handle("daily-appointment-delete", (e, args) => {
+    try {
+      const d = readJson(f("appointments.json"), { items: [] });
+      d.items = (d.items || []).filter((x) => x.id !== (args && args.id));
+      writeJsonAtomic(f("appointments.json"), d);
       cache = null;
       return { ok: true };
     } catch (err) {
