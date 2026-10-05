@@ -7,6 +7,7 @@ const M = require("../src/daily/model");
 
 let fails = 0, n = 0;
 function t(name, fn) { n++; try { fn(); } catch (e) { fails++; console.error("FAIL " + name + "\n  " + e.message); } }
+const WIN = { webContents: { id: 1 } }, EV = { sender: WIN.webContents };   // fake main window and its IPC event
 const NOW = Date.parse("2026-10-05T10:00:00");
 const iso = (daysAgo) => new Date(NOW - daysAgo * M.DAY).toISOString();
 
@@ -107,8 +108,8 @@ t("filterTasks + taskListCounts follow area and status; lists sorted by count", 
 t("taskEditArgs: status and priority map onto tasks.py flags and keep the exact 1-10 as a tag", () => {
   const task = { agent: "Security", id: "a1", tags: ["personal", "queued", "p3"], priority: 3 };
   assert.deepStrictEqual(M.taskEditArgs(task, { status: "waiting", priority: 9 }),
-    ["--agent", "Security", "--update", "a1", "--status", "blocked", "--set-needs-iddo", "no", "--priority", "1", "--tags", "personal,p9"]);
-  assert.deepStrictEqual(M.taskEditArgs(task, { status: "needs" }).slice(4, 8), ["--status", "open", "--set-needs-iddo", "yes"]);
+    ["--agent=Security", "--update=a1", "--status=blocked", "--set-needs-iddo=no", "--priority=1", "--tags=personal,p9"]);
+  assert.deepStrictEqual(M.taskEditArgs(task, { status: "needs" }).slice(2, 4), ["--status=open", "--set-needs-iddo=yes"]);
   assert(M.taskEditArgs(task, { status: "queued" }).pop().includes("queued"));
   assert(M.taskEditArgs(task, { priority: 5 }).pop().includes("queued"), "queued tag kept when only priority changes");
   assert.throws(() => M.taskEditArgs(task, { priority: 11 })); assert.throws(() => M.taskEditArgs(task, {})); assert.throws(() => M.taskEditArgs(task, { status: "x" }));
@@ -259,7 +260,7 @@ t("voice: task add validation and tasks.py arguments", () => {
   assert(M.cleanNewTask({ title: "x", agent: "a" + String.fromCharCode(92) + "b" }).error); assert(M.cleanNewTask({ title: "x", agent: "a/b" }).error);
   assert(M.cleanNewTask({ title: "x", agent: "A", priority: 11 }).error);
   const c = M.cleanNewTask({ title: "Renew insurance", agent: "Personal Assistant", priority: 6, area: "Personal", list: "Home" });
-  assert.deepStrictEqual(M.taskAddArgs(c.task), ["--agent", "Personal Assistant", "--add", "Renew insurance", "--priority", "2", "--tags", "p6,personal,voice", "--group", "Home"]);
+  assert.deepStrictEqual(M.taskAddArgs(c.task), ["--agent=Personal Assistant", "--add=Renew insurance", "--priority=2", "--tags=p6,personal,voice", "--group=Home"]);
 });
 t("voice: shopping add-many adds all items with added-by Voice in one go", () => {
   const s = { lists: [{ id: "l1", name: "Groceries", items: [] }] };
@@ -274,21 +275,21 @@ t("voice: shopping add-many adds all items with added-by Voice in one go", () =>
   fs.writeFileSync(path.join(root, "shared_reports", "tasks", "Security.json"), "﻿" + JSON.stringify({ agent: "Security", items: [{ id: "a", title: "T", status: "open", priority: 1, needsIddo: true, created: new Date(Date.now() - 2 * M.DAY).toISOString() }] }));
   fs.writeFileSync(path.join(root, "shared_reports", "tasks", "broken.json"), "{nope");
   const handlers = {};
-  require("../src/daily/main-daily").init({ ipcMain: { handle: (c, f) => { handlers[c] = f; } }, root, testMode: false, log: () => {} });
-  const r = await handlers["daily-load"](null, {});
+  require("../src/daily/main-daily").init({ ipcMain: { handle: (c, f) => { handlers[c] = f; } }, root, testMode: false, log: () => {}, getMainWindow: () => WIN });
+  const r = await handlers["daily-load"](EV, {});
   try {
     assert.strictEqual(r.taskSource, "store"); assert.strictEqual(r.data.tasks.length, 1);
     assert.strictEqual(r.summary.tasksNeed, 1); assert.strictEqual(r.provider.connected, false);
     assert.strictEqual(r.badge.blue, true);
-    assert.strictEqual(await handlers["daily-load"](null, {}), r, "second call within 60 s is cached");
-    assert.notStrictEqual(await handlers["daily-load"](null, { force: true }), r, "force reloads");
-    const s = await handlers["daily-settings-set"](null, { shareCalendarWithMerav: false });
+    assert.strictEqual(await handlers["daily-load"](EV, {}), r, "second call within 60 s is cached");
+    assert.notStrictEqual(await handlers["daily-load"](EV, { force: true }), r, "force reloads");
+    const s = await handlers["daily-settings-set"](EV, { shareCalendarWithMerav: false });
     assert(s.ok && s.settings.shareCalendarWithMerav === false);
-    assert.strictEqual((await handlers["daily-load"](null, {})).settings.shareCalendarWithMerav, false, "settings persisted and cache dropped");
-    assert((await handlers["daily-shopping-create-list"](null, { name: "Groceries" })).ok);
-    assert(!(await handlers["daily-shopping-create-list"](null, { name: "groceries" })).ok, "duplicate name refused");
-    assert(!(await handlers["daily-shopping-create-list"](null, { name: "  " })).ok);
-    assert.strictEqual((await handlers["daily-load"](null, {})).summary.shopLists, 1);
+    assert.strictEqual((await handlers["daily-load"](EV, {})).settings.shareCalendarWithMerav, false, "settings persisted and cache dropped");
+    assert((await handlers["daily-shopping-create-list"](EV, { name: "Groceries" })).ok);
+    assert(!(await handlers["daily-shopping-create-list"](EV, { name: "groceries" })).ok, "duplicate name refused");
+    assert(!(await handlers["daily-shopping-create-list"](EV, { name: "  " })).ok);
+    assert.strictEqual((await handlers["daily-load"](EV, {})).summary.shopLists, 1);
     assert(!fs.readdirSync(path.join(root, "daily")).some((f) => f.endsWith(".tmp")), "no temp files left");
     n++;
     // ---- Phase 2 handlers (fake fetch / fake tasks.py / fake thumbnail)
@@ -297,52 +298,52 @@ t("voice: shopping add-many adds all items with added-by Voice in one go", () =>
       const h2 = {};
       const root2 = fs.mkdtempSync(path.join(os.tmpdir(), "daily-test2-"));
       require("../src/daily/main-daily").init({
-        ipcMain: { handle: (c, f) => { h2[c] = f; } }, root: root2, testMode: false, log: () => {},
+        ipcMain: { handle: (c, f) => { h2[c] = f; } }, getMainWindow: () => WIN, root: root2, testMode: false, log: () => {},
         runPython: async (args) => { ran.push(args); return "ok"; },
         fetchProduct: async (u) => (/blocked/.test(u) ? { found: false, title: "", image: "", price: "", source: "AliExpress", link: u, reason: "The site answered 403." }
           : /private/.test(u) ? { rejected: true, reason: "That address is private." }
           : { found: true, title: "SmallRig cage", image: "https://img.example.com/c.jpg", price: "$64.00", source: "B&H", link: u }),
         makeThumb: async (url, id, dir) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, id + ".png"), Buffer.from("89504e47", "hex")); return id + ".png"; },
       });
-      await h2["daily-shopping-create-list"](null, { name: "Studio" });
-      const lid = (await h2["daily-load"](null, { force: true })).data.shopping.lists[0].id;
-      assert((await h2["daily-shopping"](null, { op: "add", listId: lid, text: "Tape", addedBy: "Iddo" })).ok);
-      const lk = await h2["daily-shopping"](null, { op: "add-link", listId: lid, url: "https://www.bhphotovideo.com/x" });
+      await h2["daily-shopping-create-list"](EV, { name: "Studio" });
+      const lid = (await h2["daily-load"](EV, { force: true })).data.shopping.lists[0].id;
+      assert((await h2["daily-shopping"](EV, { op: "add", listId: lid, text: "Tape", addedBy: "Iddo" })).ok);
+      const lk = await h2["daily-shopping"](EV, { op: "add-link", listId: lid, url: "https://www.bhphotovideo.com/x" });
       assert(lk.ok && !lk.detailsMissing);
-      const bl = await h2["daily-shopping"](null, { op: "add-link", listId: lid, url: "https://aliexpress.com/blocked" });
+      const bl = await h2["daily-shopping"](EV, { op: "add-link", listId: lid, url: "https://aliexpress.com/blocked" });
       assert(bl.ok && bl.detailsMissing, "blocked site still adds the item");
-      assert(!(await h2["daily-shopping"](null, { op: "add-link", listId: lid, url: "https://private/x" })).ok, "SSRF-rejected link is refused");
-      const items = (await h2["daily-load"](null, { force: true })).data.shopping.lists[0].items;
+      assert(!(await h2["daily-shopping"](EV, { op: "add-link", listId: lid, url: "https://private/x" })).ok, "SSRF-rejected link is refused");
+      const items = (await h2["daily-load"](EV, { force: true })).data.shopping.lists[0].items;
       assert.strictEqual(items.length, 3); assert.strictEqual(items[1].text, "SmallRig cage"); assert(items[1].thumb && items[1].fromLink);
       assert.strictEqual(items[2].text, "Link from AliExpress"); assert(items[2].detailsMissing);
-      const th = await h2["daily-thumbs"](null, [items[1].thumb, "../../etc/passwd", "nope.png"]);
+      const th = await h2["daily-thumbs"](EV, [items[1].thumb, "../../etc/passwd", "nope.png"]);
       assert.deepStrictEqual(Object.keys(th), [items[1].thumb]); assert(th[items[1].thumb].startsWith("data:image/png;base64,"));
-      assert((await h2["daily-shopping"](null, { op: "tick", listId: lid, itemId: items[0].id })).ok);
-      const sh = await h2["daily-shopping"](null, { op: "share", listId: lid });
+      assert((await h2["daily-shopping"](EV, { op: "tick", listId: lid, itemId: items[0].id })).ok);
+      const sh = await h2["daily-shopping"](EV, { op: "share", listId: lid });
       assert(sh.ok && sh.text.startsWith("Studio (2 items)") && !sh.text.includes("Tape"));
-      await h2["daily-shopping"](null, { op: "remove", listId: lid, itemId: items[1].id });
+      await h2["daily-shopping"](EV, { op: "remove", listId: lid, itemId: items[1].id });
       await new Promise((r) => setTimeout(r, 100));
       assert(!fs.existsSync(path.join(root2, "daily", "thumbs", items[1].thumb)), "thumb removed with the item");
       // task edit goes through tasks.py
       fs.mkdirSync(path.join(root2, "shared_reports", "tasks"), { recursive: true });
       fs.writeFileSync(path.join(root2, "shared_reports", "tasks", "Security.json"), JSON.stringify({ agent: "Security", items: [{ id: "a", title: "T", status: "open", priority: 2, created: new Date().toISOString() }] }));
-      assert((await h2["daily-task-edit"](null, { agent: "Security", id: "a", status: "waiting", priority: 6 })).ok);
-      assert.deepStrictEqual(ran[0], ["--agent", "Security", "--update", "a", "--status", "blocked", "--set-needs-iddo", "no", "--priority", "2", "--tags", "p6"]);
-      assert(!(await h2["daily-task-edit"](null, { agent: "Security", id: "zzz", status: "needs" })).ok);
-      assert(!(await h2["daily-task-edit"](null, { agent: "Security", id: "a", priority: 99 })).ok);
+      assert((await h2["daily-task-edit"](EV, { agent: "Security", id: "a", status: "waiting", priority: 6 })).ok);
+      assert.deepStrictEqual(ran[0], ["--agent=Security", "--update=a", "--status=blocked", "--set-needs-iddo=no", "--priority=2", "--tags=p6"]);
+      assert(!(await h2["daily-task-edit"](EV, { agent: "Security", id: "zzz", status: "needs" })).ok);
+      assert(!(await h2["daily-task-edit"](EV, { agent: "Security", id: "a", priority: 99 })).ok);
       // voice: add a task through the same runner (real store mode); bad agent names never reach it
       ran.length = 0;
-      assert((await h2["daily-task-add"](null, { title: "Call Dana", agent: "Security", priority: 7, area: "Business" })).ok);
-      assert.deepStrictEqual(ran[0], ["--agent", "Security", "--add", "Call Dana", "--priority", "2", "--tags", "p7,voice"]);
-      assert(!(await h2["daily-task-add"](null, { title: "x", agent: "-bad" })).ok); assert.strictEqual(ran.length, 1);
+      assert((await h2["daily-task-add"](EV, { title: "Call Dana", agent: "Security", priority: 7, area: "Business" })).ok);
+      assert.deepStrictEqual(ran[0], ["--agent=Security", "--add=Call Dana", "--priority=2", "--tags=p7,voice"]);
+      assert(!(await h2["daily-task-add"](EV, { title: "x", agent: "-bad" })).ok); assert.strictEqual(ran.length, 1);
       // dates
-      assert((await h2["daily-dates-save"](null, { title: "Yossi", month: 3, day: 22, kind: "birthday" })).ok);
-      assert(!(await h2["daily-dates-save"](null, { title: "", month: 3, day: 22 })).ok);
-      let dd = (await h2["daily-load"](null, { force: true })).data.dates; assert.strictEqual(dd.length, 1);
-      await h2["daily-dates-save"](null, Object.assign({}, dd[0], { title: "Yossi B" }));
-      dd = (await h2["daily-load"](null, { force: true })).data.dates; assert.strictEqual(dd.length, 1); assert.strictEqual(dd[0].title, "Yossi B");
-      await h2["daily-dates-delete"](null, { id: dd[0].id });
-      assert.strictEqual((await h2["daily-load"](null, { force: true })).data.dates.length, 0);
+      assert((await h2["daily-dates-save"](EV, { title: "Yossi", month: 3, day: 22, kind: "birthday" })).ok);
+      assert(!(await h2["daily-dates-save"](EV, { title: "", month: 3, day: 22 })).ok);
+      let dd = (await h2["daily-load"](EV, { force: true })).data.dates; assert.strictEqual(dd.length, 1);
+      await h2["daily-dates-save"](EV, Object.assign({}, dd[0], { title: "Yossi B" }));
+      dd = (await h2["daily-load"](EV, { force: true })).data.dates; assert.strictEqual(dd.length, 1); assert.strictEqual(dd[0].title, "Yossi B");
+      await h2["daily-dates-delete"](EV, { id: dd[0].id });
+      assert.strictEqual((await h2["daily-load"](EV, { force: true })).data.dates.length, 0);
       fs.rmSync(root2, { recursive: true, force: true });
     }
   } catch (e) { fails++; console.error("FAIL main-daily\n  " + e.message); }

@@ -24,22 +24,27 @@ function isBlockedIp(ip) {
     const [a, b] = ip.split(".").map(Number);
     return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254)
       || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19))
+      || (a === 198 && b === 51 && Number(ip.split(".")[2]) === 100) || (a === 203 && b === 0 && Number(ip.split(".")[2]) === 113) || (a === 192 && b === 88)
       || a >= 224;
   }
   const s = ip.toLowerCase();
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(s);
   if (mapped) return isBlockedIp(mapped[1]);
-  if (/^::ffff:[0-9a-f:]+$/.test(s)) return true;
-  return s === "::" || s === "::1" || /^f[cd]/.test(s) || /^fe[89ab]/.test(s) || /^ff/.test(s) || /^2001:db8/.test(s) || /^64:ff9b/.test(s);
+  if (/^::ffff:[0-9a-f:]+$/.test(s)) return true;   // mapped IPv4 in hex form (what the URL parser produces): refuse
+  // ::/8 (unspecified, loopback, IPv4-compatible ::7f00:1), ULA, link-local and site-local (fe80-febf), multicast,
+  // documentation, NAT64, 6to4 (2002::/16 embeds an IPv4 address), Teredo (2001::/32)
+  return /^::/.test(s) || /^f[cd]/.test(s) || /^fe[89abcdef]/.test(s) || /^ff/.test(s) || /^2001:(db8|0:|0000:)/.test(s) || /^2002:/.test(s) || /^64:ff9b/.test(s);
 }
 
 // Only a plain https URL to a named host or a public literal IP.
 function checkUrl(u) {
   let url;
+  if (String(u).length > 2048) return { ok: false, reason: "That web address is too long." };
   try { url = new URL(String(u).trim()); } catch (e) { return { ok: false, reason: "That is not a web address." }; }
   if (url.protocol !== "https:") return { ok: false, reason: "Only https links can be read." };
   if (url.username || url.password) return { ok: false, reason: "Links with a user name are not read." };
-  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (url.port && url.port !== "443") return { ok: false, reason: "Only the standard https port is used." };
+  const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (net.isIP(host) && isBlockedIp(host)) return { ok: false, reason: "That address is private." };
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return { ok: false, reason: "That address is private." };
   return { ok: true, url };
@@ -90,12 +95,14 @@ function getOnce(url, accept, lookup) {
 }
 
 // Follows up to 3 redirects, re-checking every hop. Resolves {status, body, url} or rejects.
-async function guardedGet(u, accept, lookup) {
+async function guardedGet(u, accept, lookup, fetchOnce) {
+  const once = fetchOnce || getOnce;
   let cur = u;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const c = checkUrl(cur);
     if (!c.ok) throw new Error(c.reason);
-    const r = await getOnce(c.url, accept, lookup);
+    const r = await once(c.url, accept, lookup);
+    if (r.status >= 300 && r.status < 400 && r.headers.location && String(r.headers.location).length > 2048) throw new Error("redirect too long");
     if (r.status >= 300 && r.status < 400 && r.headers.location) { cur = new URL(r.headers.location, c.url).toString(); continue; }
     return { status: r.status, body: r.body, headers: r.headers, url: c.url.toString() };
   }

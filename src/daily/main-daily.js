@@ -15,21 +15,85 @@ const { withFsRetry } = require("../fsRetry");
 
 const CACHE_MS = 60000;
 
+const MAX_ITEMS = 5000;                      // appointments / dates kept per store
+const MAX_STORE_BYTES = 25 * 1024 * 1024;   // a store bigger than this is treated as damaged, never loaded
+
+function parseText(txt) { return JSON.parse(String(txt).replace(/^\uFEFF/, "")); }
+function isObj(v) { return v && typeof v === "object" && !Array.isArray(v); }
+
+// Plain reader (no recovery): used where a missing/odd file just means "nothing yet".
 function readJson(file, fallback) {
   try {
-    const v = JSON.parse(fs.readFileSync(file, "utf8").replace(/^﻿/, ""));
+    const v = parseText(fs.readFileSync(file, "utf8"));
     return v == null ? fallback : v;
   } catch (e) {
     return fallback;
   }
 }
+
+// Reader with recovery. Missing file -> fallback (a fresh start). Oversized, not JSON or not an object ->
+// the damaged file is kept as <file>.corrupt-<time>, the previous good copy <file>.bak is restored when it is valid,
+// and a notice is recorded so My Daily can say so. A file that merely cannot be read right now (locked) is left
+// untouched. Never throws.
+function readStore(file, fallback, notices, label) {
+  let txt;
+  try {
+    const st = fs.statSync(file);
+    if (st.size > MAX_STORE_BYTES) throw Object.assign(new Error("file is too large"), { code: "ETOOBIG" });
+    txt = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    if (e && e.code === "ENOENT") return fallback;
+    if (!(e && e.code === "ETOOBIG")) { note(notices, label, `could not be read (${e && e.code ? e.code : "error"}); showing it empty. Nothing was overwritten.`); return fallback; }
+    return recover(file, fallback, notices, label, e.message);
+  }
+  try {
+    const v = parseText(txt);
+    if (!isObj(v)) throw new Error("not an object");
+    return v;
+  } catch (e) {
+    return recover(file, fallback, notices, label, e.message);
+  }
+}
+function note(notices, label, text) {
+  if (!notices) return;
+  const msg = `${label} ${text}`;
+  if (!notices.includes(msg)) notices.push(msg);
+}
+function recover(file, fallback, notices, label, why) {
+  const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+  const kept = `${file}.corrupt-${stamp}`;
+  let keptOk = true;
+  try { fs.renameSync(file, kept); } catch (e) { keptOk = false; }
+  let restored = null;
+  try {
+    const st = fs.statSync(file + ".bak");
+    if (st.size <= MAX_STORE_BYTES) { const v = parseText(fs.readFileSync(file + ".bak", "utf8")); if (isObj(v)) restored = v; }
+  } catch (e) { /* no usable backup */ }
+  if (restored) {
+    try { fs.copyFileSync(file + ".bak", file); } catch (e) { /* the restored data is still used for this run */ }
+    note(notices, label, `was damaged (${why}); the last good copy was restored. The damaged file was kept as ${path.basename(kept)}.`);
+    return restored;
+  }
+  note(notices, label, keptOk ? `was damaged (${why}) and no backup exists, so it starts empty. The damaged file was kept as ${path.basename(kept)}.` : `was damaged (${why}); it could not be moved aside, so it will be replaced on the next save.`);
+  return fallback;
+}
+
+// Atomic write: temp file in the same folder, then rename. The previous version is kept as <file>.bak first.
 function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  withFsRetry(() => {
-    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
-    fs.renameSync(tmp, file);
-  });
+  const text = JSON.stringify(value, null, 2);
+  if (text.length > MAX_STORE_BYTES) throw new Error("That would make the file too large to keep safely.");
+  try {
+    withFsRetry(() => {
+      fs.writeFileSync(tmp, text, "utf8");
+      try { fs.copyFileSync(file, file + ".bak"); } catch (e) { /* first write: nothing to back up */ }
+      fs.renameSync(tmp, file);
+    });
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (e2) { /* already gone */ }
+    throw e;
+  }
 }
 
 // The provider interface. A real provider (Google Calendar, IMAP/Gmail) will implement the same two methods
@@ -44,12 +108,32 @@ const providers = {
   },
 };
 
-function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb }) {
+function init({ ipcMain: rawIpc, root, testMode, log, runPython, fetchProduct, makeThumb, getMainWindow }) {
   const say = typeof log === "function" ? log : () => {};
+  const notices = [];   // damaged-store notices, kept until dismissed (daily-notices-clear)
+  // Every daily-* channel: only the main window's own frame may call it (same idea as IRIS), and an oversized
+  // argument is refused before any handler looks at it. With no main window known, everything is refused.
+  const MAX_ARG_CHARS = 262144;
+  const ipcMain = {
+    handle: (channel, fn) => rawIpc.handle(channel, (event, arg) => {
+      try {
+        const w = typeof getMainWindow === "function" ? getMainWindow() : null;
+        const wc = w && !(typeof w.isDestroyed === "function" && w.isDestroyed()) ? w.webContents : null;
+        if (!wc || !event || event.sender !== wc || (event.senderFrame && wc.mainFrame && event.senderFrame !== wc.mainFrame)) { say(`${channel} refused: not the main window`); return { ok: false, reason: "Not allowed." }; }
+        if (arg !== undefined && arg !== null) {
+          let n = 0;
+          try { n = JSON.stringify(arg).length; } catch (e) { return { ok: false, reason: "Bad request." }; }
+          if (n > MAX_ARG_CHARS) return { ok: false, reason: "That request is too large." };
+        }
+      } catch (e) { return { ok: false, reason: "Not allowed." }; }
+      return fn(event, arg);
+    }),
+  };
   const dir = path.join(root, "daily");
   const f = (n) => path.join(dir, n);
   const taskDir = path.join(root, "shared_reports", "tasks");
   let cache = null;
+  let skippedTaskFiles = 0;
   const thumbDir = path.join(dir, "thumbs");
   const tasksPy = path.join(root, "shared_tools", "tasks", "tasks.py");
   const fixtureAdded = [];          // test mode: tasks added by voice live in memory only
@@ -74,16 +158,22 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
     }
     let names = [];
     try { names = (await fs.promises.readdir(taskDir)).filter((n) => n.endsWith(".json")); } catch (e) { return { tasks: [], source: "missing" }; }
+    skippedTaskFiles = 0;
     const stores = await Promise.all(names.map(async (n) => {
-      try { return JSON.parse((await fs.promises.readFile(path.join(taskDir, n), "utf8")).replace(/^﻿/, "")); } catch (e) { return null; }
+      try {
+        const file = path.join(taskDir, n);
+        if ((await fs.promises.stat(file)).size > MAX_STORE_BYTES) throw new Error("too large");
+        const v = parseText(await fs.promises.readFile(file, "utf8"));
+        if (!isObj(v)) throw new Error("not an object");
+        return v;
+      } catch (e) { skippedTaskFiles++; return null; }
     }));
     return { tasks: model.mapTaskStores(stores.filter(Boolean), now), source: "store" };
   }
 
   // Reads shopping.json and applies the lazy archive move (done > 1 h -> archive, archive > 90 d -> gone).
   function loadShopping(now) {
-    const s = readJson(f("shopping.json"), { lists: [] });
-    if (!Array.isArray(s.lists)) s.lists = [];
+    const s = model.cleanShopping(readStore(f("shopping.json"), { lists: [] }, notices, "Shopping lists"));
     if (model.sweepShopping(s, now)) { try { writeJsonAtomic(f("shopping.json"), s); } catch (e) { say(`shopping sweep not saved: ${e.message}`); } }
     return s;
   }
@@ -93,18 +183,19 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
     const now = clockNow();
     const p = providers.placeholder;
     const { tasks, source } = await loadTasks(now);
-    const own = readJson(f("appointments.json"), { items: [] });
+    const own = readStore(f("appointments.json"), { items: [] }, notices, "Appointments");
     const ownEvents = (Array.isArray(own.items) ? own.items : []).filter((e) => e && Number.isFinite(e.start)).map((e) => Object.assign({ cal: "iddo" }, e, { own: true }));
     const events = p.events(now).concat(ownEvents).sort((a, b) => a.start - b.start);
     const data = {
       tasks, emails: p.emails(now), events,
-      dates: (readJson(f("dates.json"), { items: [] }).items) || [],
+      dates: (() => { const d = readStore(f("dates.json"), { items: [] }, notices, "Birthdays & dates").items; return Array.isArray(d) ? d.filter(isObj) : []; })(),
       shopping: loadShopping(now),
     };
     const summary = model.summarize(data, now);
     return {
       now, generatedAt: Date.now(), data, summary, digest: model.buildDigest(summary, now), badge: model.badge(summary),
-      settings: model.cleanSettings(readJson(f("settings.json"), {})),
+      settings: model.cleanSettings(readStore(f("settings.json"), {}, notices, "Settings")),
+      notices: notices.concat(skippedTaskFiles ? [`${skippedTaskFiles} task file${skippedTaskFiles === 1 ? "" : "s"} could not be read and ${skippedTaskFiles === 1 ? "is" : "are"} left out.`] : []),
       provider: { connected: p.connected, label: p.label, accounts: p.accounts }, taskSource: source, test: !!testMode,
     };
   }
@@ -120,9 +211,11 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
     }
   });
 
+  ipcMain.handle("daily-notices-clear", () => { notices.length = 0; cache = null; return { ok: true }; });
+
   ipcMain.handle("daily-settings-set", (e, patch) => {
     try {
-      const cur = model.cleanSettings(readJson(f("settings.json"), {}));
+      const cur = model.cleanSettings(readStore(f("settings.json"), {}, notices, "Settings"));
       const next = model.cleanSettings(Object.assign({}, cur, patch && typeof patch === "object" ? patch : {}));
       writeJsonAtomic(f("settings.json"), next);
       cache = null;
@@ -245,8 +338,9 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
     try {
       const c = model.cleanAppointment(raw || {});
       if (c.error) return { ok: false, reason: c.error };
-      const d = readJson(f("appointments.json"), { items: [] });
+      const d = readStore(f("appointments.json"), { items: [] }, notices, "Appointments");
       if (!Array.isArray(d.items)) d.items = [];
+      if (d.items.length >= MAX_ITEMS && !d.items.some((x) => x && x.id === c.item.id)) return { ok: false, reason: "That list is full." };
       const i = d.items.findIndex((x) => x.id === c.item.id);
       if (i >= 0) d.items[i] = c.item; else d.items.push(c.item);
       writeJsonAtomic(f("appointments.json"), d);
@@ -258,7 +352,7 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
   });
   ipcMain.handle("daily-appointment-delete", (e, args) => {
     try {
-      const d = readJson(f("appointments.json"), { items: [] });
+      const d = readStore(f("appointments.json"), { items: [] }, notices, "Appointments");
       d.items = (d.items || []).filter((x) => x.id !== (args && args.id));
       writeJsonAtomic(f("appointments.json"), d);
       cache = null;
@@ -272,8 +366,9 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
     try {
       const c = model.cleanDate(raw || {});
       if (c.error) return { ok: false, reason: c.error };
-      const d = readJson(f("dates.json"), { items: [] });
+      const d = readStore(f("dates.json"), { items: [] }, notices, "Birthdays & dates");
       if (!Array.isArray(d.items)) d.items = [];
+      if (d.items.length >= MAX_ITEMS && !d.items.some((x) => x && x.id === c.item.id)) return { ok: false, reason: "That list is full." };
       const i = d.items.findIndex((x) => x.id === c.item.id);
       if (i >= 0) d.items[i] = c.item; else d.items.push(c.item);
       writeJsonAtomic(f("dates.json"), d);
@@ -285,7 +380,7 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
   });
   ipcMain.handle("daily-dates-delete", (e, args) => {
     try {
-      const d = readJson(f("dates.json"), { items: [] });
+      const d = readStore(f("dates.json"), { items: [] }, notices, "Birthdays & dates");
       d.items = (d.items || []).filter((x) => x.id !== (args && args.id));
       writeJsonAtomic(f("dates.json"), d);
       cache = null;
@@ -296,4 +391,4 @@ function init({ ipcMain, root, testMode, log, runPython, fetchProduct, makeThumb
   });
 }
 
-module.exports = { init, readJson, writeJsonAtomic, providers };
+module.exports = { init, readJson, readStore, writeJsonAtomic, providers };

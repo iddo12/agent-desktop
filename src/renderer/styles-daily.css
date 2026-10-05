@@ -192,7 +192,7 @@ button.daily-st { border: 0; font: inherit; font-size: 11px; font-weight: 600; c
 .daily-datesleg { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12.5px; }
 .daily-leg-item { display: inline-flex; align-items: center; gap: 6px; }
 .daily-sw2 { width: 14px; height: 14px; border-radius: 4px; border: 1px solid #bdb8a8; display: inline-block; }
-.daily-sw2.iddo { background: #e1ebf7; } .daily-sw2.merav { background: #ece0f2; } .daily-sw2.bday { background: #f8dfe3; } .daily-sw2.goog { background: #dcefe4; }
+.daily-sw2.iddo { background: #e1ebf7; } .daily-sw2.merav { background: #ece0f2; } .daily-sw2.bday { background: #f8dfe3; } .daily-sw2.google { background: #dcefe4; }
 
 @media (max-width: 900px) {
   .daily-shop, .daily-datesrow { flex-direction: column; align-items: stretch; }
@@ -272,3 +272,6 @@ button.daily-st { border: 0; font: inherit; font-size: 11px; font-weight: 600; c
 .daily-review select.daily-input { width: auto; align-self: flex-start; }
 .daily-voice-note { background: var(--daily-blue-bg); border: 1px solid var(--daily-blue); border-radius: 8px; padding: 6px 10px; margin-bottom: 8px; font-size: 13px; }
 @media (prefers-color-scheme: dark) { .daily-voice.recording { background: #3a1f1a; } }
+.daily-more-row { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; border-top: 1px solid var(--daily-line, #e9e4d6); }
+.daily-notice { margin-bottom: 10px; background: #fdecea; border-color: #e3b3ad; color: #7a2a20; }
+.daily-recdot { color: #dc2626; } .daily-btn.pri .daily-recdot { color: #fff; }

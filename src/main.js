@@ -4543,6 +4543,7 @@ app.whenReady().then(() => {
 try {
   require("./daily/main-daily").init({
     ipcMain,
+    getMainWindow: () => mainWindow,
     root: process.env.AGENT_DESKTOP_ROOT || path.resolve(__dirname, "..", ".."),
     testMode: testMode.TEST_MODE,
     log: (line) => logStuckWatchdog(line),

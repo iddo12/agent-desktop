@@ -4,6 +4,9 @@
 
 const DAY = 86400000;
 
+// One line of plain text: control characters and line breaks become spaces, runs of spaces collapse.
+function oneLine(v, max) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max); }
+const SAFE_ID = /^[\w-]{1,48}$/;
 function ageDays(iso, now) {
   const t = Date.parse(iso || "");
   if (!Number.isFinite(t)) return 0;
@@ -94,7 +97,7 @@ function placeholderEmails(now) {
     ],
     peopleToWrite: [
       { id: "w1", text: "Thank Dan for the Berlin intro", by: "assistant", ageDays: 3 },
-      { id: "w2", text: "Answer Yossi's wedding invitation", by: "Iddo", ageDays: 6 },
+      { id: "w2", text: "Answer Yossi's wedding invitation", by: "you", ageDays: 6 },
     ],
     hidden: 14,
   };
@@ -183,7 +186,7 @@ function summarize(d, now) {
   };
 }
 
-// Badge on the sidebar entry: open tasks; blue when something needs Iddo.
+// Badge on the sidebar entry: open tasks; blue when something needs you.
 function badge(s) { return { count: s.tasksOpen, blue: s.tasksNeed > 0 }; }
 
 function pad2(n) { return String(n).padStart(2, "0"); }
@@ -237,43 +240,44 @@ function taskListCounts(tasks, f) {
 // tasks.py arguments for a status/priority edit. `task` is a mapped task, change = {status?, priority?}.
 // tasks.py has priority 1/2/3 only, so the exact 1-10 value is also kept as a "pN" tag.
 function taskEditArgs(task, change) {
-  const a = ["--agent", task.agent, "--update", task.id];
+  // every value that comes from data is attached as --key=value, so a title/list/id that starts with "-" is never read as an option
+  const a = ["--agent=" + task.agent, "--update=" + task.id];
   const tags = (task.tags || []).filter((x) => !/^p(10|[1-9])$/.test(x) && x !== "queued");
   const st = change && change.status;
   const pr = change && change.priority;
   if (!st && !pr) throw new Error("nothing to change");
   if (st) {
     if (!["needs", "working", "waiting", "queued"].includes(st)) throw new Error("unknown status");
-    a.push("--status", st === "waiting" ? "blocked" : "open", "--set-needs-iddo", st === "needs" ? "yes" : "no");
+    a.push("--status=" + (st === "waiting" ? "blocked" : "open"), "--set-needs-iddo=" + (st === "needs" ? "yes" : "no"));
     if (st === "queued") tags.push("queued");
   } else if ((task.tags || []).includes("queued")) tags.push("queued");
   if (pr) {
     const p = Number(pr);
     if (!Number.isInteger(p) || p < 1 || p > 10) throw new Error("priority must be 1-10");
-    a.push("--priority", String(p >= 8 ? 1 : p >= 4 ? 2 : 3));
+    a.push("--priority=" + String(p >= 8 ? 1 : p >= 4 ? 2 : 3));
     tags.push("p" + p);
   } else if (task.priority) tags.push("p" + task.priority);
-  a.push("--tags", tags.join(","));
+  a.push("--tags=" + tags.join(","));
   return a;
 }
 // New task from a voice recording (phase 4): validates, then builds the tasks.py arguments. area "Personal" adds the
 // "personal" tag (that is how the Tasks tab tells areas apart); priority 1-10 is stored the same way edits do it.
 function cleanNewTask(raw) {
   const r = raw || {};
-  const title = String(r.title == null ? "" : r.title).replace(/\s+/g, " ").trim().slice(0, 200);
+  const title = oneLine(r.title, 200);
   if (!title) return { error: "A task needs a title." };
   const agent = String(r.agent == null ? "" : r.agent).trim();
   if (!agent || agent.length > 60 || /^-/.test(agent) || /[\\\/:*?"<>|]/.test(agent)) return { error: "Pick which agent owns the task." };
   const p = Number(r.priority == null ? 5 : r.priority);
   if (!Number.isInteger(p) || p < 1 || p > 10) return { error: "Priority must be 1-10." };
-  const list = String(r.list || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  const list = oneLine(r.list, 60);
   const area = r.area === "Personal" ? "Personal" : "Business";
   const tags = ["p" + p].concat(area === "Personal" ? ["personal"] : []).concat(["voice"]);
   return { task: { title, agent, priority: p, list, area, tags } };
 }
 function taskAddArgs(t) {
-  const a = ["--agent", t.agent, "--add", t.title, "--priority", String(t.priority >= 8 ? 1 : t.priority >= 4 ? 2 : 3), "--tags", t.tags.join(",")];
-  if (t.list) a.push("--group", t.list);
+  const a = ["--agent=" + t.agent, "--add=" + t.title, "--priority=" + String(t.priority >= 8 ? 1 : t.priority >= 4 ? 2 : 3), "--tags=" + t.tags.join(",")];
+  if (t.list) a.push("--group=" + t.list);
   return a;
 }
 // The same edit applied to a mapped task in memory (fixtures in test mode).
@@ -287,7 +291,27 @@ function applyTaskEdit(task, change) {
 // ---------------------------------------------------------------- Shopping lists
 const DONE_HOLD_MS = 3600000;          // a ticked item stays on the list for 1 hour
 const ARCHIVE_KEEP_MS = 90 * DAY;      // then lives in the archive for 90 days
-function newId(prefix) { return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+let idSeq = 0;
+function newId(prefix) { return prefix + Date.now().toString(36) + (idSeq++ % 1296).toString(36).padStart(2, "0") + Math.random().toString(36).slice(2, 6); }
+// A damaged or hand-edited shopping.json must never crash the loader: keep only well-formed lists and items
+// (items without an id get a stable one from their position, so ticking them still works).
+function cleanShopping(raw) {
+  const out = { lists: [] };
+  const lists = raw && typeof raw === "object" && Array.isArray(raw.lists) ? raw.lists : [];
+  lists.forEach((l, li) => {
+    if (!l || typeof l !== "object") return;
+    const items = [];
+    (Array.isArray(l.items) ? l.items : []).forEach((it, ii) => {
+      if (!it || typeof it !== "object") return;
+      const o = Object.assign({}, it);
+      o.id = SAFE_ID.test(String(it.id || "")) ? String(it.id) : "fix" + li + "_" + ii;
+      o.text = oneLine(it.text, 200) || "(untitled)";
+      items.push(o);
+    });
+    out.lists.push(Object.assign({}, l, { id: SAFE_ID.test(String(l.id || "")) ? String(l.id) : "fixl" + li, name: oneLine(l.name, 60) || "List " + (li + 1), items }));
+  });
+  return out;
+}
 function findList(s, id) { return ((s && s.lists) || []).find((l) => l.id === id) || null; }
 // Lazy sweep, run when the view loads (no timer): done > 1 h -> archived; archived > 90 d -> removed.
 function sweepShopping(s, now) {
@@ -306,7 +330,7 @@ function sweepShopping(s, now) {
 function shoppingOp(s, op, now) {
   const iso = new Date(now).toISOString();
   if (op.op === "create-list") {
-    const name = String(op.name || "").trim().slice(0, 60);
+    const name = oneLine(op.name, 60);
     if (!name) return { ok: false, reason: "A list needs a name." };
     if ((s.lists || []).some((x) => x.name.toLowerCase() === name.toLowerCase())) return { ok: false, reason: "There is already a list with that name." };
     (s.lists = s.lists || []).push({ id: newId("l"), name, created: iso, items: [] });
@@ -316,19 +340,21 @@ function shoppingOp(s, op, now) {
   if (!l) return { ok: false, reason: "That list no longer exists." };
   if (!Array.isArray(l.items)) l.items = [];
   if (op.op === "add") {
-    const text = String(op.text || "").trim().slice(0, 200);
+    const text = oneLine(op.text, 200);
     if (!text) return { ok: false, reason: "Type what to add." };
-    const it = { id: newId("i"), text, added: iso, addedBy: String(op.addedBy || "Iddo").slice(0, 60) };
-    for (const k of ["link", "source", "price", "thumb", "note"]) if (op[k]) it[k] = String(op[k]).slice(0, 500);
+    const it = { id: newId("i"), text, added: iso, addedBy: oneLine(op.addedBy || "Me", 60) };
+    for (const k of ["source", "price", "note"]) if (op[k]) it[k] = oneLine(op[k], 200);
+    if (op.link && /^https:\/\//i.test(String(op.link)) && String(op.link).length <= 2048) it.link = String(op.link);   // https only
+    if (op.thumb && /^[\w-]+\.png$/.test(String(op.thumb))) it.thumb = String(op.thumb);
     if (op.fromLink) it.fromLink = true;
     if (op.detailsMissing) it.detailsMissing = true;
     l.items.push(it);
     return { ok: true, item: it };
   }
   if (op.op === "add-many") {   // voice: several items at once, one write
-    const texts = (Array.isArray(op.texts) ? op.texts : []).map((x) => String(x || "").trim().slice(0, 200)).filter(Boolean).slice(0, 30);
+    const texts = (Array.isArray(op.texts) ? op.texts : []).map((x) => oneLine(x, 200)).filter(Boolean).slice(0, 30);
     if (!texts.length) return { ok: false, reason: "There is nothing to add." };
-    for (const text of texts) l.items.push({ id: newId("i"), text, added: iso, addedBy: String(op.addedBy || "Iddo").slice(0, 60) });
+    for (const text of texts) l.items.push({ id: newId("i"), text, added: iso, addedBy: oneLine(op.addedBy || "Me", 60) });
     return { ok: true, added: texts.length };
   }
   const it = l.items.find((x) => x.id === op.itemId);
@@ -355,18 +381,18 @@ function shoppingShareText(l) {
 // item: {id, title, month, day, year?, kind: "birthday"|"date", repeat (default true), showOnSchedule (default true), remindDays, note}
 function cleanDate(raw) {
   const month = Number(raw && raw.month), day = Number(raw && raw.day), year = Number(raw && raw.year) || 0;
-  const title = String((raw && raw.title) || "").trim().slice(0, 100);
+  const title = oneLine(raw && raw.title, 100);
   if (!title) return { error: "Give it a name or occasion." };
   if (!(Number.isInteger(month) && month >= 1 && month <= 12 && Number.isInteger(day) && day >= 1 && day <= 31)) return { error: "Pick a valid date." };
   const repeat = raw.repeat !== false;
   if (!repeat && !(year >= 1900 && year <= 2200)) return { error: "A one-off date needs a year." };
   const out = {
-    id: String(raw.id || newId("d")), title, month, day, kind: raw.kind === "birthday" ? "birthday" : "date", repeat,
+    id: SAFE_ID.test(String(raw.id || "")) ? String(raw.id) : newId("d"), title, month, day, kind: raw.kind === "birthday" ? "birthday" : "date", repeat,
     showOnSchedule: raw.showOnSchedule !== false, remindDays: [0, 1, 3, 7, 14].includes(Number(raw.remindDays)) ? Number(raw.remindDays) : 3,
   };
   if (year) out.year = year;
-  if (raw.note) out.note = String(raw.note).slice(0, 200);
-  if (raw.agent) out.agent = String(raw.agent).slice(0, 60);
+  if (raw.note) out.note = oneLine(raw.note, 200);
+  if (raw.agent) out.agent = oneLine(raw.agent, 60);
   return { item: out };
 }
 
@@ -389,21 +415,21 @@ const { waitClass, dayKey, monthGrid, scheduleEntries, sixMonths } = SCH;
 // Add-appointment form -> stored item (own store appointments.json). start/end are ms since epoch from the renderer.
 function cleanAppointment(raw) {
   const r = raw || {};
-  const who = String(r.who || "").trim().slice(0, 100);
+  const who = oneLine(r.who, 100);
   if (!who) return { error: "Say who the appointment is with." };
   const start = Number(r.start);
   if (!Number.isFinite(start) || start < 946684800000 || start > 7258118400000) return { error: "Pick a valid date and time." };
   let end = Number(r.end);
   if (!Number.isFinite(end) || end <= start) end = start + 3600000;
   return { item: {
-    id: String(r.id || newId("a")), title: who, who, start, end, notes: String(r.notes || "").slice(0, 500), contact: String(r.contact || "").slice(0, 200),
-    location: String(r.location || "").slice(0, 300), shareMerav: r.shareMerav !== false, cal: "iddo", own: true,
+    id: SAFE_ID.test(String(r.id || "")) ? String(r.id) : newId("a"), title: who, who, start, end, notes: String(r.notes || "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").slice(0, 500), contact: oneLine(r.contact, 200),
+    location: oneLine(r.location, 300), shareMerav: r.shareMerav !== false, cal: "iddo", own: true,
   } };
 }
 
 module.exports = {
   waitClass, IMPORTANCE_LABEL, emailAccountCounts, filterByAccount, dayKey, monthGrid, scheduleEntries, sixMonths, cleanAppointment, dayAt,
-  filterTasks, taskListCounts, taskEditArgs, applyTaskEdit, cleanNewTask, taskAddArgs,
+  oneLine, cleanShopping, SAFE_ID, filterTasks, taskListCounts, taskEditArgs, applyTaskEdit, cleanNewTask, taskAddArgs,
   DONE_HOLD_MS, ARCHIVE_KEEP_MS, sweepShopping, shoppingOp, shoppingCounts, shoppingShareText, findList, cleanDate,
   DAY, ageDays, priority10, taskStatus, STATUS_LABEL, mapTaskStores, fixtureTasks, placeholderEmails, placeholderEvents,
   nextOccurrence, upcomingDates, shoppingSummary, nextEvent, summarize, badge, buildDigest, clock, dateLabel, cleanSettings, DEFAULT_SETTINGS,

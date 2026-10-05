@@ -147,6 +147,7 @@ contextBridge.exposeInMainWorld("api", {
     deleteDate: (id) => ipcRenderer.invoke("daily-dates-delete", { id }),
     saveAppointment: (item) => ipcRenderer.invoke("daily-appointment-save", item),
     deleteAppointment: (id) => ipcRenderer.invoke("daily-appointment-delete", { id }),
+    clearNotices: () => ipcRenderer.invoke("daily-notices-clear"),
   },
   // v1.55.0 IRIS (renderer/iris.js)
   iris: {

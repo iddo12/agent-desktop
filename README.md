@@ -79,7 +79,15 @@ Keep the registry to destinations you would actually go back to. Registering eve
 
 ## My Daily
 
-A single view for the day: today's schedule, your most important tasks (read from the same task store your agents write to), shopping lists, emails that need an answer, and birthdays. It has its own entry in the sidebar with a badge (open tasks, blue when something needs you) and a hover summary. Nothing runs in the background: it loads when you open it. Email and calendar are not connected in this version, so those parts show clearly labelled demo data. Data lives in plain JSON files under a `daily` folder next to your agents.
+One view for your day, opened from its own entry in the sidebar (the badge shows your open tasks and turns blue when something needs you; hover the entry for a short summary). Tabs:
+
+- **Today**: counts that you can click through, today's schedule, top emails and top tasks.
+- **Tasks**: every open task your agents keep in the shared task store, filterable by area, status and list. Set the priority (1-10) or status (Needs you / Working / Waiting / Queued) with a click; "Open" jumps to the agent that owns the task.
+- **Shopping lists**: tick items off (a ticked item moves to the list's archive after an hour, kept 90 days), add by typing, by voice, or from a product link (title, picture and price are read once from the page; nothing is tracked). "Share list" copies a plain-text version to the clipboard.
+- **Schedule** (day, week, month, six months), **Birthdays & dates** and **Emails**: in this version email and calendar are not connected, so these tabs show clearly labelled demo data, plus your own appointments and dates.
+- **Record** buttons on Tasks, Shopping lists and Schedule use the same local speech-to-text as dictation; you always review the result before anything is saved.
+
+It is built to stay light: no background timers or polling, it reads its data when you open it, and the microphone is only on between Record and Stop. Data lives as plain JSON files in a `daily` folder next to your agents, written atomically with a `.bak` of the previous version; if a file is ever damaged, My Daily keeps the damaged copy, restores the last good one and tells you. Product links are fetched over https only, never from private or local addresses, with a size and time limit; web text is always shown as plain text.
 
 ## Requirements
 

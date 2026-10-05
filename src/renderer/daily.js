@@ -98,6 +98,7 @@
   function openView(wantTab) {
     if (wantTab) { tab = wantTab; showSettings = false; }
     document.body.classList.add("daily-open");
+    listenDocument(true);
     view.classList.remove("hidden");
     nav.classList.add("active");
     if (document.body.classList.contains("argus-open")) document.querySelector("#argus-view .argus-close")?.click();
@@ -114,18 +115,27 @@
     cancelVoice();
     closePop();
     if (ro) { ro.disconnect(); ro = null; }
+    listenDocument(false);
+    clearTimeout(say.t);
+    showAllTasks = false; showAllItems = false;
     document.body.classList.remove("daily-open");
     view.classList.add("hidden");
     nav.classList.remove("active");
   }
+  // Document-level listeners exist only while My Daily is open (added in openView, removed in closeView).
   // Any other sidebar destination closes this view first (capture, so it runs before their handlers).
-  document.addEventListener("click", (e) => {
-    if (!isOpen()) return;
-    if (e.target.closest(".argus-nav, .iris-nav, #library-nav, #agent-list .agent-item")) closeView();
-  }, true);
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && isOpen() && !e.target.closest("#daily-view input, #daily-view textarea")) closeView();
-  });
+  const onDocClick = (e) => { if (e.target.closest(".argus-nav, .iris-nav, #library-nav, #agent-list .agent-item")) closeView(); };
+  const onDocKey = (e) => { if (e.key === "Escape" && !e.target.closest("#daily-view input, #daily-view textarea")) closeView(); };
+  const onDocPop = (e) => { if (pop && !e.target.closest(".daily-pop, .daily-popper")) closePop(); };
+  let docListening = false;
+  function listenDocument(on) {
+    if (on === docListening) return;
+    docListening = on;
+    const f = on ? "addEventListener" : "removeEventListener";
+    document[f]("click", onDocClick, true);
+    document[f]("keydown", onDocKey);
+    document[f]("click", onDocPop, true);
+  }
 
   function say(msg) {
     toast.textContent = msg;
@@ -194,6 +204,14 @@
     for (let i = 1; i <= 10; i++) { const sw = el("span", "daily-sw", String(i)); sw.style.background = PRI_COLORS[i - 1]; l.append(sw); }
     l.append(el("span", "daily-muted", "10 highest"));
     return l;
+  }
+  // Damaged-file notices from the main process (a store was restored from its backup or started empty).
+  function noticeBanner(list) {
+    const b = el("div", "daily-banner daily-notice");
+    b.setAttribute("role", "alert");
+    b.append(el("b", null, "Heads up: "), document.createTextNode(list.join(" ")), document.createTextNode(" "));
+    b.append(btn("Dismiss", "daily-btn sm", async () => { if (api.clearNotices) await api.clearNotices(); await load(true); render(); }));
+    return b;
   }
   function demoBanner() {
     return el("div", "daily-banner", `${payload.provider.label}. Email and calendar are not connected yet, so these are examples.`);
@@ -346,7 +364,6 @@
     pop.style.left = Math.max(8, Math.min(Math.round(r.left), window.innerWidth - w - 8)) + "px";
     pop.style.top = Math.round(r.bottom + 4) + "px";
   }
-  document.addEventListener("click", (e) => { if (pop && !e.target.closest(".daily-pop, .daily-popper")) closePop(); }, true);
 
   async function after(r, okMsg) {
     if (r && r.ok) { await load(true); render(); if (okMsg) say(okMsg); return true; }
@@ -414,6 +431,7 @@
     const on = voice && voice.kind === kind && voice.phase === "recording";
     const b = btn(on ? "■ Stop" : label || "Record ●", (cls || "daily-btn") + (on ? " recording" : ""), () => startVoice(kind));
     b.title = on ? "Stop recording" : "Record by voice";
+    if (!on && /●$/.test(b.textContent)) { b.textContent = b.textContent.replace(/\s*●$/, "") + " "; b.append(el("span", "daily-recdot", "●")); }   // the dot is red like the mockups
     return b;
   }
   // The strip under the toolbar: progress, errors and the check-before-saving step.
@@ -458,6 +476,7 @@
       const texts = rv.items.map((x) => x.trim()).filter(Boolean);
       if (!texts.length) return;
       const mine = voice;
+      if ((cur.items || []).length >= ROW_CAP) showAllItems = true;
       const r = await api.shopping({ op: "add-many", listId: cur.id, texts, addedBy: "Voice" });
       if (r && r.ok) { if (voice === mine) voice = null; await after(r, `Added ${texts.length} item${texts.length === 1 ? "" : "s"} to ${cur.name}.`); } else say((r && r.reason) || "Could not add the items.");
     });
@@ -571,7 +590,8 @@
     const rows = filterTasks(all).slice().sort((a, b) => b.priority - a.priority || b.ageDays - a.ageDays);
     const c = card("Open tasks", [el("span", "daily-sp"), el("span", "daily-muted daily-sort", "sorted by priority, 10 first")]);
     if (!rows.length) c.append(el("div", "daily-muted daily-pad", "No tasks match these filters."));
-    for (const t of rows) {
+    const taskShown = showAllTasks ? rows : rows.slice(0, ROW_CAP);
+    for (const t of taskShown) {
       const row = el("div", "daily-tk");
       const ti = el("div", "daily-ti");
       const meta = el("small", "daily-muted");
@@ -601,6 +621,7 @@
       row.append(ti, pb, st, btn("Open", "daily-btn sm", () => jumpToAgent(t.agent)));
       c.append(row);
     }
+    if (rows.length > taskShown.length) c.append(moreRow(rows.length, taskShown.length, "tasks", () => { showAllTasks = true; render(); }));
     wrap.append(c);
     const lg = el("section", "daily-card daily-legendcard");
     const l1 = legendPriority();
@@ -618,6 +639,15 @@
 
   // ---------------------------------------------------------------- Shopping lists
   const thumbCache = new Map();   // file name -> data URL
+  // Very long lists draw the first ROW_CAP rows (highest priority / newest first) and a "Show all" row, so a
+  // 5,000-item list or 2,000 tasks never builds tens of thousands of DOM nodes unasked.
+  const ROW_CAP = 200;
+  let showAllTasks = false, showAllItems = false;
+  function moreRow(total, shown, what, onClick) {
+    const r = el("div", "daily-more-row");
+    r.append(el("span", "daily-muted", `Showing ${shown} of ${total} ${what}. `), btn(`Show all ${total}`, "daily-btn sm", onClick));
+    return r;
+  }
   function relDay(iso, now) {
     const t = Date.parse(iso || "");
     if (!Number.isFinite(t)) return "";
@@ -694,7 +724,7 @@
     const inp = el("input", "daily-input grow");
     inp.placeholder = "Add an item by typing";
     inp.maxLength = 200;
-    const add = async () => { const v = inp.value.trim(); if (!v) return; await after(await api.shopping({ op: "add", listId: cur.id, text: v, addedBy: "Iddo" })); const i2 = body.querySelector(".daily-shop-r input"); if (i2) i2.focus(); };
+    const add = async () => { const v = inp.value.trim(); if (!v) return; if (open.length >= ROW_CAP) showAllItems = true; await after(await api.shopping({ op: "add", listId: cur.id, text: v, addedBy: "Me" })); const i2 = body.querySelector(".daily-shop-r input"); if (i2) i2.focus(); };
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
     addRow.append(inp, btn("Add", "daily-btn pri", add), recBtn("shopping", "daily-btn"));
     const vpS = voicePanel("shopping", cur);
@@ -704,8 +734,9 @@
     const addLink = async () => {
       const v = link.value.trim();
       if (!v) return;
+      if (open.length >= ROW_CAP) showAllItems = true;   // a new item lands at the end: make sure it is visible
       lb.disabled = true; lb.textContent = "Reading the page...";
-      const r = await api.shopping({ op: "add-link", listId: cur.id, url: v, addedBy: "Iddo" });
+      const r = await api.shopping({ op: "add-link", listId: cur.id, url: v, addedBy: "Me" });
       lb.disabled = false; lb.textContent = "Add from link";
       if (r && r.ok) { await after(r, r.detailsMissing ? "Added with the link only - details not found on that page." : "Added from the link."); }
       else say((r && r.reason) || "Could not add that link.");
@@ -717,11 +748,12 @@
     if (vpS) right.append(vpS);
     right.append(linkRow);
 
-    const need = open.filter((i) => i.thumb && !thumbCache.has(i.thumb)).map((i) => i.thumb).concat(items.filter((i) => i.archivedAt && i.thumb && !thumbCache.has(i.thumb)).map((i) => i.thumb));
+    const need = open.slice(0, showAllItems ? open.length : ROW_CAP).filter((i) => i.thumb && !thumbCache.has(i.thumb)).map((i) => i.thumb).concat(items.filter((i) => i.archivedAt && i.thumb && !thumbCache.has(i.thumb)).slice(0, ROW_CAP).map((i) => i.thumb)).slice(0, 100);
     if (need.length) api.thumbs(need).then((m) => { let any = false; for (const k of Object.keys(m || {})) { thumbCache.set(k, m[k]); any = true; } if (any && isOpen() && tab === "shopping") render(); }).catch(() => {});
 
     if (!open.length) right.append(el("div", "daily-muted daily-pad", "This list is empty. Add something above."));
-    for (const it of open) {
+    const openShown = showAllItems ? open : open.slice(0, ROW_CAP);
+    for (const it of openShown) {
       const row = el("div", "daily-item" + (it.doneAt ? " done" : ""));
       const ck = el("button", "daily-ck" + (it.doneAt ? " on" : ""), it.doneAt ? "✓" : "");
       ck.type = "button";
@@ -761,6 +793,7 @@
       }
       right.append(row);
     }
+    if (open.length > openShown.length) right.append(moreRow(open.length, openShown.length, "items", () => { showAllItems = true; render(); }));
     right.append(el("div", "daily-hint", "Tick items off in the shop. A ticked item stays for 1 hour (so a mis-tap is easy to undo), then moves to this list's Archive."));
 
     // archive
@@ -770,13 +803,14 @@
       const ah = el("h3", "daily-card-h");
       ah.append(el("span", null, `Archive of ${cur.name}`), el("span", "daily-n", String(arch.length)), el("span", "daily-sp"), el("span", "daily-muted daily-sort", "kept 90 days"));
       ac.append(ah);
-      for (const it of arch) {
+      for (const it of (showAllItems ? arch : arch.slice(0, ROW_CAP))) {
         const row = el("div", "daily-item");
         const tx = el("div", "daily-ti");
         tx.append(el("div", "daily-strike", it.text), el("small", "daily-muted", doneText(it.doneAt || it.archivedAt, now)));
         row.append(tx, btn("Bring back", "daily-btn sm", async () => { await after(await api.shopping({ op: "bring-back", listId: cur.id, itemId: it.id }), "Back on the list."); }));
         ac.append(row);
       }
+      if (arch.length > ROW_CAP && !showAllItems) ac.append(moreRow(arch.length, ROW_CAP, "archived items", () => { showAllItems = true; render(); }));
       right.append(ac);
     }
     wrap.append(left, right);
@@ -953,7 +987,7 @@
       r.append(ti, dayBadge(m.ageDays), btn("Draft reminder", "daily-btn sm" + (m.ageDays >= 3 ? " pri" : ""), notYet));
       c3.append(r);
     }
-    c3.append(el("div", "daily-leg", "\"Draft reminder\" opens a ready follow-up to the recipient for Iddo to edit and send. Nothing is sent by itself."));
+    c3.append(el("div", "daily-leg", "\"Draft reminder\" opens a ready follow-up to the recipient for you to edit and send. Nothing is sent by itself."));
     const pw = em.peopleToWrite || [];
     const c4 = mk("4. People to write to", pw.length, "", "optional section");
     if (!pw.length) none(c4, "No one to write to.");
@@ -980,7 +1014,7 @@
   let sv = "month";          // day | week | month | six
   let cursor = null;         // ms; the day/week/month being shown
   let apptForm = null;       // null = closed; {} or an own appointment being edited
-  const CAL_LABEL = { iddo: "Iddo", merav: "Added by Merav", bday: "Birthday / date", google: "Google Calendar" };
+  const CAL_LABEL = { iddo: "Mine", merav: "Added by Merav", bday: "Birthday / date", google: "Google Calendar" };
   const WEEKDAY_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   function scheduleLegend() {
     const lg = el("div", "daily-legendcard daily-card daily-datesleg");
@@ -1185,7 +1219,7 @@
     if (f.id) acts.append(btn("Delete", "daily-btn", async () => { if (!confirm("Delete this appointment?")) return; const r = await api.deleteAppointment(f.id); if (r && r.ok) { apptForm = null; await load(true); render(); } else say((r && r.reason) || "Could not delete."); }));
     const rb = recBtn("schedule", "daily-btn"); rb.addEventListener("click", snap, true);
     acts.append(el("span", "daily-sp"), rb);
-    box.append(acts, el("div", "daily-leg", "Voice example: \"meeting on the 14th with Yossi at three\" fills the form; Iddo checks and saves."));
+    box.append(acts, el("div", "daily-leg", "Voice example: \"meeting on the 14th with Yossi at three\" fills the form; you check and save."));
     setTimeout(() => who.focus(), 0);
     return box;
   }
@@ -1202,7 +1236,7 @@
     r1.append(t1, sync);
     const r2 = el("div", "daily-set");
     const t2 = el("div");
-    t2.append(el("b", null, "Share my calendar with Merav"), el("div", "daily-muted sm", "She can view and add or edit entries (for example the dentist). Iddo does not see hers."));
+    t2.append(el("b", null, "Share my calendar with Merav"), el("div", "daily-muted sm", "She can view and add or edit entries (for example the dentist). You do not see hers."));
     const seg = el("div", "daily-seg");
     for (const [label, val] of [["On", true], ["Off", false]]) {
       const b = btn(label, st.shareCalendarWithMerav === val ? "daily-btn on" : "daily-btn", async () => {
@@ -1238,6 +1272,7 @@
     if (!payload) { renderTabs(); body.append(el("div", "daily-muted daily-pad", "Loading...")); return; }
     renderTabs();
     paintBadge();
+    if (payload.notices && payload.notices.length) body.append(noticeBanner(payload.notices));
     try {
       if (showSettings) body.append(renderSettings());
       else if (tab === "today") body.append(renderToday());
