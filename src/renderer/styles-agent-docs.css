@@ -1,6 +1,6 @@
 /* Agent documents side panel. Chat shrinks via #chat-view.agent-docs-open; narrow window = overlay sheet. */
 #chat-view.agent-docs-open { position: relative; }
-#chat-view.agent-docs-open #chat-body { margin-right: 380px; }
+#chat-view.agent-docs-open #chat-body, #chat-view.agent-docs-open #chat-input-bar { margin-right: 380px; }
 .agent-docs-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 380px; display: flex; flex-direction: column; gap: 8px; padding: 10px; box-sizing: border-box; background: var(--bg-panel, #1e1e1e); border-left: 1px solid var(--border, #333); z-index: 20; overflow: hidden; }
 .agent-docs-panel.hidden { display: none; }
 .agent-docs-head { display: flex; align-items: center; gap: 6px; }
@@ -34,7 +34,7 @@
 .agent-docs-viewer-title { flex: 1; font-weight: 600; }
 .agent-docs-viewer-frame, .agent-docs-viewer-img { flex: 1; min-height: 0; width: 100%; border: 0; object-fit: contain; }
 @media (max-width: 900px) {
-  #chat-view.agent-docs-open #chat-body { margin-right: 0; }
+  #chat-view.agent-docs-open #chat-body, #chat-view.agent-docs-open #chat-input-bar { margin-right: 0; }
   .agent-docs-panel { width: 100%; }
 }
 .weak-pc .agent-docs-thumb img { display: none; }

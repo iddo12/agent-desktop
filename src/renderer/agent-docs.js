@@ -67,6 +67,7 @@
     listEl.addEventListener("keydown", onKey);
     panel.append(head, searchEl, countsEl, statusEl, listEl);
     body.parentNode.insertBefore(panel, body.nextSibling);
+    window.addEventListener("resize", place);
     document.addEventListener("keydown", (e) => {
       if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "d" && agentPath) { e.preventDefault(); toggle(); }
     });
@@ -88,14 +89,21 @@
     const cv = document.getElementById("chat-view");
     if (cv) cv.classList.toggle("agent-docs-open", open);
     if (btn) btn.classList.toggle("active", open);
+    if (open) place();
     if (open && searchEl) searchEl.value = s.search;
     if (open) paintHead();
     if (open) render();
   }
 
+  // The panel sits beside #chat-body, below the header rows (offsetTop of the body inside #chat-view).
+  function place() {
+    const body = document.getElementById("chat-body");
+    if (panel && body) panel.style.top = body.offsetTop + "px";
+  }
+
   function paintHead() {
     if (!headName) return;
-    headName.textContent = (agentInfo.name || "Agent") + " - documents";
+    headName.textContent = (agentInfo.name || "Agent");
     headIcon.textContent = "";
     if (agentInfo.avatar) {
       const img = el("img");
