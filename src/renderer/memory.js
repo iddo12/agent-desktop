@@ -59,7 +59,8 @@
   function bar(used, scale, lvl) {
     const b = el("span", "mem-bar" + (lvl ? " " + lvl.cls : ""));
     const f = el("span", "mem-bar-fill");
-    f.style.width = Math.min(100, Math.round((used / scale) * 100)) + "%";
+    const pct = Math.max(used > 0 ? 2 : 0, Math.min(100, Math.round((used / scale) * 100))) + "%";
+    f.style.width = pct; f.style.setProperty("--p", pct);
     b.appendChild(f);
     return b;
   }
