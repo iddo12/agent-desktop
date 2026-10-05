@@ -307,6 +307,15 @@ t("relentless: a turn that messaged another agent / started a job but ends with 
   const l2 = [usr(NOW - 400000, "go"), wait, res(NOW - 305000), asst(NOW - 300000, "DONE: x")];
   assert.strictEqual(K.decide(Object.assign(REL(l2), { relentless: false })).verdict, "done");
 });
+t("relentless: messaging a peer earlier in the turn is not a wait - a plain report ending is sent to the next project", () => {
+  const msg = JSON.stringify({ type: "assistant", timestamp: new Date(NOW - 310000).toISOString(), message: { content: [{ type: "tool_use", name: "SendMessage", input: {} }] } });
+  const l = [usr(NOW - 400000, "go"), msg, res(NOW - 305000), asst(NOW - 300000, "Status report: the notice is built and committed.")];
+  const d = K.decide(REL(l));
+  assert.strictEqual(d.verdict, "nudge");
+  assert.strictEqual(d.kind, "next-project");
+  // plain mode keeps treating SendMessage as a wait
+  assert.strictEqual(K.decide(Object.assign(REL(l), { relentless: false })).verdict, "none");
+});
 t("relentless: 24 h max age, plain mode 3 h", () => {
   const old = [usr(NOW - 9e7, "go"), asst(NOW - 5 * 3600 * 1000, "DONE: x")];
   assert.strictEqual(K.decide(REL(old)).verdict, "nudge");

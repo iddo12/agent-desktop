@@ -51,6 +51,9 @@
 
   const READ_ONLY_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "ToolSearch", "TodoWrite", "TaskList", "TaskGet"]);
   const WAIT_TOOLS = new Set(["SendMessage", "ScheduleWakeup", "Monitor", "CronCreate"]);
+  // v1.74.2: the waits that really park an agent (a wake-up, a monitor, a cron, a background job). SendMessage alone is NOT one: an agent
+  // that told a peer something and then wrote its report is finished with that turn, not waiting for it.
+  const HARD_WAIT_TOOLS = new Set(["ScheduleWakeup", "Monitor", "CronCreate"]);
   const NON_HUMAN_PREFIX = /^\s*(<task-notification|<system-reminder|\[Message from|<command-|<local-command|<cross-session)/i;
 
   // ---------------------------------------------------------------- transcript tail
@@ -100,6 +103,7 @@
         toolUse: tools.length > 0,
         // a tool call that is real work (not just reading) / one that means "waiting on something else"
         workTool: tools.some((b) => !READ_ONLY_TOOLS.has(String(b.name || ""))),
+        hardWaitTool: tools.some((b) => HARD_WAIT_TOOLS.has(String(b.name || "")) || (b.input && (b.input.run_in_background === true || b.input.run_in_background === "true"))),
         waitTool: tools.some((b) => WAIT_TOOLS.has(String(b.name || "")) || (b.input && (b.input.run_in_background === true || b.input.run_in_background === "true"))),
         toolResult: blocks.some((b) => b && b.type === "tool_result"),
         apiError: !!o.isApiErrorMessage,
@@ -124,15 +128,16 @@
         systemish: isSystemish(e.text) || (e.originKind != null && e.originKind !== "human") || NON_HUMAN_PREFIX.test(stripMarkers(e.text)),
       };
     }
-    let turnToolUses = 0, workToolUses = 0, turnWaits = false;
+    let turnToolUses = 0, workToolUses = 0, turnWaits = false, turnHardWaits = false;
     for (let i = hi + 1; i < entries.length; i++) {
       const e = entries[i];
       if (e.role !== "assistant") continue;
       if (e.toolUse) turnToolUses++;
       if (e.workTool) workToolUses++;
       if (e.waitTool) turnWaits = true;
+      if (e.hardWaitTool) turnHardWaits = true;
     }
-    return { last, lastHuman, turnToolUses, workToolUses, turnWaits, entryCount: entries.length };
+    return { last, lastHuman, turnToolUses, workToolUses, turnWaits, turnHardWaits, entryCount: entries.length };
   }
 
   // ---------------------------------------------------------------- text classification
@@ -293,7 +298,8 @@
     if (proto && (proto.kind === "nothing-left" || !rel)) return protoVerdict(proto);
     // relentless + an explicit final DONE:/BLOCKED: line: the agent says it is finished or stuck, so a background task or a message it started
     // earlier in the turn is not a reason to leave it idle (found live 2026-10-05: Software Engineering ended DONE and was never sent on)
-    if (p.turnWaits && !(rel && proto)) return none("this turn started a background task / messaged another agent / scheduled a wake-up: it is waiting, not stalled");
+    // relentless: only a REAL wait (wake-up / monitor / cron / background job) parks the agent, and not when it ends with a DONE:/BLOCKED: line
+    if ((rel ? p.turnHardWaits && !proto : p.turnWaits)) return none("this turn started a background task / messaged another agent / scheduled a wake-up: it is waiting, not stalled");
     const h = p.lastHuman;
     const missionOn = !!(c.mission && c.mission.active && !c.mission.firstTurnDone && h && h.isResume && p.workToolUses === 0 &&
       c.now - (c.mission.since || 0) < LIMITS.missionMaxAgeMs);
