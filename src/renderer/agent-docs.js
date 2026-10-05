@@ -155,7 +155,7 @@
     countsEl.textContent = "";
     for (const [key, label] of TYPES) {
       const n = s.counts ? s.counts[key] || 0 : 0;
-      if (key !== "all" && key !== "docs" && key !== "image" && !n && s.type !== key) continue;
+      if (key !== "all" && key !== "docs" && key !== "image" && key !== "pdf" && key !== "word" && !n && s.type !== key) continue; // PDF and Word tabs always show (v1.75.4)
       const b = el("button", "agent-docs-pill" + (s.type === key ? " active" : ""), label + " " + n);
       b.addEventListener("click", () => { s.type = key; load(true); });
       countsEl.appendChild(b);
