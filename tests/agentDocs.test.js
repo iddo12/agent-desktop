@@ -96,7 +96,7 @@ function t(name, fn) { return Promise.resolve().then(fn).then(() => { n++; }, (e
         { id: "r2", link: "https://x.test/", agent: "Test", type: "document" }, { id: "r3", link: path.join(tmp, "nope.pdf"), agent: "Test" },
         { id: "r4", link: path.join(tmp, "agent", "report.pdf"), agent: "Someone Else" }];
       const svc = ad.create({
-        outputRoot: path.join(tmp, "none"), loadRegistry: () => reg, libraryState: { get: () => ({ read: {} }) },
+        outputRoot: path.join(tmp, "none"), roots: [tmp], loadRegistry: () => reg, libraryState: { get: () => ({ read: {} }) },
         shell: { openPath: async (p) => { opened.push(p); return ""; }, showItemInFolder() {} }, nativeImage: {}, thumbDir: path.join(tmp, "th"),
       });
       const r = await svc.list(agent, {});
@@ -114,10 +114,31 @@ function t(name, fn) { return Promise.resolve().then(fn).then(() => { n++; }, (e
     await t("open refuses executables", async () => {
       // an .exe never enters the list (typeOfFile null), so lookup fails
       w("agent/setup.exe");
-      const svc = ad.create({ outputRoot: tmp, loadRegistry: () => [], libraryState: { get: () => ({ read: {} }) }, shell: {}, nativeImage: {}, thumbDir: tmp });
+      const svc = ad.create({ outputRoot: tmp, roots: [tmp], loadRegistry: () => [], libraryState: { get: () => ({ read: {} }) }, shell: {}, nativeImage: {}, thumbDir: tmp });
       const agent = { path: path.join(tmp, "agent"), folderName: "agent" };
       const r = await svc.list(agent, {});
       assert.ok(!r.items.some((i) => i.ext === "exe"));
+    });
+
+    await t("registry: allow-list of types and confined to roots; open uses the allow-list", async () => {
+      for (const x of ["bad.hta", "bad.wsf", "bad.vbe", "bad.reg", "bad.url", "bad.docm", "bad.exe"]) w("agent/" + x);
+      w("outside/secret.pdf");
+      const reg = [...["bad.hta", "bad.wsf", "bad.vbe", "bad.reg", "bad.url", "bad.docm", "bad.exe"].map((x, i) => ({ id: "b" + i, link: path.join(tmp, "agent", x), agent: "Test" })),
+        { id: "out", link: path.join(tmp, "outside", "secret.pdf"), agent: "Test" },
+        { id: "ok", link: path.join(tmp, "agent", "report.pdf"), agent: "Test" }];
+      const mkSvc = (roots) => ad.create({ outputRoot: path.join(tmp, "none"), roots, loadRegistry: () => reg, libraryState: { get: () => ({ read: {} }) },
+        shell: { openPath: async () => "", showItemInFolder() {} }, nativeImage: {}, thumbDir: path.join(tmp, "th") });
+      const agent = { path: path.join(tmp, "agent"), folderName: "Test", displayName: "Test" };
+      const svc = mkSvc([path.join(tmp, "agent")]);
+      const r = await svc.list(agent, {});
+      assert.ok(r.items.some((i) => i.id === "ok"));
+      for (const id of ["b0", "b1", "b2", "b3", "b4", "b5", "b6", "out"]) assert.ok(!r.items.some((i) => i.id === id), id + " must be refused");
+      assert.strictEqual((await svc.open(agent, "out", "open")).ok, false);
+      assert.strictEqual((await svc.open(agent, "out", "view")).ok, false);
+      assert.strictEqual((await mkSvc([]).summary(agent)).total, 0); // no roots: nothing is allowed
+      assert.strictEqual((await mkSvc([path.join(tmp, "agent")]).summary(agent)).total, 1); // registry-only badge
+      // html/md/svg-in-frame are not "view"-able: they go to the default program
+      assert.ok(!ad.finishItem({ id: "h", path: "C:\\x\\a.md", title: "a", size: 1, mtimeMs: 1 }).viewable);
     });
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 

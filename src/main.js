@@ -4413,17 +4413,22 @@ ipcMain.handle("library-state-get", () => libraryState.get());
 ipcMain.handle("library-state-op", (event, op) => libraryState.apply(op));
 // Per-agent "Agent documents" panel (v1.75.0): read-only list of what one agent produced; opening goes by id.
 const agentDocs = require("./agentDocs").create({
-  outputRoot: "E:\Claude work",
+  outputRoot: "E:\\Claude work",
+  roots: [ARGUS_WORKSPACE, "E:\\Claude work", AGENTS_ROOT],
   loadRegistry: () => registry.loadEntries(ARGUS_WORKSPACE),
   libraryState,
   shell,
   nativeImage: require("electron").nativeImage,
   thumbDir: path.join(app.getPath("userData"), "agent-docs-thumbs"),
 });
+// Path -> agent map, rebuilt at most every 5 s (one listAgents() per burst of IPC calls, not per call).
+let agentDocsMap = { at: 0, map: new Map() };
 function agentForDocs(agentPath) {
   try {
-    const want = path.resolve(String(agentPath || "")).toLowerCase();
-    return listAgents({ noAvatar: true }).find((a) => path.resolve(a.path).toLowerCase() === want) || null;
+    if (Date.now() - agentDocsMap.at > 5000) {
+      agentDocsMap = { at: Date.now(), map: new Map(listAgents({ noAvatar: true }).map((a) => [path.resolve(a.path).toLowerCase(), a])) };
+    }
+    return agentDocsMap.map.get(path.resolve(String(agentPath || "")).toLowerCase()) || null;
   } catch (e) { return null; }
 }
 ipcMain.handle("agent-docs-list", async (event, { agentPath, query } = {}) => {

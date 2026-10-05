@@ -256,7 +256,11 @@
     let content;
     if (r.type === "image") { content = el("img", "agent-docs-viewer-img"); content.src = r.url; }
     else if (r.type === "video") { content = el("video", "agent-docs-viewer-img"); content.src = r.url; content.controls = true; }
-    else { content = el("iframe", "agent-docs-viewer-frame"); content.src = r.url; }
+    else {
+      content = el("iframe", "agent-docs-viewer-frame");
+      if (r.ext !== "pdf") content.setAttribute("sandbox", ""); // no scripts, no same-origin; the PDF viewer plugin needs no sandbox
+      content.src = r.url;
+    }
     viewer.append(bar, content);
     panel.parentNode.appendChild(viewer);
     if (it.unread) markRead(it);

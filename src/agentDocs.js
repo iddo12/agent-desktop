@@ -33,7 +33,8 @@ const TYPE_OF_EXT = {
   ppt: "other", pptx: "other", dwg: "other", dxf: "other", step: "other", stp: "other", stl: "other", mp3: "other", wav: "other", zip: "other",
 };
 // What the built-in viewer can show (the rest is "open externally").
-const VIEWABLE_EXT = /^(pdf|png|jpe?g|gif|webp|bmp|svg|mp4|webm|m4v|txt|md|html?)$/i;
+// No html/md/svg-in-a-frame: anything that can run script goes to the default program instead (reviewed 2026-10-06).
+const VIEWABLE_EXT = /^(pdf|png|jpe?g|gif|webp|bmp|svg|mp4|webm|m4v)$/i;
 
 // Folders that hold code, environments, caches or scratch - never listed, never walked into.
 const SKIP_DIR = new Set([
@@ -97,11 +98,25 @@ async function scanRoot(root, isRoot = true, depth = 0, budget = null) {
 
 // ---- building the list -------------------------------------------------------------------------
 
-function registryItems(entries, names) {
+// True when file `p` really lives under one of `roots` (symlinks/junctions resolved, case-insensitive).
+function underRoots(p, roots) {
+  let real;
+  try { real = fs.realpathSync(p).toLowerCase(); } catch (e) { return false; }
+  return (roots || []).some((r) => {
+    try {
+      const rr = fs.realpathSync(r).toLowerCase();
+      const rel = path.relative(rr, real);
+      return rel && !rel.startsWith("..") && !path.isAbsolute(rel);
+    } catch (e) { return false; }
+  });
+}
+
+function registryItems(entries, names, roots) {
   const out = [];
   for (const e of entries) {
     if (!e || !e.id || !e.link || /^https?:\/\//i.test(e.link) || e.type === "project") continue;
     if (!matchesAgent(e.agent, names)) continue;
+    if (!typeOfFile(e.link) || !underRoots(e.link, roots)) continue; // allow-list of types, confined to the known roots
     let st;
     try { st = fs.statSync(e.link); } catch (err) { continue; } // registry points at nothing: not a document we can show
     if (!st.isFile()) continue;
@@ -211,7 +226,7 @@ function create(deps) {
 
   async function build(agent) {
     const names = [agent.folderName, agent.displayName].filter(Boolean);
-    const reg = registryItems(deps.loadRegistry(), names);
+    const reg = registryItems(deps.loadRegistry(), names, deps.roots);
     const skip = new Set(reg.map((r) => String(r.path).toLowerCase()));
     const files = [];
     for (const r of agentRoots(agent)) files.push(...(await scanRoot(r)));
@@ -236,10 +251,18 @@ function create(deps) {
   }
 
   // Counts only (for the header badge) - same cache, no page built.
+  // Cheap on purpose: the header badge asks on every agent selection, so without a cached full listing it
+  // counts registry entries only (no folder scan). The full scan happens when the panel opens.
   async function summary(agent) {
-    const l = await listing(agent, false);
     const read = deps.libraryState.get().read;
-    return { total: l.items.length, unread: l.items.filter((i) => !read[i.id]).length };
+    const hit = lists.get(agent.path);
+    let items;
+    if (hit && Date.now() - hit.at < SCAN_CACHE_MS) items = hit.items;
+    else {
+      const names = [agent.folderName, agent.displayName].filter(Boolean);
+      items = registryItems(deps.loadRegistry(), names, deps.roots);
+    }
+    return { total: items.length, unread: items.filter((i) => !read[i.id]).length };
   }
 
   function lookup(agent, id) {
@@ -257,8 +280,8 @@ function create(deps) {
       const url = "file:///" + it.path.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/").replace(/^([A-Za-z])%3A/, "$1:");
       return { ok: true, url, title: it.title, type: it.type, ext: it.ext, path: it.path };
     }
-    // Never hand a script or installer to shell.openPath from a document list.
-    if (/\.(exe|bat|cmd|ps1|vbs|js|msi|lnk|scr|com|jar|apk|ipa)$/i.test(it.path)) return { ok: false, error: "That file type is not opened from here." };
+    // Allow-list, not deny-list: only the document types in TYPE_OF_EXT ever reach shell.openPath.
+    if (!typeOfFile(it.path)) return { ok: false, error: "That file type is not opened from here." };
     const err = await deps.shell.openPath(it.path);
     return err ? { ok: false, error: err } : { ok: true };
   }
@@ -306,6 +329,6 @@ function create(deps) {
 }
 
 module.exports = {
-  create, query, stemKey, typeOfFile, normAgent, matchesAgent, idForPath, scanRoot, registryItems, scannedItems, finishItem, dayGroup,
+  create, query, stemKey, typeOfFile, normAgent, matchesAgent, idForPath, underRoots, scanRoot, registryItems, scannedItems, finishItem, dayGroup,
   PAGE_SIZE, THUMB_CONCURRENCY,
 };
