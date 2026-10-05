@@ -1,0 +1,47 @@
+/* ARGUS Memory view (v1.72.0). Colours follow the ARGUS alert palette; amber/red also carry a symbol. */
+.memory-nav { margin: 0 12px 8px; padding: 7px 12px; display: flex; align-items: baseline; gap: 8px; width: calc(100% - 24px);
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); color: var(--text); font: inherit; cursor: pointer; text-align: left; }
+.memory-nav:hover { background: var(--bg-hover); }
+.memory-nav.active { border-color: var(--accent); background: var(--bg-active); }
+.memory-nav-title { font-weight: 700; letter-spacing: .12em; font-size: 13px; }
+.memory-nav-sub { font-size: 11px; color: var(--text-muted); }
+body.argus-open .memory-nav-sub, body.argus-open .memory-nav-title { font-size: 10px; }
+
+.agent-item { position: relative; }
+.mem-mark { position: absolute; left: 4px; bottom: 3px; right: 4px; display: flex; flex-direction: column; gap: 1px; pointer-events: none; }
+.mem-bar { display: block; height: 2px; background: var(--border); border-radius: 1px; overflow: hidden; min-width: 40px; flex: 1; }
+.mem-mark .mem-bar { flex: none; height: 2px; width: 100%; }
+.agent-item:has(> .mem-mark) { padding-bottom: 14px; }
+.mem-bar-fill { display: block; height: 100%; background: var(--text-muted); }
+.mem-bar.ok .mem-bar-fill { background: var(--argus-up); }
+.mem-bar.warn .mem-bar-fill { background: var(--argus-caut); }
+.mem-bar.crit .mem-bar-fill { background: var(--argus-warn); }
+
+.mem-pop { position: fixed; z-index: 9000; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.15); pointer-events: none; }
+.mem-pop-title { font-weight: 700; margin-bottom: 4px; }
+.mem-pop-row.warn, .mem-cell.warn .mem-num { color: var(--argus-caut); }
+.mem-pop-row.crit, .mem-cell.crit .mem-num { color: var(--argus-warn); }
+
+body.memory-open #chat-view, body.memory-open #empty-state, body.memory-open #library-view,
+body.memory-open #xp-panel, body.memory-open #argus-view { display: none !important; }
+#memory-view { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg-app); }
+#memory-view.hidden { display: none; }
+.mem-head { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.mem-title { flex: 1; display: flex; align-items: baseline; gap: 10px; }
+.mem-title-main { font-weight: 700; letter-spacing: .12em; font-size: 16px; }
+.mem-title-sub { color: var(--text-muted); font-size: 12px; }
+.mem-close { border: 0; background: none; font-size: 22px; cursor: pointer; color: var(--text-muted); }
+.mem-body { overflow: auto; padding: 14px 18px; }
+.mem-legend { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.mem-stamp { font-size: 11px; color: var(--text-muted); margin-bottom: 12px; }
+.mem-empty { color: var(--text-muted); padding: 24px 0; }
+.mem-row { display: grid; grid-template-columns: 170px 1.3fr 1fr 1.2fr 150px 90px; gap: 10px; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.mem-row-head { font-weight: 600; color: var(--text-muted); }
+.mem-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-cell { display: flex; flex-direction: column; gap: 3px; }
+.mem-cell .mem-bar { height: 6px; border-radius: 3px; }
+.mem-num { font-variant-numeric: tabular-nums; }
+.mem-open { font: inherit; font-size: 11px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); cursor: pointer; }
+.mem-open:hover { background: var(--bg-hover); }
