@@ -147,10 +147,10 @@ function ensureServer(eng, model, say) {
   return entry.ready.then((ok) => (ok ? entry : null));
 }
 // One inference on a warm server. Returns { text, lang } or throws.
-async function serverInfer(entry, wavPathOrBuffer) {
+async function serverInfer(entry, wavPathOrBuffer, lang) {
   const boundary = "----adv" + Date.now().toString(16);
   const field = (n, v) => `--${boundary}\r\nContent-Disposition: form-data; name="${n}"\r\n\r\n${v}\r\n`;
-  const head = field("response_format", "verbose_json") + field("language", "auto") + field("temperature", "0.0") +
+  const head = field("response_format", "verbose_json") + field("language", lang || "auto") + field("temperature", "0.0") +
     `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
   const body = Buffer.concat([Buffer.from(head), Buffer.isBuffer(wavPathOrBuffer) ? wavPathOrBuffer : fs.readFileSync(wavPathOrBuffer), Buffer.from(`\r\n--${boundary}--\r\n`)]);
   const r = await httpReq(entry.port, "POST", "/inference", body, { "Content-Type": "multipart/form-data; boundary=" + boundary, "Content-Length": body.length });
@@ -159,6 +159,25 @@ async function serverInfer(entry, wavPathOrBuffer) {
   if (j.error) throw new Error(String(j.error));
   touchIdle(entry.model);
   return { text: String(j.text || ""), lang: String(j.detected_language || j.language || "") };
+}
+// v1.71.2: on a very short clip ("done") language auto-detect guesses wildly (Russian "Даль."). Dictation is
+// Hebrew or English, so a short clip detected as anything else is re-run forced to English.
+const SHORT_CLIP_SEC = 4;
+function clipSeconds(wavPathOrBuffer) {
+  try {
+    const b = Buffer.isBuffer(wavPathOrBuffer) ? wavPathOrBuffer : fs.readFileSync(wavPathOrBuffer);
+    const bps = b.readUInt32LE(28);
+    return bps > 0 ? Math.max(0, b.length - 44) / bps : 99;
+  } catch (e) { return 99; }
+}
+async function inferChecked(entry, wavPathOrBuffer) {
+  let r = await serverInfer(entry, wavPathOrBuffer);
+  const l = (r.lang || "").toLowerCase();
+  if (l && !/^(en|english|he|iw|hebrew)$/.test(l) && clipSeconds(wavPathOrBuffer) < SHORT_CLIP_SEC) {
+    const again = await serverInfer(entry, wavPathOrBuffer, "en");
+    return { text: again.text, lang: "en" };
+  }
+  return r;
 }
 async function transcribeViaServer(eng, wavPath, say) {
   const t0 = Date.now();
@@ -172,7 +191,7 @@ async function transcribeViaServer(eng, wavPath, say) {
     const heSrv = eng.modelHe ? await ensureServer(eng, eng.modelHe, say) : null;
     const parts = [], langs = [];
     for (const piece of pieces) {
-      let pr = await serverInfer(main, piece);
+      let pr = await inferChecked(main, piece);
       let pl = pr.lang || "auto";
       if (heSrv && (/^(he|iw|hebrew)$/i.test(pl) || voiceSplit.hasHebrew(pr.text))) {
         try { const hr = await serverInfer(heSrv, piece); if (String(hr.text).trim()) { pr = hr; pl = "he"; } } catch (e) {}
@@ -184,7 +203,7 @@ async function transcribeViaServer(eng, wavPath, say) {
     say(`voice-transcribe: warm server, ${pieces.length} pieces (${langs.join(",")}), ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     return parts.join(" ");
   }
-  let r = await serverInfer(main, wavPath);
+  let r = await inferChecked(main, wavPath);
   let lang = r.lang || "auto";
   if (eng.modelHe && /^(he|iw|hebrew)$/i.test(lang)) {
     const he = await ensureServer(eng, eng.modelHe, say);
