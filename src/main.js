@@ -3318,6 +3318,14 @@ try {
       try { return !!JSON.parse(fs.readFileSync(path.join(agentPath, "agent_config.json"), "utf-8")).paused; } catch (e) { return false; }
     },
     readThrottle: () => {
+      // 2026-10-05 (Iddo): when the CPU guard has set its fleet hold (CPU stayed overloaded), keep-going must not wake
+      // more agents: report HOLD, which stops every nudge (relentless mode included) until the hold clears.
+      try {
+        const SL = require("./startLimiter");
+        const hf = path.join(require("./cpuGuardInstall").defaultStateDir(), "state", "fleet_hold.json");
+        const info = SL.readHoldFile(hf);
+        if (info && SL.holdIsActive(info, Date.now(), undefined, info.mtimeMs)) return "HOLD";
+      } catch (e) { /* guard files are optional */ }
       try { const j = JSON.parse(fs.readFileSync(throttleFile(), "utf-8")); return j && j.fleetThrottle && j.fleetThrottle.state; } catch (e) { return null; }
     },
     readFile: (f) => fs.readFileSync(f, "utf-8").slice(0, 200000),
