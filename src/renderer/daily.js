@@ -13,7 +13,7 @@
     ["shopping", "Shopping lists"], ["dates", "Birthdays & dates"],
   ];
   const PRI_COLORS = ["#f3f0e8", "#f0e6c0", "#ecdc9f", "#e8d085", "#e6bf6b", "#e5a95a", "#e48d4c", "#e2703f", "#dc4f35", "#c93a2a"];
-  const STATUS_LABEL = { needs: "▲ Needs you", working: "▶ Working", waiting: "⏸ Waiting", queued: "… Queued" };
+  const STATUS_LABEL = { needs: "▲ Needs you", working: "▶ Working", waiting: "◐ Waiting", queued: "… Queued" };
   const STATUS_CLASS = { needs: "you", working: "w", waiting: "wait", queued: "q" };
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -373,7 +373,7 @@
     wrap.append(r2);
 
     // the list
-    const rows = filterTasks(all);
+    const rows = filterTasks(all).slice().sort((a, b) => b.priority - a.priority || b.ageDays - a.ageDays);
     const c = card("Open tasks", [el("span", "daily-sp"), el("span", "daily-muted daily-sort", "sorted by priority, 10 first")]);
     if (!rows.length) c.append(el("div", "daily-muted daily-pad", "No tasks match these filters."));
     for (const t of rows) {
