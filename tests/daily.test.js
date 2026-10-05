@@ -73,7 +73,7 @@ t("shoppingSummary ignores done and archived items", () => {
   assert.deepStrictEqual(s, { lists: 2, openItems: 1, oldest: { days: 6, owner: "PA" } });
 });
 t("buildDigest: lines in mockup order with texts", () => {
-  const data = { tasks: M.fixtureTasks(NOW), emails: M.placeholderEmails(NOW), events: M.placeholderEvents(NOW), dates: [{ title: "Merav's mother's birthday", month: 10, day: 9, agent: "Personal Assistant" }], shopping: { lists: [] } };
+  const data = { tasks: M.fixtureTasks(NOW), emails: M.placeholderEmails(NOW), events: M.placeholderEvents(NOW), dates: [{ title: "partner's mother's birthday", month: 10, day: 9, agent: "Personal Assistant" }], shopping: { lists: [] } };
   const d = M.buildDigest(M.summarize(data, NOW), NOW);
   assert.deepStrictEqual(d.map((x) => x.kind), ["tasks", "emails", "sent", "event", "date"]);
   assert.strictEqual(d[0].text, "tasks need you"); assert.strictEqual(d[0].sub, "oldest 3d · Travel Agent");
@@ -100,9 +100,9 @@ t("priority10 reads the pN tag written by an edit", () => {
 t("filterTasks + taskListCounts follow area and status; lists sorted by count", () => {
   const ts = M.fixtureTasks(NOW);
   assert.strictEqual(M.filterTasks(ts, { area: "Personal" }).length, 2);
-  assert.strictEqual(M.filterTasks(ts, { status: "needs", list: "LensVid trade show" }).length, 2);
+  assert.strictEqual(M.filterTasks(ts, { status: "needs", list: "Studio trade show" }).length, 2);
   const lc = M.taskListCounts(ts, { area: "Business" });
-  assert.strictEqual(lc.total, 6); assert.deepStrictEqual(lc.lists[0], { name: "LensVid trade show", count: 2 });
+  assert.strictEqual(lc.total, 6); assert.deepStrictEqual(lc.lists[0], { name: "Studio trade show", count: 2 });
   assert.strictEqual(M.taskListCounts(ts, { status: "queued" }).total, 2);
 });
 t("taskEditArgs: status and priority map onto tasks.py flags and keep the exact 1-10 as a tag", () => {
@@ -185,7 +185,7 @@ t("waitClass: 1-2 d grey, 3-4 d amber, 5+ d red", () => {
 t("placeholder emails reproduce the mockup sections; attention = needs answer + sent 3+ d", () => {
   const e = M.placeholderEmails(NOW);
   assert.strictEqual(e.top.length, 4); assert.strictEqual(e.needAnswer.length, 3); assert.strictEqual(e.sentNoReply.length, 3); assert.strictEqual(e.peopleToWrite.length, 2);
-  assert.deepStrictEqual(M.emailAccountCounts(e, ["Zorg", "Editor", "LensVid contact"]), { Zorg: 3, Editor: 1, "LensVid contact": 1 });
+  assert.deepStrictEqual(M.emailAccountCounts(e, ["Personal", "Editor", "Contact"]), { Personal: 3, Editor: 1, "Contact": 1 });
   assert.strictEqual(M.filterByAccount(e.top, "Editor").length, 1); assert.strictEqual(M.filterByAccount(e.top, "all").length, 4);
 });
 t("monthGrid: October 2026 starts Sunday 27 Sep and has 5 weeks; Feb 2026 has 4", () => {

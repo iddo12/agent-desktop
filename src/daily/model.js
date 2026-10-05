@@ -63,14 +63,14 @@ function fixtureTasks(now) {
   const d = (n) => new Date(now - n * DAY).toISOString();
   const mk = (id, agent, title, st, p, area, list, age) => ({ id, agent, title, detail: "", status: st, priority: p, tags: st === "queued" ? ["queued"] : [], area, list, created: d(age), ageDays: age });
   return [
-    mk("t1", "Travel Agent", "Book flight to Berlin", "needs", 9, "Business", "LensVid trade show", 3),
-    mk("t2", "Personal Assistant", "Reply to Sony PR about review unit", "working", 8, "Business", "LensVid reviews", 1),
-    mk("t3", "Travel Agent", "Choose hotel near the venue", "needs", 7, "Business", "LensVid trade show", 2),
+    mk("t1", "Travel Agent", "Book flight to Berlin", "needs", 9, "Business", "Studio trade show", 3),
+    mk("t2", "Personal Assistant", "Reply to Sony PR about review unit", "working", 8, "Business", "Studio reviews", 1),
+    mk("t3", "Travel Agent", "Choose hotel near the venue", "needs", 7, "Business", "Studio trade show", 2),
     mk("t4", "Personal Assistant", "Renew car insurance", "waiting", 6, "Personal", "Home", 5),
-    mk("t5", "Editor-in-Chief", "Approve Thursday newsletter", "working", 5, "Business", "LensVid editorial", 1),
+    mk("t5", "Editor-in-Chief", "Approve Thursday newsletter", "working", 5, "Business", "Studio editorial", 1),
     mk("t6", "Security", "Review NAS snapshot schedule", "queued", 4, "Business", "Infrastructure", 2),
-    mk("t7", "Personal Assistant", "Gift idea for Merav's mother", "working", 3, "Personal", "Family", 4),
-    mk("t8", "Graphics", "Refresh channel banner", "queued", 2, "Business", "LensVid brand", 0),
+    mk("t7", "Personal Assistant", "Gift idea for partner's mother", "working", 3, "Personal", "Family", 4),
+    mk("t8", "Graphics", "Refresh channel banner", "queued", 2, "Business", "Studio brand", 0),
   ];
 }
 
@@ -80,20 +80,20 @@ function placeholderEmails(now) {
   const t = (h, m) => hm(now, h, m);
   return {
     top: [
-      { id: "e1", account: "LensVid contact", from: "Sony PR", subject: "Sony: review unit shipping details", at: t(9, 12), importance: 3 },
+      { id: "e1", account: "Contact", from: "Sony PR", subject: "Sony: review unit shipping details", at: t(9, 12), importance: 3 },
       { id: "e2", account: "Editor", from: "Canon comms", subject: "Press embargo lifts Tuesday", at: t(8, 40), importance: 3 },
-      { id: "e3", account: "Zorg", from: "Merav", subject: "Merav: dentist reschedule?", at: t(7, 55), importance: 2 },
-      { id: "e4", account: "Zorg", from: "Dan (photographer)", subject: "Lunch Monday?", at: t(7, 20), importance: 1 },
+      { id: "e3", account: "Personal", from: "Partner", subject: "Partner: dentist reschedule?", at: t(7, 55), importance: 2 },
+      { id: "e4", account: "Personal", from: "Dan (photographer)", subject: "Lunch Monday?", at: t(7, 20), importance: 1 },
     ],
     needAnswer: [
       { id: "n1", account: "Editor", from: "Expo organiser", subject: "Trade show booth contract", ageDays: 6, owner: "Personal Assistant" },
-      { id: "n2", account: "Zorg", from: "Migdal", subject: "Insurance quote, Migdal", ageDays: 4, owner: "Personal Assistant" },
-      { id: "n3", account: "LensVid contact", from: "Reader", subject: "Question about the 24-70 review", ageDays: 3, owner: "Personal Assistant" },
+      { id: "n2", account: "Personal", from: "Insurer", subject: "Insurance quote", ageDays: 4, owner: "Personal Assistant" },
+      { id: "n3", account: "Contact", from: "Reader", subject: "Question about the 24-70 review", ageDays: 3, owner: "Personal Assistant" },
     ],
     sentNoReply: [
-      { id: "s1", account: "Zorg", to: "landlord", subject: "Lease renewal", ageDays: 5, owner: "Personal Assistant" },
-      { id: "s2", account: "Zorg", to: "mechanic", subject: "Brakes quote", ageDays: 3, owner: "Personal Assistant" },
-      { id: "s3", account: "Zorg", to: "bank", subject: "Transfer confirmation", ageDays: 1, owner: "Personal Assistant" },
+      { id: "s1", account: "Personal", to: "landlord", subject: "Lease renewal", ageDays: 5, owner: "Personal Assistant" },
+      { id: "s2", account: "Personal", to: "mechanic", subject: "Brakes quote", ageDays: 3, owner: "Personal Assistant" },
+      { id: "s3", account: "Personal", to: "bank", subject: "Transfer confirmation", ageDays: 1, owner: "Personal Assistant" },
     ],
     peopleToWrite: [
       { id: "w1", text: "Thank Dan for the Berlin intro", by: "assistant", ageDays: 3 },
@@ -110,7 +110,7 @@ function placeholderEvents(now) {
   return [
     E("p0", -4, 10, 0, 10, 30, "Bank", "google"),
     E("p0b", -1, 20, 0, 22, 0, "Dinner with parents", "iddo"),
-    E("p1", 0, 9, 0, 9, 30, "Standup with Merav", "merav"),
+    E("p1", 0, 9, 0, 9, 30, "Standup with partner", "merav"),
     E("p2", 0, 11, 0, 12, 0, "Dentist, Dr. Levi", "iddo", { leaveBy: "10:30" }),
     E("p3", 0, 14, 0, 14, 30, "Call: supplier", "iddo"),
     E("p4", 0, 20, 0, 22, 0, "Dinner with parents", "iddo"),

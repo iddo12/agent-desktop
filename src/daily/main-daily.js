@@ -104,7 +104,7 @@ const providers = {
     label: "Not connected - demo data",
     emails: (now) => model.placeholderEmails(now),
     events: (now) => model.placeholderEvents(now),
-    accounts: ["Zorg", "Editor", "LensVid contact"],
+    accounts: ["Personal", "Editor", "Contact"],
   },
 };
 

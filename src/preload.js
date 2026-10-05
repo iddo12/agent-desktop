@@ -56,6 +56,8 @@ contextBridge.exposeInMainWorld("api", {
   registryList: () => ipcRenderer.invoke("registry-list"),
   argusData: (opts) => ipcRenderer.invoke("argus-data", opts),
   argusDecisionCount: () => ipcRenderer.invoke("argus-decision-count"),
+  memoryData: () => ipcRenderer.invoke("memory-data"),
+  memoryOpenFolder: (key) => ipcRenderer.invoke("memory-open-folder", key),
   argusOpenSource: (file) => ipcRenderer.invoke("argus-open-source", { file }),
   argusSetIdeaDecision: (payload) => ipcRenderer.invoke("argus-set-idea-decision", payload),
   libraryStateGet: () => ipcRenderer.invoke("library-state-get"),

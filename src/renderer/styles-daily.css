@@ -23,6 +23,7 @@ body.daily-open #empty-state,
 body.daily-open #library-view,
 body.daily-open #argus-view,
 body.daily-open #iris-view,
+body.daily-open #memory-view,
 body.daily-open #xp-panel { display: none !important; }
 
 /* ---- view shell ---- */

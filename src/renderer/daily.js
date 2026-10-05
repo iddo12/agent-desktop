@@ -103,6 +103,7 @@
     nav.classList.add("active");
     if (document.body.classList.contains("argus-open")) document.querySelector("#argus-view .argus-close")?.click();
     if (document.body.classList.contains("iris-open")) document.querySelector("#iris-view .iris-close")?.click();
+    if (document.body.classList.contains("memory-open")) { document.body.classList.remove("memory-open"); document.getElementById("memory-view")?.classList.add("hidden"); document.querySelector(".memory-nav")?.classList.remove("active"); }
     const lib = document.getElementById("library-view");
     if (lib && !lib.classList.contains("hidden")) document.querySelector("#library-view .library-close")?.click();
     render();
@@ -124,7 +125,7 @@
   }
   // Document-level listeners exist only while My Daily is open (added in openView, removed in closeView).
   // Any other sidebar destination closes this view first (capture, so it runs before their handlers).
-  const onDocClick = (e) => { if (e.target.closest(".argus-nav, .iris-nav, #library-nav, #agent-list .agent-item")) closeView(); };
+  const onDocClick = (e) => { if (e.target.closest(".argus-nav, .iris-nav, .memory-nav, #library-nav, #agent-list .agent-item")) closeView(); };
   const onDocKey = (e) => { if (e.key === "Escape" && !e.target.closest("#daily-view input, #daily-view textarea")) closeView(); };
   const onDocPop = (e) => { if (pop && !e.target.closest(".daily-pop, .daily-popper")) closePop(); };
   let docListening = false;
