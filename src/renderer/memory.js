@@ -88,7 +88,9 @@
       const a = lookup(item.dataset.folderName);
       if (!a) continue;
       const m = el("span", "mem-mark");
-      m.append(bar(a.l1, a.cap, level(a.l1 / a.cap)), bar(a.l2, L2_SCALE), bar(a.l3, L3_SCALE));
+      const lv = level(a.l1 / a.cap);
+      if (lv.mark) m.appendChild(el("span", "mem-glyph " + lv.cls, lv.mark));
+      m.append(bar(a.l1, a.cap, lv), bar(a.l2, L2_SCALE), bar(a.l3, L3_SCALE));
       item.appendChild(m);
       if (!item.dataset.memHover) {
         item.dataset.memHover = "1";

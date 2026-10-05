@@ -45,3 +45,6 @@ body.memory-open #xp-panel, body.memory-open #argus-view { display: none !import
 .mem-num { font-variant-numeric: tabular-nums; }
 .mem-open { font: inherit; font-size: 11px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); cursor: pointer; }
 .mem-open:hover { background: var(--bg-hover); }
+.mem-glyph { font-size: 9px; line-height: 1; align-self: flex-start; margin-right: 1px; }
+.mem-glyph.warn { color: var(--argus-caut); }
+.mem-glyph.crit { color: var(--argus-warn); }
