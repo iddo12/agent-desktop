@@ -295,6 +295,18 @@ t("relentless: paused / working / halt / stale / handoff turn / turnWaits / empt
   const waits = [usr(NOW - 400000, "go"), wait, res(NOW - 305000), asst(NOW - 300000, "Report: all queued.")];
   assert.strictEqual(K.decide(REL(waits)).verdict, "none");
 });
+t("relentless: a turn that messaged another agent / started a job but ends with DONE: or BLOCKED: is still sent to the next project", () => {
+  const wait = JSON.stringify({ type: "assistant", timestamp: new Date(NOW - 310000).toISOString(), message: { content: [{ type: "tool_use", name: "SendMessage", input: {} }] } });
+  for (const end of ["DONE: notice built, nothing pushed", "BLOCKED: waiting for the COO review"]) {
+    const l = [usr(NOW - 400000, "go"), wait, res(NOW - 305000), asst(NOW - 300000, "Report." + String.fromCharCode(10, 10) + end)];
+    const d = K.decide(REL(l));
+    assert.strictEqual(d.verdict, "nudge", end);
+    assert.strictEqual(d.kind, "next-project");
+  }
+  // plain (non-relentless) mode is unchanged: DONE stays a stop, a waiting turn stays "none"
+  const l2 = [usr(NOW - 400000, "go"), wait, res(NOW - 305000), asst(NOW - 300000, "DONE: x")];
+  assert.strictEqual(K.decide(Object.assign(REL(l2), { relentless: false })).verdict, "done");
+});
 t("relentless: 24 h max age, plain mode 3 h", () => {
   const old = [usr(NOW - 9e7, "go"), asst(NOW - 5 * 3600 * 1000, "DONE: x")];
   assert.strictEqual(K.decide(REL(old)).verdict, "nudge");

@@ -124,7 +124,13 @@
       const s = p ? st(p) : null;
       const why = p ? window.keepGoingWhy(p) : null;
       let wl = document.getElementById("keepgoing-why");
-      if (!wl && rb && rb.parentNode) { wl = document.createElement("span"); wl.id = "keepgoing-why"; fb.parentNode.insertBefore(wl, fb.nextSibling); }
+      if (!wl && rb && rb.parentNode) {
+        // the stall reason lives on the status line below the switches (next to tokens / msgs / cache), not between the switches
+        wl = document.createElement("span"); wl.id = "keepgoing-why";
+        const cs = document.getElementById("cache-status");
+        const anchor = cs && cs.parentNode ? cs : fb;
+        anchor.parentNode.insertBefore(wl, anchor.nextSibling);
+      }
       if (wl) { wl.textContent = why || ""; wl.title = why || ""; wl.className = why ? "" : "hidden"; }
       if (s && s.state === "stopped") {
         el.className = "";

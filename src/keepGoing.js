@@ -291,7 +291,9 @@
     if (age > (rel ? LIMITS_RELENTLESS : LIMITS).maxAgeMs) return none("end of turn is stale (" + Math.round(age / 60000) + " min old)");
     const proto = protocolOf(text);
     if (proto && (proto.kind === "nothing-left" || !rel)) return protoVerdict(proto);
-    if (p.turnWaits) return none("this turn started a background task / messaged another agent / scheduled a wake-up: it is waiting, not stalled");
+    // relentless + an explicit final DONE:/BLOCKED: line: the agent says it is finished or stuck, so a background task or a message it started
+    // earlier in the turn is not a reason to leave it idle (found live 2026-10-05: Software Engineering ended DONE and was never sent on)
+    if (p.turnWaits && !(rel && proto)) return none("this turn started a background task / messaged another agent / scheduled a wake-up: it is waiting, not stalled");
     const h = p.lastHuman;
     const missionOn = !!(c.mission && c.mission.active && !c.mission.firstTurnDone && h && h.isResume && p.workToolUses === 0 &&
       c.now - (c.mission.since || 0) < LIMITS.missionMaxAgeMs);
