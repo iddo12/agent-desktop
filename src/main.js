@@ -3334,7 +3334,10 @@ try {
     usageHardStop: () => {
       try {
         const c = require("./archive").getConfirmedRateLimits();
-        const hi = (x) => !!(x && typeof x.usedPct === "number" && x.usedPct >= 95);
+        // v1.75.3: the stop level is config-driven (userData\hardstop.json {"pct": 99}); default and fallback 95. Delete the file to revert.
+        let lim = 95;
+        try { const hv = Number(JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "hardstop.json"), "utf-8").replace(/^﻿/, "")).pct); if (hv >= 80 && hv <= 100) lim = hv; } catch (e) { /* no file: 95 */ }
+        const hi = (x) => !!(x && typeof x.usedPct === "number" && x.usedPct >= lim);
         if (c && (hi(c.sevenDay) || hi(c.fiveHour))) return true;
         // COO review 2026-10-05: the confirmed reading is often old, so also read the usage model's own estimate
         // (real reading + usage since) whatever its age, as long as its window has not reset. Either source >= 95% stops.
@@ -3342,7 +3345,7 @@ try {
         const nowMs = Date.now();
         return ["7d", "5h"].some((k) => {
           const w = um.windows && um.windows[k];
-          if (!w || typeof w.usedPct !== "number" || w.usedPct < 95) return false;
+          if (!w || typeof w.usedPct !== "number" || w.usedPct < lim) return false;
           if (w.resetsAt && Date.parse(w.resetsAt) < nowMs) return false;
           return true;
         });
