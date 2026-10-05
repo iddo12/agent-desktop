@@ -5,10 +5,13 @@
 //  2. When an agent was nudged the allowed number of times and still stopped although nobody blocked it, a calm amber banner
 //     in its chat ("Stopped - nobody blocked it") with one button that tells it to continue, plus an amber badge in the
 //     sidebar (header-tasks.js needsOf asks window.keepGoingStopped).
+//  3. v1.74.0 "Keep working regardless" (relentless mode): a per-agent switch and a fleet switch next to it, plus one muted line
+//     with the latest reason this agent is idle ("why") or "out of projects". ARGUS reads window.keepGoingWhy(path).
 (function () {
   "use strict";
   const states = new Map();       // agentPath -> main-process snapshot
   let globalEnabled = true;
+  let fleetRelentless = false;
   let shownFor = null;
 
   function norm(p) { return String(p || "").replace(/[\\/]+$/, "").toLowerCase(); }
@@ -19,6 +22,31 @@
     const s = st(agentPath);
     return s && s.state === "stopped" ? "Stopped - nobody blocked it: the agent ended its turn announcing a next step and " + (s.consecutive || "several") + " nudges did not get it moving. Open its chat." : null;
   };
+
+  // v1.74.0: one short line for ARGUS / the header: why is this agent idle (latest keep-going decision), or null
+  window.keepGoingWhy = function (agentPath) {
+    const s = st(agentPath);
+    if (!s || !s.relentless && !s.outOfProjects) return null;
+    if (s.outOfProjects) return "Out of projects: " + (s.outOfProjectsReason || "NOTHING-LEFT").replace(/^NOTHING-LEFT:\s*/, "");
+    if (s.state === "stopped") return "Stopped: " + (s.reason || "nudges did not help");
+    const w = s.why;
+    if (!w) return null;
+    const d = new Date(w.at), hh = (x) => (x < 10 ? "0" : "") + x;
+    return w.reason + " (since " + hh(d.getHours()) + ":" + hh(d.getMinutes()) + ")";
+  };
+
+  function relBtn(id, onClick) {
+    let b = document.getElementById(id);
+    if (b) return b;
+    const k = document.getElementById("keepgoing-btn");
+    if (!k || !k.parentNode) return null;
+    b = document.createElement("button");
+    b.id = id;
+    b.setAttribute("role", "switch");
+    b.addEventListener("click", () => { try { onClick(); } catch (err) { /* cosmetic */ } });
+    k.parentNode.insertBefore(b, k.nextSibling);
+    return b;
+  }
 
   function btn() {
     let b = document.getElementById("keepgoing-btn");
@@ -68,8 +96,36 @@
         b.title = "Keep going is " + (on ? "ON" : "OFF") + ". When this agent ends a turn by announcing a next step although nothing blocks it, send it a short nudge to do it now (at most 3 in a row, never the same message twice). " +
           "The agent can stop it any time by ending with a line 'BLOCKED: <reason>' or 'DONE: <summary>'. Click: this agent. Shift-click: all agents (now " + (globalEnabled ? "on" : "off") + ").";
       }
+      // v1.74.0: relentless switches (docked right after the Keep going switch; fleet switch after the agent one)
+      const rb = relBtn("keepgoing-rel-btn", () => {
+        const q = typeof activeAgentPath === "undefined" ? null : activeAgentPath;
+        const s0 = q ? st(q) : null;
+        if (q) window.api.keepGoingSetRelentless(q, !(s0 && s0.agentRelentless));
+      });
+      if (rb) {
+        const s1 = p ? st(p) : null, on = !!(s1 && s1.agentRelentless);
+        rb.textContent = "Keep working regardless";
+        rb.setAttribute("aria-checked", on ? "true" : "false");
+        rb.className = on ? "keepgoing-on" : "keepgoing-off";
+        rb.title = "Keep working regardless is " + (on ? "ON" : "OFF") + " for this agent. Iddo's order: do not stop when you report DONE or BLOCKED, ask a question or just report - " +
+          "go on with the next open task that needs no Iddo (tasks.py list). Up to 12 nudges in a row, 40 per 2 h. It stops only when the agent writes 'NOTHING-LEFT: <reason>', when the fleet throttle is HOLD, or when usage is at 95% (7 days or 5 hours). " +
+          "Never pushes an agent into publish/send/push/delete. Survives restarts and handoffs. Click: this agent.";
+      }
+      const fb = relBtn("keepgoing-fleet-btn", () => {
+        window.api.keepGoingSetRelentless(null, !fleetRelentless).then((r) => { if (r && r.relentless) fleetRelentless = !!r.relentless.fleet; paint(); });
+      });
+      if (fb) {
+        fb.textContent = "all agents";
+        fb.setAttribute("aria-checked", fleetRelentless ? "true" : "false");
+        fb.className = fleetRelentless ? "keepgoing-on" : "keepgoing-off";
+        fb.title = "Keep working regardless for ALL agents is " + (fleetRelentless ? "ON" : "OFF") + " (default off). Same order as the per-agent switch, applied to every agent. Click to switch.";
+      }
       const el = bannerEl();
       const s = p ? st(p) : null;
+      const why = p ? window.keepGoingWhy(p) : null;
+      let wl = document.getElementById("keepgoing-why");
+      if (!wl && rb && rb.parentNode) { wl = document.createElement("span"); wl.id = "keepgoing-why"; fb.parentNode.insertBefore(wl, fb.nextSibling); }
+      if (wl) { wl.textContent = why || ""; wl.title = why || ""; wl.className = why ? "" : "hidden"; }
       if (s && s.state === "stopped") {
         el.className = "";
         el.textContent = "";
@@ -93,6 +149,7 @@
     try {
       if (!snap || !snap.agentPath) return;
       globalEnabled = snap.globalEnabled !== false;
+      if (typeof snap.fleetRelentless === "boolean") fleetRelentless = snap.fleetRelentless;
       states.set(norm(snap.agentPath), snap);
       paint();
     } catch (e) { /* ignore */ }
@@ -104,7 +161,9 @@
       if (!r) return;
       globalEnabled = r.globalEnabled !== false;
       (r.disabled || []).forEach((p) => states.set(norm(p), { agentPath: p, agentEnabled: false, state: "ok" }));
+      if (r.relentless) fleetRelentless = !!r.relentless.fleet;
       (r.stopped || []).forEach(onState);
+      (r.agentStates || []).forEach(onState);
       paint();
     }).catch(() => {});
     setInterval(() => { try { const p = typeof activeAgentPath === "undefined" ? null : activeAgentPath; if (p !== shownFor) paint(); } catch (e) { /* ignore */ } }, 2000);

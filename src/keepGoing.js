@@ -6,6 +6,9 @@
 // that is idle: should it get a nudge? Verdicts: "nudge" | "blocked" | "done" | "none".
 //
 // Protocol agents can use (honoured exactly, no guessing): a final line `BLOCKED: <reason>` or `DONE: <summary>`.
+// v1.74.0 "relentless" mode (Iddo's order "keep working regardless", set per agent or fleet-wide from the UI): DONE / BLOCKED /
+// questions / plain reports are answered with a NEXT-PROJECT nudge instead of silence. The only exits are the final line
+// `NOTHING-LEFT: <reason>` (honoured in ALL modes), the fleet throttle HOLD, the usage hard stop (>=95%), and the safety rails.
 // No I/O here: transcript lines, throttle state and clocks are passed in, so everything is deterministic.
 (function (root) {
   "use strict";
@@ -15,6 +18,17 @@
   const NUDGE_TEXT =
     NUDGE_MARKER + " You ended your last turn announcing a next step without doing it. If it is a step you can do yourself right now, do it in this turn with tool calls and keep going until the task is finished. " +
     "If you need approval (from Iddo or anyone else), are waiting on a background job or another agent, or are done, end your reply with a line 'BLOCKED: <reason>' or 'DONE: <summary>' instead, and do not take any action that needs approval.";
+
+  // v1.74.0: the text of the next-project nudge. The marker stays first (isSystemish / nudgeLabel); "[next-project]" tells the label apart.
+  const NEXT_PROJECT_TAG = "[next-project]";
+  const MODE_PARAGRAPH =
+    "Mode: Iddo ordered keep-working-regardless. Do not stop. Run `python \"D:\\Dropbox\\Claude stuff\\shared_tools\\tasks\\tasks.py\" --agent \"<your agent folder name>\" --list`, " +
+    "pick the next open task that does not need Iddo (not NEEDS IDDO, not BLOCKED) and do it. If your current item is blocked, record why on the task with `--note` and switch to the next one. " +
+    "When the fleet throttle is SLOW, prefer cheap work in your own area and start no fan-outs. Never take an action that needs approval or is externally visible (publish, send, push, delete, merge) without that approval. " +
+    "When nothing is left that you can do, reply with exactly one final line `NOTHING-LEFT: <one line>`.";
+  const NEXT_PROJECT_TEXT = NUDGE_MARKER + " " + NEXT_PROJECT_TAG + " " + MODE_PARAGRAPH;
+  const NEXT_PROJECT_QUESTION_TEXT = NUDGE_MARKER + " " + NEXT_PROJECT_TAG + " Your last message ended with a question. Do not wait for an answer: decide yourself on the safe default, " +
+    "record the question on the task as NEEDS IDDO (`tasks.py --note`), and move on. " + MODE_PARAGRAPH;
 
   const LIMITS = {
     quietMs: 20 * 1000,            // the last entry must be this old (the agent may be about to continue by itself)
@@ -29,6 +43,11 @@
     warmupMs: 5 * 60 * 1000,       // after the app starts: do not judge anybody for this long (no burst of stale nudges)
     retryAfterMs: 3 * 60 * 1000,   // a nudge that never landed is retried after this (max 2 retries)
   };
+
+  // v1.74.0: ceilings in relentless mode - raised, but still ceilings (HOLD and the usage hard stop win over everything)
+  const LIMITS_RELENTLESS = Object.assign({}, LIMITS, {
+    maxConsecutive: 12, maxPerWindow: 40, maxAgeMs: 24 * 60 * 60 * 1000, warmupMs: 2 * 60 * 1000, minGapMs: 90 * 1000, globalGapMs: 30 * 1000,
+  });
 
   const READ_ONLY_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "ToolSearch", "TodoWrite", "TaskList", "TaskGet"]);
   const WAIT_TOOLS = new Set(["SendMessage", "ScheduleWakeup", "Monitor", "CronCreate"]);
@@ -131,6 +150,8 @@
       if (m) return { kind: "blocked", reason: m[1].slice(0, 200) };
       m = /^DONE\s*[:\-–—]\s*(.*)$/.exec(p);
       if (m) return { kind: "done", reason: m[1].slice(0, 200) };
+      m = /^NOTHING[-\s]LEFT\s*[:\-–—]\s*(.*)$/i.exec(p); // v1.74.0: the one real exit of relentless mode (also honoured in every other mode)
+      if (m) return { kind: "nothing-left", reason: m[1].slice(0, 200) };
     }
     return null;
   }
@@ -167,16 +188,21 @@
     return parts.slice(-2).join("\n");
   }
 
+  function protoVerdict(proto) {
+    if (proto.kind === "nothing-left") return { verdict: "done", reason: "NOTHING-LEFT: " + proto.reason, nothingLeft: true };
+    return { verdict: proto.kind, reason: "protocol line " + proto.kind.toUpperCase() + ": " + proto.reason };
+  }
+
   // verdict: "nudge" (announces a next action, nobody waits) | "blocked" | "done" | "none"
   function classify(text) {
     const t = String(text || "").trim();
     if (!t) return { verdict: "none", reason: "empty message" };
     const proto = protocolOf(t);
-    if (proto) return { verdict: proto.kind, reason: "protocol line " + proto.kind.toUpperCase() + ": " + proto.reason };
+    if (proto) return protoVerdict(proto);
     const win = t.slice(-800);
     const para = lastParagraph(t);
     const lastLine = plainLine(nonEmptyLines(t).slice(-1)[0] || "").replace(/["')\]}”’\s]+$/, "");
-    if (/\?$/.test(lastLine)) return { verdict: "blocked", reason: "ends with a question" };
+    if (/\?$/.test(lastLine)) return { verdict: "blocked", reason: "ends with a question", question: true };
     if (RX.others.test(win)) return { verdict: "blocked", reason: "next step belongs to Iddo / another agent" };
     if (RX.limit.test(win)) return { verdict: "blocked", reason: "throttle or usage limit mentioned" };
     if (/\bBLOCKED\b/.test(win) || /\bON HOLD\b/.test(win)) return { verdict: "blocked", reason: "says BLOCKED" };
@@ -185,7 +211,7 @@
     const tailS = tailSentences(t);
     if (RX.announce.test(tailS)) {
       if (RX.waiting.test(para)) return { verdict: "blocked", reason: "waiting on a background job, another agent, a later time or approval" };
-      if (RX.external.test(tailS)) return { verdict: "none", reason: "announced action is externally visible (push/send/publish...): never nudged" };
+      if (RX.external.test(tailS)) return { verdict: "none", reason: "announced action is externally visible (push/send/publish...): never nudged", external: true };
       return { verdict: "nudge", reason: "announces a next action" };
     }
     if (RX.weakDone.test(win)) return { verdict: "done", reason: "says finished" };
@@ -224,7 +250,13 @@
   }
 
   // The message the fresh session gets after a handoff reset (keeps the RESUME marker the renderer verifies).
-  function resumePromptText(archivedPath, info) {
+  // v1.74.0: relentless = the order "keep working regardless" is on: always the continue-immediately text plus the mode paragraph; a BLOCKED handoff does not matter.
+  function resumePromptText(archivedPath, info, relentless) {
+    if (relentless) {
+      return RESUME_MARKER + " " + archivedPath + "\n" +
+        "This is a fresh session after a planned context reset. Read that handoff file, then continue IMMEDIATELY with its exact next step, using tool calls. " +
+        "Do not recap, and do not wait for confirmation. " + MODE_PARAGRAPH;
+    }
     if (info && info.mission) {
       return RESUME_MARKER + " " + archivedPath + "\n" +
         "This is a fresh session after a planned context reset. Read that handoff file, then continue IMMEDIATELY with its exact next step, using tool calls. " +
@@ -237,8 +269,9 @@
 
   // ---------------------------------------------------------------- the decision
   // c: { now, enabled, paused, working, halt (getHaltInfo result|null), parsed (parseTail result), throttle ("GO"|"SLOW"|"HOLD"|null),
-  //      mission ({active, since, firstTurnDone}|null) }
-  // Returns { verdict, reason, defer? } - defer: would nudge later (settling / human typing), re-check without waiting for new transcript data.
+  //      mission ({active, since, firstTurnDone}|null), relentless (bool, v1.74.0), usageHardStop (bool, v1.74.0) }
+  // Returns { verdict, reason, kind?, defer? } - defer: would nudge later (settling / human typing), re-check without waiting for new transcript data.
+  // kind "next-project" = the relentless-mode nudge (see NEXT_PROJECT_TEXT; reason "question" variant picks the question text).
   function decide(c) {
     const none = (reason, extra) => Object.assign({ verdict: "none", reason }, extra || {});
     if (!c.enabled) return none("keep-going is off");
@@ -254,20 +287,32 @@
     const text = last.text;
     if (/^\s*Handoff saved\b/i.test(text) || (p.lastHuman && isHandoffPrompt(p.lastHuman.text))) return none("handoff turn");
     const age = c.now - last.ts;
-    if (age > LIMITS.maxAgeMs) return none("end of turn is stale (" + Math.round(age / 60000) + " min old)");
+    const rel = !!c.relentless;
+    if (age > (rel ? LIMITS_RELENTLESS : LIMITS).maxAgeMs) return none("end of turn is stale (" + Math.round(age / 60000) + " min old)");
     const proto = protocolOf(text);
-    if (proto) return { verdict: proto.kind, reason: "protocol line " + proto.kind.toUpperCase() + ": " + proto.reason };
+    if (proto && (proto.kind === "nothing-left" || !rel)) return protoVerdict(proto);
     if (p.turnWaits) return none("this turn started a background task / messaged another agent / scheduled a wake-up: it is waiting, not stalled");
     const h = p.lastHuman;
     const missionOn = !!(c.mission && c.mission.active && !c.mission.firstTurnDone && h && h.isResume && p.workToolUses === 0 &&
       c.now - (c.mission.since || 0) < LIMITS.missionMaxAgeMs);
-    let cls = classify(text);
+    let cls = proto ? protoVerdict(proto) : classify(text); // relentless + BLOCKED:/DONE: line: the line is read, then answered with the next project
+    let kind = null, question = false;
+    if (rel && cls.verdict !== "nudge" && !cls.external) {
+      const tailS = tailSentences(text);
+      if (RX.announce.test(tailS) && RX.external.test(tailS)) cls = { verdict: "none", reason: "announced action is externally visible (push/send/publish...): never nudged", external: true };
+      else if (cls.verdict !== "none" || text) { // done / blocked / question / plain report -> the next project (an empty message stays none)
+        question = !!cls.question;
+        cls = { verdict: "nudge", reason: "relentless: " + cls.verdict + " (" + cls.reason + ") - pick the next project" }; kind = "next-project";
+      }
+    }
     if (cls.verdict === "none" && missionOn && text) cls = { verdict: "nudge", reason: "fresh session after handoff ended its first turn without doing work" };
     else if (cls.verdict === "nudge" && missionOn) cls.reason += " (first turn after handoff, no work done)";
     if (cls.verdict !== "nudge") return cls;
     if (age < LIMITS.quietMs) return none("settling", { defer: true });
     if (h && !h.systemish && c.now - h.ts < LIMITS.humanQuietMs) return none("a person typed " + Math.round((c.now - h.ts) / 1000) + " s ago", { defer: true });
+    if (c.usageHardStop) return { verdict: "blocked", reason: "usage hard stop (>=95%)" };
     if (c.throttle === "HOLD") return { verdict: "blocked", reason: "fleet throttle is HOLD" };
+    if (kind) return { verdict: "nudge", kind, reason: cls.reason, question, mission: missionOn };
     return { verdict: "nudge", reason: cls.reason, mission: missionOn };
   }
 
@@ -282,10 +327,12 @@
   function nudgeLabelFor(text) {
     const t = String(text || "");
     const i = t.indexOf(NUDGE_MARKER);
-    return i !== -1 && i < 40 ? "Keep going - nudge: you announced a next step, please do it now" : null;
+    if (i === -1 || i >= 40) return null;
+    if (t.indexOf(NEXT_PROJECT_TAG) !== -1 && t.indexOf(NEXT_PROJECT_TAG) < 60) return "Keep going - next project: pick the next open task";
+    return "Keep going - nudge: you announced a next step, please do it now";
   }
 
-  const api = { READ_ONLY_TOOLS, NUDGE_MARKER, RESUME_MARKER, NUDGE_TEXT, LIMITS, parseTail, classify, protocolOf, decide, hashText, parseHandoff, resumePromptText,
+  const api = { READ_ONLY_TOOLS, NUDGE_MARKER, RESUME_MARKER, NUDGE_TEXT, NEXT_PROJECT_TEXT, NEXT_PROJECT_QUESTION_TEXT, LIMITS, LIMITS_RELENTLESS, parseTail, classify, protocolOf, decide, hashText, parseHandoff, resumePromptText,
     isSystemish, isHandoffPrompt, nudgeLabelFor, stripMarkers };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.KeepGoing = api;

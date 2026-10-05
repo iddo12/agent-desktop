@@ -247,6 +247,160 @@ const tick = async (w, advance) => { w.t += advance == null ? 0 : advance; w.g.t
     t("late-landing nudge is counted and not retried", () => { assert.strictEqual(deliveries, before); assert.strictEqual(w.g._state().counters.A.consecutive, 1); assert.ok(w.logs.some((l) => /landed late/.test(l))); });
   }
 
+  // ---- v1.74.0 relentless mode
+  {
+    const RDONE = "Finished item 1.\n\nDONE: item 1 is complete";
+    const w = world();
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, RDONE)]);
+    await tick(w);
+    t("plain mode: DONE is not nudged", () => assert.strictEqual(w.sent.length, 0));
+    w.g.setRelentless("A", true); // per-agent order with the fleet switch OFF; evaluates the unchanged transcript again
+    await tick(w);
+    t("per-agent relentless (fleet off): DONE gets the next-project nudge", () => { assert.strictEqual(w.sent.length, 1); assert.strictEqual(w.sent[0].text, K.NEXT_PROJECT_TEXT); });
+    t("relentless persisted in the saved state, old fields kept", () => { assert.deepStrictEqual(w.saved.relentless, { fleet: false, agents: { A: true } }); assert.strictEqual(w.saved.globalEnabled, true); });
+    const s = w.g.snapshot("A");
+    t("snapshot: relentless flag, latest why, decisions kept", () => {
+      assert.strictEqual(s.relentless, true); assert.strictEqual(s.agentRelentless, true); assert.strictEqual(s.fleetRelentless, false);
+      assert.strictEqual(s.why.kind, "next-project"); assert.strictEqual(s.why.verdict, "nudge"); assert.ok(s.decisions.length >= 2);
+      assert.strictEqual(s.decisions[0].verdict, "done");
+    });
+    t("getSettings: relentless info + agent states", () => {
+      const g = w.g.getSettings();
+      assert.deepStrictEqual(g.relentless, { fleet: false, agents: ["A"] });
+      assert.ok(g.agentStates.some((x) => x.agentPath === "A" && x.relentless));
+    });
+    // simulated restart: new create() with the saved state keeps the order
+    const w2 = world({ saved: w.saved }); w2.t += 200000;
+    w2.set([usr(w2.t - 400000, "go"), asst(w2.t - 300000, "Next report.\n\nBLOCKED: item 2 needs Iddo")]);
+    await tick(w2);
+    t("restart: relentless order survives, BLOCKED gets the next-project nudge", () => { assert.strictEqual(w2.g.relentlessFor("A"), true); assert.strictEqual(w2.sent.length, 1); assert.strictEqual(w2.sent[0].text, K.NEXT_PROJECT_TEXT); });
+    t("restart: decisions survive", () => assert.ok(w2.g.snapshot("A").decisions.length >= 2));
+    w.g.setRelentless("A", false);
+    t("switching off removes it", () => assert.deepStrictEqual(w.saved.relentless, { fleet: false, agents: {} }));
+  }
+  {
+    const w = world({ saved: { globalEnabled: false, agents: { A: { enabled: false } }, counters: {} } });
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "Report: all green.")]);
+    w.g.setRelentless(null, true); await tick(w);
+    t("fleet relentless implies keep-going even with old switches off", () => { assert.strictEqual(w.sent.length, 1); assert.strictEqual(w.g.snapshot("A").enabled, true); });
+  }
+  {
+    // old state file without any relentless fields loads fine
+    const w = world({ saved: { globalEnabled: true, agents: {}, mission: {}, counters: {} } });
+    t("backward compatible state", () => { assert.strictEqual(w.g.relentlessFor("A"), false); assert.deepStrictEqual(w.g.getSettings().relentless, { fleet: false, agents: [] }); });
+  }
+  {
+    // question ending: question variant of the text
+    const w = world({ saved: { relentless: { fleet: true, agents: {} } } });
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "Should I use A or B?")]);
+    await tick(w);
+    t("relentless question: decide yourself text", () => { assert.strictEqual(w.sent.length, 1); assert.strictEqual(w.sent[0].text, K.NEXT_PROJECT_QUESTION_TEXT); });
+  }
+  // NOTHING-LEFT: stop in both modes, snapshot says out of projects, no nudge
+  for (const rel of [false, true]) {
+    const w = world(rel ? { saved: { relentless: { fleet: true, agents: {} } } } : {});
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "Checked the list.\n\nNOTHING-LEFT: every open task needs Iddo")]);
+    await tick(w);
+    t("NOTHING-LEFT stops (relentless=" + rel + "): no nudge, out of projects", () => {
+      assert.strictEqual(w.sent.length, 0);
+      const s = w.g.snapshot("A");
+      assert.strictEqual(s.outOfProjects, true); assert.ok(/every open task/.test(s.outOfProjectsReason));
+      assert.ok(/^NOTHING-LEFT/.test(s.why.reason));
+    });
+    w.set(w.lines.concat([usr(w.t, "ok, new job"), asst(w.t + 1000, "Next: starting it.")]));
+    await tick(w, 5000);
+    t("a person's message clears out-of-projects (" + rel + ")", () => assert.strictEqual(w.g.snapshot("A").outOfProjects, false));
+  }
+  // HOLD / usage hard stop win in relentless mode; SLOW does not stop it
+  {
+    const w = world({ throttle: "HOLD", saved: { relentless: { fleet: true, agents: {} } } });
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "DONE: x")]);
+    await tick(w);
+    t("relentless + HOLD: no nudge", () => { assert.strictEqual(w.sent.length, 0); assert.strictEqual(w.g.snapshot("A").why.reason, "fleet throttle is HOLD"); });
+    const w2 = world({ throttle: "SLOW", saved: { relentless: { fleet: true, agents: {} } } });
+    w2.set([usr(w2.t - 400000, "go"), asst(w2.t - 300000, "DONE: x")]);
+    await tick(w2);
+    t("relentless + SLOW: nudged", () => assert.strictEqual(w2.sent.length, 1));
+  }
+  {
+    const w = world({ saved: { relentless: { fleet: true, agents: {} } } });
+    let hard = true;
+    w.g = G.create({ now: () => w.t, log: (l) => w.logs.push(l), emit: (p, s) => w.emitted.push(s), agents: () => ["A"], limits: { warmupMs: 0 }, usageHardStop: () => hard,
+      readTail: () => ({ text: w.lines.join("\n"), partialFirst: false, sig: "s" + w.sigN }), isWorking: () => false, readThrottle: () => null,
+      deliver: async (p, text) => { w.sent.push({ p, text }); return { delivered: true, via: "channel" }; }, storage: { load: () => w.saved, save: (o) => { w.saved = JSON.parse(JSON.stringify(o)); } } });
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "DONE: x")]);
+    await tick(w);
+    t("usage hard stop: no nudge, reason shown", () => { assert.strictEqual(w.sent.length, 0); assert.strictEqual(w.g.snapshot("A").why.reason, "usage hard stop (>=95%)"); });
+    hard = false;
+    await tick(w, 70000); await tick(w, 1000);
+    t("usage hard stop lifted: the unchanged transcript is judged again and nudged", () => assert.strictEqual(w.sent.length, 1));
+  }
+  // external guard wins even in relentless mode
+  {
+    const w = world({ saved: { relentless: { fleet: true, agents: {} } } });
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "Report ready.\n\nNext: sending the report to the client.")]);
+    await tick(w);
+    t("relentless: announced send is never nudged", () => assert.strictEqual(w.sent.length, 0));
+  }
+  // caps are higher in relentless mode: 4 consecutive no-progress nudges do not stop it (plain mode stops at 3)
+  for (const rel of [false, true]) {
+    const w = world(rel ? { saved: { relentless: { fleet: true, agents: {} } } } : {});
+    let lines = [usr(w.t - 900000, "go"), asst(w.t - 890000, "Report 0: done.")];
+    w.set(lines); await tick(w);
+    for (let i = 1; i <= 5; i++) {
+      lines = lines.concat([usr(w.t, "[hid:x] " + (rel ? K.NEXT_PROJECT_TEXT : K.NUDGE_TEXT)), asst(w.t + 1000, "Report " + i + ": done.")]);
+      w.set(lines); w.t += 100000; await tick(w);
+    }
+    t("caps (relentless=" + rel + ")", () => {
+      if (rel) { assert.strictEqual(w.sent.length, 6); assert.strictEqual(w.g.getSettings().stopped.length, 0); }
+      else { assert.strictEqual(w.sent.length, 0); }
+    });
+  }
+  {
+    // plain mode cap check on announcements: stops at 3; relentless with the same stream does not
+    const msgs = (i) => "Next: step " + i + ".";
+    for (const rel of [false, true]) {
+      const w = world(rel ? { saved: { relentless: { fleet: true, agents: {} } } } : {});
+      let lines = [usr(w.t - 900000, "go"), asst(w.t - 890000, msgs(0))];
+      w.set(lines); await tick(w);
+      for (let i = 1; i <= 5; i++) {
+        lines = lines.concat([usr(w.t, "[hid:x] " + K.NUDGE_TEXT), asst(w.t + 1000, msgs(i))]);
+        w.set(lines); w.t += 100000; await tick(w);
+      }
+      t("consecutive cap: plain 3, relentless higher (relentless=" + rel + ")", () => {
+        if (rel) { assert.strictEqual(w.sent.length, 6); assert.strictEqual(w.g.getSettings().stopped.length, 0); }
+        else { assert.strictEqual(w.sent.length, 3); assert.strictEqual(w.g.getSettings().stopped.length, 1); }
+      });
+    }
+  }
+  {
+    // relentless cap 12 consecutive: stopped after 12
+    const w = world({ saved: { relentless: { fleet: true, agents: {} } } });
+    let lines = [usr(w.t - 9000000, "go"), asst(w.t - 8990000, "Report 0: done.")];
+    w.set(lines); await tick(w);
+    for (let i = 1; i <= 16; i++) {
+      lines = lines.concat([usr(w.t, "[hid:x] " + K.NEXT_PROJECT_TEXT), asst(w.t + 1000, "Report " + i + ": done.")]);
+      w.set(lines); w.t += 100000; await tick(w);
+    }
+    t("relentless: stops after 12 consecutive nudges that did not help", () => { assert.strictEqual(w.sent.length, 12); assert.strictEqual(w.g.getSettings().stopped.length, 1); });
+  }
+  {
+    // decisions ring: only changes stored, at most 20, persisted, not growing
+    const w = world({ saved: { relentless: { fleet: true, agents: {} } } });
+    w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "Report: x.")]);
+    for (let i = 0; i < 5; i++) { w.sigN++; await tick(w, 1000); }
+    const same = w.g.snapshot("A").decisions.length;
+    t("unchanged decisions are not stored again", () => assert.ok(same <= 3));
+    for (let i = 0; i < 30; i++) { w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "DONE: reason " + i)]); await tick(w, 1000); }
+    t("decision ring is capped at 20", () => { assert.strictEqual(w.g.snapshot("A").decisions.length, 20); assert.ok(w.saved.decisions.A.length <= 20); });
+  }
+  {
+    // resume text in relentless mode, even if the handoff declares BLOCKED
+    const w = world({ saved: { relentless: { fleet: false, agents: { A: true } } }, file: "## LESSONS\n- a\n## OPEN NOW\nBLOCKED: waiting for Iddo\n## STATE\ns\n## KEY FACTS\nz" });
+    const r = w.g.resumeText("A", "P");
+    t("relentless resume text ignores a BLOCKED handoff", () => { assert.strictEqual(r.mission, true); assert.ok(/keep-working-regardless/.test(r.text)); assert.ok(r.text.startsWith("[[HANDOFF-RESUME]] P")); });
+  }
+
   console.log((n - fails) + "/" + n + " keepGoingGlue tests passed");
   process.exit(fails ? 1 : 0);
 })();

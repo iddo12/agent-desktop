@@ -239,6 +239,7 @@
             row.quietMs = await window.api.getTranscriptQuietMs(a.path);
           } catch (e) { /* same */ }
         }
+        try { row.why = window.keepGoingWhy ? window.keepGoingWhy(a.path) : null; } catch (e) { /* keep-going not loaded */ }
         row.state = row.paused ? "paused" : row.working === true ? "running" : row.working === false ? "idle" : "unknown";
         return row;
       })
@@ -315,6 +316,8 @@
           const line = r.state === "paused" ? "Paused - it has no background process running."
             : chosen ? chosen.charAt(0).toUpperCase() + chosen.slice(1) : "";
           if (line) main.appendChild(el("div", "argus-roster-doing", line));
+          // v1.74.0: why an idle agent is idle (latest keep-going decision), only when "keep working regardless" is on for it
+          if (r.why && r.state === "idle") main.appendChild(el("div", "argus-roster-doing", "Why idle: " + r.why));
           row.appendChild(main);
           const when = el("div", "argus-roster-when");
           when.appendChild(el("div", "", r.state === "running" && r.workingMs != null

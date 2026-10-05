@@ -3321,6 +3321,14 @@ try {
       try { const j = JSON.parse(fs.readFileSync(throttleFile(), "utf-8")); return j && j.fleetThrottle && j.fleetThrottle.state; } catch (e) { return null; }
     },
     readFile: (f) => fs.readFileSync(f, "utf-8").slice(0, 200000),
+    // v1.74.0: relentless mode still stops at the usage hard stop (7d or 5h >= 95%); fail-open (false) on any error
+    usageHardStop: () => {
+      try {
+        const c = require("./archive").getConfirmedRateLimits();
+        const hi = (x) => !!(x && typeof x.usedPct === "number" && x.usedPct >= 95);
+        return !!(c && (hi(c.sevenDay) || hi(c.fiveHour)));
+      } catch (e) { return false; }
+    },
     storage: {
       load: () => { try { return JSON.parse(fs.readFileSync(keepGoingFile(), "utf-8")); } catch (e) { return {}; } },
       save: (o) => { const tmp = keepGoingFile() + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o), "utf-8"); fs.renameSync(tmp, keepGoingFile()); },
@@ -3368,6 +3376,11 @@ try {
   ipcMain.handle("keepgoing-set", (event, { agentPath, enabled }) => {
     if (agentPath && !kgKnownAgent(agentPath)) return keepGoing.getSettings();
     return keepGoing.setEnabled(agentPath || null, !!enabled);
+  });
+  // v1.74.0: "keep working regardless" (agentPath, or null = fleet). Only the UI can set it; never an agent or a peer message.
+  ipcMain.handle("keepgoing-set-relentless", (event, { agentPath, on }) => {
+    if (agentPath && !kgKnownAgent(agentPath)) return keepGoing.getSettings();
+    return keepGoing.setRelentless(agentPath || null, !!on);
   });
   // M4: the renderer lists the agents whose handoff flow is saving / resetting / resuming; no nudges for them
   ipcMain.on("keepgoing-handoff-active", (event, payload) => {

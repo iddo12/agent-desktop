@@ -236,5 +236,96 @@ t("nudgeLabelFor", () => {
   assert.strictEqual(K.nudgeLabelFor("hello"), null);
 });
 
+// ---- v1.74.0 relentless mode
+const REL = (lines, x) => mk(lines, Object.assign({ relentless: true }, x || {}));
+const endWith = (text) => [usr(NOW - 400000, "go"), asst(NOW - 300000, text)];
+t("relentless: DONE / BLOCKED / question / report-only / nothing-left phrases -> next-project nudge", () => {
+  for (const txt of ["All done.\n\nDONE: finished item 1", "BLOCKED: needs Iddo's key", "Which one do you prefer?", "Report: 3 files changed, all tests pass.",
+    "There is nothing left to do here.", "The job is finished.", "I'm waiting for Iddo's go-ahead on this.", "Throttle is HOLD, stopping."]) {
+    const r = K.decide(REL(endWith(txt)));
+    assert.strictEqual(r.verdict, "nudge", txt); assert.strictEqual(r.kind, "next-project", txt);
+  }
+});
+t("relentless: question ending is flagged as a question", () => {
+  assert.strictEqual(K.decide(REL(endWith("Which one do you prefer?"))).question, true);
+  assert.strictEqual(K.decide(REL(endWith("Report: ok."))).question, false);
+});
+t("non-relentless behaviour unchanged for the same endings", () => {
+  assert.strictEqual(K.decide(mk(endWith("DONE: x"))).verdict, "done");
+  assert.strictEqual(K.decide(mk(endWith("BLOCKED: x"))).verdict, "blocked");
+  assert.strictEqual(K.decide(mk(endWith("Which one do you prefer?"))).verdict, "blocked");
+  assert.strictEqual(K.decide(mk(endWith("Report: ok."))).verdict, "none");
+  assert.strictEqual(K.decide(mk(endWith("Report: ok."))).kind, undefined);
+});
+t("relentless: an ordinary announced next step keeps the normal nudge", () => {
+  const r = K.decide(REL(endWith(END)));
+  assert.strictEqual(r.verdict, "nudge"); assert.strictEqual(r.kind, undefined);
+});
+t("NOTHING-LEFT: real stop in ALL modes (done, exact reason)", () => {
+  for (const rel of [false, true]) {
+    const r = K.decide(mk(endWith("Looked everywhere.\n\nNOTHING-LEFT: all open tasks need Iddo"), { relentless: rel }));
+    assert.strictEqual(r.verdict, "done"); assert.strictEqual(r.reason, "NOTHING-LEFT: all open tasks need Iddo");
+  }
+  assert.deepStrictEqual(K.protocolOf("x\nNOTHING-LEFT: none"), { kind: "nothing-left", reason: "none" });
+  assert.strictEqual(K.classify("NOTHING-LEFT: z").verdict, "done");
+});
+t("relentless: HOLD and usage hard stop win and block", () => {
+  let r = K.decide(REL(endWith("DONE: x"), { throttle: "HOLD" }));
+  assert.strictEqual(r.verdict, "blocked"); assert.strictEqual(r.reason, "fleet throttle is HOLD");
+  r = K.decide(REL(endWith("DONE: x"), { usageHardStop: true, throttle: "HOLD" }));
+  assert.strictEqual(r.verdict, "blocked"); assert.strictEqual(r.reason, "usage hard stop (>=95%)");
+  r = K.decide(REL(endWith(END), { usageHardStop: true }));
+  assert.strictEqual(r.verdict, "blocked");
+  assert.strictEqual(K.decide(REL(endWith("DONE: x"), { throttle: "SLOW" })).verdict, "nudge"); // SLOW does not stop an order
+});
+t("relentless: external guard still wins (never nudged into push/send)", () => {
+  const r = K.decide(REL(endWith("Report ready.\n\nNext: sending the report to the client.")));
+  assert.strictEqual(r.verdict, "none");
+  assert.strictEqual(K.decide(REL(endWith("DONE: x\n\nNext I'll push the branch to GitHub now."))).verdict, "none");
+});
+t("relentless: paused / working / halt / stale / handoff turn / turnWaits / empty are not nudged", () => {
+  const lines = endWith("DONE: x");
+  assert.strictEqual(K.decide(REL(lines, { paused: true })).verdict, "none");
+  assert.strictEqual(K.decide(REL(lines, { working: true })).verdict, "none");
+  assert.strictEqual(K.decide(REL(lines, { halt: { kind: "rate_limit" } })).verdict, "none");
+  assert.strictEqual(K.decide(REL([usr(NOW - 4e7, "go"), asst(NOW - 4e7 + 1000, "DONE: x")])).verdict, "nudge"); // 11 h old is not stale in relentless mode
+  assert.strictEqual(K.decide(REL(endWith("Handoff saved. Reset when ready."))).verdict, "none");
+  assert.strictEqual(K.decide(REL(endWith(""))).verdict, "none");
+  const wait = JSON.stringify({ type: "assistant", timestamp: new Date(NOW - 310000).toISOString(), message: { content: [{ type: "tool_use", name: "ScheduleWakeup", input: {} }] } });
+  const waits = [usr(NOW - 400000, "go"), wait, res(NOW - 305000), asst(NOW - 300000, "Report: all queued.")];
+  assert.strictEqual(K.decide(REL(waits)).verdict, "none");
+});
+t("relentless: 24 h max age, plain mode 3 h", () => {
+  const old = [usr(NOW - 9e7, "go"), asst(NOW - 5 * 3600 * 1000, "DONE: x")];
+  assert.strictEqual(K.decide(REL(old)).verdict, "nudge");
+  assert.strictEqual(K.decide(mk(old)).verdict, "none");
+  assert.strictEqual(K.decide(REL([usr(NOW - 9e7, "go"), asst(NOW - 25 * 3600 * 1000, "DONE: x")])).verdict, "none");
+});
+t("relentless: settling and a typing person still defer", () => {
+  const r = K.decide(REL([usr(NOW - 400000, "go"), asst(NOW - 5000, "DONE: x")]));
+  assert.strictEqual(r.verdict, "none"); assert.strictEqual(r.defer, true);
+});
+t("LIMITS_RELENTLESS values", () => {
+  const L = K.LIMITS_RELENTLESS;
+  assert.strictEqual(L.maxConsecutive, 12); assert.strictEqual(L.maxPerWindow, 40); assert.strictEqual(L.windowMs, 2 * 3600 * 1000);
+  assert.strictEqual(L.maxAgeMs, 24 * 3600 * 1000); assert.strictEqual(L.warmupMs, 120000); assert.strictEqual(L.minGapMs, 90000); assert.strictEqual(L.globalGapMs, 30000);
+  assert.strictEqual(K.LIMITS.maxConsecutive, 3); // plain mode untouched
+});
+t("NEXT_PROJECT_TEXT: marker first, content, label", () => {
+  const x = K.NEXT_PROJECT_TEXT;
+  assert.ok(x.startsWith("[[KEEPGOING]]"));
+  for (const s of ["tasks.py", "--list", "--note", "NEEDS IDDO", "NOTHING-LEFT: <one line>", "SLOW"]) assert.ok(x.indexOf(s) !== -1, s);
+  assert.ok(K.NEXT_PROJECT_QUESTION_TEXT.startsWith("[[KEEPGOING]]") && /safe default/.test(K.NEXT_PROJECT_QUESTION_TEXT) && /NEEDS IDDO/.test(K.NEXT_PROJECT_QUESTION_TEXT));
+  assert.strictEqual(K.nudgeLabelFor("[hid:1] " + x), "Keep going - next project: pick the next open task");
+  assert.ok(/announced a next step/.test(K.nudgeLabelFor("[hid:1] " + K.NUDGE_TEXT)));
+  assert.strictEqual(K.isSystemish("[hid:1] " + x), true);
+});
+t("resumePromptText relentless: mode paragraph, ignores blocked", () => {
+  const a = K.resumePromptText("P", { mission: false, blocked: true }, true);
+  assert.ok(a.startsWith("[[HANDOFF-RESUME]] P") && /IMMEDIATELY/.test(a) && /keep-working-regardless/.test(a) && /NOTHING-LEFT/.test(a));
+  assert.ok(!/two short lines/.test(a));
+  assert.ok(!/keep-working-regardless/.test(K.resumePromptText("P", { mission: true })));
+});
+
 console.log((n - fails) + "/" + n + " keepGoing tests passed");
 process.exit(fails ? 1 : 0);

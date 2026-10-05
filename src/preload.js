@@ -127,6 +127,7 @@ contextBridge.exposeInMainWorld("api", {
   // v1.69.0 Keep going (see src/keepGoing.js)
   keepGoingGet: () => ipcRenderer.invoke("keepgoing-get"),
   keepGoingSet: (agentPath, enabled) => ipcRenderer.invoke("keepgoing-set", { agentPath, enabled }),
+  keepGoingSetRelentless: (agentPath, on) => ipcRenderer.invoke("keepgoing-set-relentless", { agentPath, on }),
   keepGoingHandoffActive: (agents) => ipcRenderer.send("keepgoing-handoff-active", { agents }),
   keepGoingResumePrompt: (agentPath, archivedPath) => ipcRenderer.invoke("keepgoing-resume-prompt", { agentPath, archivedPath }),
   onKeepGoingState: (callback) => {

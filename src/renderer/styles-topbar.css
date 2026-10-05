@@ -52,7 +52,9 @@ body.xp-header #chat-header-text { flex: 1 1 0; min-width: 0; }
 .xp-vdiv { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
 
 /* Keep going: the only pressable thing in row 2 -> a labelled switch with a hover state. */
-#keepgoing-btn {
+#keepgoing-btn ,
+#keepgoing-rel-btn ,
+#keepgoing-fleet-btn {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -68,9 +70,15 @@ body.xp-header #chat-header-text { flex: 1 1 0; min-width: 0; }
   white-space: nowrap;
   opacity: 1;
 }
-#keepgoing-btn:hover { background: var(--bg-hover); border-color: var(--border); }
-#keepgoing-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-#keepgoing-btn::before {         /* track */
+#keepgoing-btn:hover ,
+#keepgoing-rel-btn:hover ,
+#keepgoing-fleet-btn:hover { background: var(--bg-hover); border-color: var(--border); }
+#keepgoing-btn:focus-visible ,
+#keepgoing-rel-btn:focus-visible ,
+#keepgoing-fleet-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#keepgoing-btn::before ,
+#keepgoing-rel-btn::before ,
+#keepgoing-fleet-btn::before {         /* track */
   content: "";
   position: absolute; left: 8px; top: 50%;
   width: 30px; height: 17px; margin-top: -8.5px;
@@ -78,7 +86,9 @@ body.xp-header #chat-header-text { flex: 1 1 0; min-width: 0; }
   background: var(--health-unknown);
   transition: background 0.12s ease;
 }
-#keepgoing-btn::after {          /* knob */
+#keepgoing-btn::after ,
+#keepgoing-rel-btn::after ,
+#keepgoing-fleet-btn::after {          /* knob */
   content: "";
   position: absolute; left: 11px; top: 50%;
   width: 11px; height: 11px; margin-top: -5.5px;
@@ -86,9 +96,15 @@ body.xp-header #chat-header-text { flex: 1 1 0; min-width: 0; }
   background: #fff;
   transition: transform 0.12s ease;
 }
-#keepgoing-btn.keepgoing-on { color: var(--text); }
-#keepgoing-btn.keepgoing-on::before { background: var(--health-healthy); }
-#keepgoing-btn.keepgoing-on::after { transform: translateX(13px); }
+#keepgoing-btn.keepgoing-on ,
+#keepgoing-rel-btn.keepgoing-on ,
+#keepgoing-fleet-btn.keepgoing-on { color: var(--text); }
+#keepgoing-btn.keepgoing-on::before ,
+#keepgoing-rel-btn.keepgoing-on::before ,
+#keepgoing-fleet-btn.keepgoing-on::before { background: var(--health-healthy); }
+#keepgoing-btn.keepgoing-on::after ,
+#keepgoing-rel-btn.keepgoing-on::after ,
+#keepgoing-fleet-btn.keepgoing-on::after { transform: translateX(13px); }
 
 /* Meters: label and number on one line, a thin bar under them. Quiet: no box, no border. */
 #five-hour-usage.xp-meter,
