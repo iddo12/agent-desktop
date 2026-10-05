@@ -247,6 +247,31 @@ t("damaged task files are skipped with a notice; the rest still load", async () 
   assert(r.notices.some((x) => /2 task files could not be read/.test(x)), JSON.stringify(r.notices));
   fs.rmSync(b.root, { recursive: true, force: true });
 });
+t("guardedGet has an overall deadline: a slow-drip fetch is aborted and its timer is cleared", async () => {
+  let aborted = false;
+  const drip = (url, accept, lookup, signal) => new Promise((res) => { signal.addEventListener("abort", () => { aborted = true; }); /* never resolves: drips forever */ });
+  const t0 = Date.now();
+  await assert.rejects(() => L.guardedGet("https://shop.example/a", "*/*", null, drip, 150), /deadline/);
+  assert(Date.now() - t0 < 2000 && aborted, "aborted promptly");
+  assert.strictEqual(L.DEADLINE_MS, 20000);
+  const ok = await L.guardedGet("https://shop.example/a", "*/*", null, async () => ({ status: 200, headers: {}, body: Buffer.from("x") }), 150);
+  await new Promise((r) => setTimeout(r, 250));   // the cleared timer must not fire later (an unhandled rejection would fail the run)
+  assert.strictEqual(ok.status, 200);
+});
+
+t("review fixes (renderer source): Queued circle, area counts, today ring, damaged mark, top banner, Show all button", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "daily.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "styles-daily.css"), "utf8");
+  assert(/queued: "○ Queued"/.test(src) && !/… Queued/.test(src));
+  assert(/areaCount\(all, v\)/.test(src));
+  assert(/daily-minid[^;]*today/.test(src) && /\.daily-minid\.today \{ outline/.test(css));
+  assert(/"● Heads up: "/.test(src) && /"Dismiss"/.test(src));
+  const today = src.slice(src.indexOf("function renderToday"), src.indexOf("function renderToday") + 400);
+  assert(/demoBanner\(\)/.test(today), "demo banner is the first thing on Today");
+  const more = src.slice(src.indexOf("function moreRow"), src.indexOf("function relDay"));
+  assert(/btn\(`Show all/.test(more), "Show all is a real button (Tab/Enter/Space)");
+});
+
 t("writes are atomic: no temp file is left behind, a failed write leaves the old file intact", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "daily-w-"));
   const f = path.join(dir, "x.json");

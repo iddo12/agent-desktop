@@ -275,3 +275,7 @@ button.daily-st { border: 0; font: inherit; font-size: 11px; font-weight: 600; c
 .daily-more-row { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; border-top: 1px solid var(--daily-line, #e9e4d6); }
 .daily-notice { margin-bottom: 10px; background: #fdecea; border-color: #e3b3ad; color: #7a2a20; }
 .daily-recdot { color: #dc2626; } .daily-btn.pri .daily-recdot { color: #fff; }
+.daily-minid.today { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 10px; font-weight: 700; }
+.daily-minid.has.today { outline-color: #fff; box-shadow: 0 0 0 2px var(--accent); }
+.daily-showall:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.daily-seg .daily-n { margin-left: 6px; }

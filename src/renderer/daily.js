@@ -13,7 +13,7 @@
     ["shopping", "Shopping lists"], ["dates", "Birthdays & dates"],
   ];
   const PRI_COLORS = ["#f3f0e8", "#f0e6c0", "#ecdc9f", "#e8d085", "#e6bf6b", "#e5a95a", "#e48d4c", "#e2703f", "#dc4f35", "#c93a2a"];
-  const STATUS_LABEL = { needs: "▲ Needs you", working: "▶ Working", waiting: "◐ Waiting", queued: "… Queued" };
+  const STATUS_LABEL = { needs: "▲ Needs you", working: "▶ Working", waiting: "◐ Waiting", queued: "○ Queued" };
   const STATUS_CLASS = { needs: "you", working: "w", waiting: "wait", queued: "q" };
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -209,7 +209,7 @@
   function noticeBanner(list) {
     const b = el("div", "daily-banner daily-notice");
     b.setAttribute("role", "alert");
-    b.append(el("b", null, "Heads up: "), document.createTextNode(list.join(" ")), document.createTextNode(" "));
+    b.append(el("b", null, "● Heads up: "), document.createTextNode(list.join(" ")), document.createTextNode(" "));
     b.append(btn("Dismiss", "daily-btn sm", async () => { if (api.clearNotices) await api.clearNotices(); await load(true); render(); }));
     return b;
   }
@@ -274,6 +274,7 @@
   function renderToday() {
     const s = payload.summary, d = payload.data, now = payload.now;
     const wrap = el("div", "daily-today");
+    if (!payload.provider.connected) wrap.append(demoBanner());
 
     const chip = (big, color, label, subText, onClick) => {
       const c = el("button", "daily-chip");
@@ -347,7 +348,6 @@
     }
     tasks.append(legendPriority());
     wrap.append(tasks);
-    if (!payload.provider.connected) wrap.append(demoBanner());
     return wrap;
   }
 
@@ -534,7 +534,9 @@
     const r1 = el("div", "daily-frow");
     const seg = el("div", "daily-seg");
     for (const [v, label] of [["all", "All"], ["Business", "Business"], ["Personal", "Personal"]]) {
-      seg.append(btn(label, "daily-btn" + (tf.area === v ? " on" : ""), () => { tf.area = v; tf.list = ""; render(); }));
+      const sb = btn("", "daily-btn" + (tf.area === v ? " on" : ""), () => { tf.area = v; tf.list = ""; render(); });
+      sb.append(el("span", null, label), el("span", "daily-n", String(areaCount(all, v))));
+      seg.append(sb);
     }
     const stBtn = btn(`Status: ${tf.status === "all" ? "All" : STATUS_PLAIN[tf.status]} ▾`, "daily-btn pill daily-popper", () => {
       openPop(stBtn, (p) => {
@@ -630,6 +632,7 @@
     wrap.append(lg);
     return wrap;
   }
+  const areaCount = (tasks, v) => (v === "all" ? tasks.length : tasks.filter((t) => t.area === v).length);
   function taskListCounts(tasks) {
     const base = tasks.filter((t) => (tf.area === "all" || t.area === tf.area) && (tf.status === "all" || t.status === tf.status));
     const m = new Map();
@@ -645,7 +648,8 @@
   let showAllTasks = false, showAllItems = false;
   function moreRow(total, shown, what, onClick) {
     const r = el("div", "daily-more-row");
-    r.append(el("span", "daily-muted", `Showing ${shown} of ${total} ${what}. `), btn(`Show all ${total}`, "daily-btn sm", onClick));
+    const sb = btn(`Show all ${total}`, "daily-btn sm daily-showall", onClick);   // a real <button>: Tab reaches it, Enter and Space activate it
+    r.append(el("span", "daily-muted", `Showing ${shown} of ${total} ${what}. `), sb);
     return r;
   }
   function relDay(iso, now) {
@@ -1113,6 +1117,7 @@
     } else if (sv === "six") {
       const months = sixMonthsLocal(events, dates, cur.getFullYear(), cur.getMonth() + 1);
       const g = el("div", "daily-six");
+      const tn = new Date(now), todayNum = tn.getFullYear() * 10000 + (tn.getMonth() + 1) * 100 + tn.getDate();
       for (const m of months) {
         const c = el("section", "daily-card daily-mini");
         const h = el("h4", "daily-mini-h");
@@ -1126,7 +1131,8 @@
         const dim = new Date(m.year, m.month, 0).getDate();
         for (let d = 1; d <= dim; d++) {
           const k = m.days[d];
-          const s = el("span", "daily-minid" + (k ? " has " + k : ""), String(d));
+          const s = el("span", "daily-minid" + (k ? " has " + k : "") + (m.year * 10000 + m.month * 100 + d === todayNum ? " today" : ""), String(d));
+          if (m.year * 10000 + m.month * 100 + d === todayNum) s.title = "Today";
           if (k) { s.setAttribute("role", "button"); s.addEventListener("click", () => gotoDay(new Date(m.year, m.month - 1, d))); }
           mg.append(s);
         }

@@ -4,7 +4,7 @@
 //
 // SSRF protection: https only, at most 3 redirects, every hop re-validated, and the DNS answer is checked at
 // connect time (custom `lookup`), so a hostname that resolves to a private address cannot be reached even
-// by DNS rebinding. Size cap 2 MB, 10 s timeout.
+// by DNS rebinding. Size cap 2 MB, 10 s idle timeout per request and a 20 s OVERALL deadline across redirects.
 "use strict";
 const https = require("https");
 const dns = require("dns");
@@ -12,7 +12,8 @@ const net = require("net");
 const zlib = require("zlib");
 
 const MAX_BYTES = 2 * 1024 * 1024;
-const TIMEOUT_MS = 10000;
+const TIMEOUT_MS = 10000;      // idle timeout per request
+const DEADLINE_MS = 20000;     // overall deadline for one guardedGet (all redirects)
 const MAX_REDIRECTS = 3;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
@@ -69,7 +70,7 @@ function decode(buf, enc) {
 }
 
 // One request, no redirect following. Resolves {status, headers, body(Buffer)} or rejects.
-function getOnce(url, accept, lookup) {
+function getOnce(url, accept, lookup, signal) {
   return new Promise((resolve, reject) => {
     const req = https.request(url, {
       method: "GET", lookup: lookup || safeLookup, timeout: TIMEOUT_MS,
@@ -90,23 +91,33 @@ function getOnce(url, accept, lookup) {
     });
     req.on("timeout", () => req.destroy(new Error("timeout")));
     req.on("error", reject);
+    if (signal) { if (signal.aborted) req.destroy(new Error("deadline")); else signal.addEventListener("abort", () => req.destroy(new Error("deadline")), { once: true }); }
     req.end();
   });
 }
 
-// Follows up to 3 redirects, re-checking every hop. Resolves {status, body, url} or rejects.
-async function guardedGet(u, accept, lookup, fetchOnce) {
+// Follows up to 3 redirects, re-checking every hop. Resolves {status, body, url} or rejects. The per-request
+// timeout is only an IDLE timeout, so a slow-drip server could hold a fetch open: DEADLINE_MS caps the whole call
+// (all hops). The one timer is cleared as soon as the fetch ends.
+async function guardedGet(u, accept, lookup, fetchOnce, deadlineMs) {
   const once = fetchOnce || getOnce;
-  let cur = u;
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const c = checkUrl(cur);
-    if (!c.ok) throw new Error(c.reason);
-    const r = await once(c.url, accept, lookup);
-    if (r.status >= 300 && r.status < 400 && r.headers.location && String(r.headers.location).length > 2048) throw new Error("redirect too long");
-    if (r.status >= 300 && r.status < 400 && r.headers.location) { cur = new URL(r.headers.location, c.url).toString(); continue; }
-    return { status: r.status, body: r.body, headers: r.headers, url: c.url.toString() };
-  }
-  throw new Error("too many redirects");
+  const ac = new AbortController();
+  let timer = null;
+  const deadline = new Promise((_, rej) => { timer = setTimeout(() => { ac.abort(); rej(new Error("deadline")); }, deadlineMs || DEADLINE_MS); });
+  deadline.catch(() => {});
+  const run = async () => {
+    let cur = u;
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      const c = checkUrl(cur);
+      if (!c.ok) throw new Error(c.reason);
+      const r = await once(c.url, accept, lookup, ac.signal);
+      if (r.status >= 300 && r.status < 400 && r.headers.location && String(r.headers.location).length > 2048) throw new Error("redirect too long");
+      if (r.status >= 300 && r.status < 400 && r.headers.location) { cur = new URL(r.headers.location, c.url).toString(); continue; }
+      return { status: r.status, body: r.body, headers: r.headers, url: c.url.toString() };
+    }
+    throw new Error("too many redirects");
+  };
+  try { return await Promise.race([run(), deadline]); } finally { clearTimeout(timer); }
 }
 
 // ---------------------------------------------------------------- parsing (pure, tested with saved HTML)
@@ -216,4 +227,4 @@ async function fetchProduct(u, lookup) {
   }
 }
 
-module.exports = { isBlockedIp, checkUrl, guardedGet, parseProduct, sourceTag, fetchProduct, safeLookup, MAX_BYTES, MAX_REDIRECTS };
+module.exports = { isBlockedIp, checkUrl, guardedGet, parseProduct, sourceTag, fetchProduct, safeLookup, MAX_BYTES, MAX_REDIRECTS, DEADLINE_MS };
