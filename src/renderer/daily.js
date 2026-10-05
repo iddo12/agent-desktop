@@ -108,6 +108,7 @@
     load(false).then(render);
   }
   function closeView() {
+    closePop();
     document.body.classList.remove("daily-open");
     view.classList.add("hidden");
     nav.classList.remove("active");
@@ -299,7 +300,140 @@
     return wrap;
   }
 
-  // ---------------------------------------------------------------- Shopping (Phase 1: empty state + plain lists)
+  // ---------------------------------------------------------------- small floating menu (status / priority / lists)
+  let pop = null;
+  function closePop() { if (pop) { pop.remove(); pop = null; } }
+  function openPop(anchor, build) {
+    closePop();
+    pop = el("div", "daily-pop");
+    build(pop);
+    document.body.appendChild(pop);
+    const r = anchor.getBoundingClientRect();
+    const w = pop.offsetWidth;
+    pop.style.left = Math.max(8, Math.min(Math.round(r.left), window.innerWidth - w - 8)) + "px";
+    pop.style.top = Math.round(r.bottom + 4) + "px";
+  }
+  document.addEventListener("click", (e) => { if (pop && !e.target.closest(".daily-pop, .daily-popper")) closePop(); }, true);
+
+  async function after(r, okMsg) {
+    if (r && r.ok) { await load(true); render(); if (okMsg) say(okMsg); return true; }
+    say((r && r.reason) || "That did not work.");
+    return false;
+  }
+
+  // ---------------------------------------------------------------- Tasks
+  const tf = { area: "all", status: "all", list: "" };
+  const STATUS_FILTERS = [["all", "All statuses"], ["needs", "Needs you"], ["working", "Working"], ["waiting", "Waiting"], ["queued", "Queued"]];
+  const STATUS_PLAIN = { needs: "Needs you", working: "Working", waiting: "Waiting", queued: "Queued" };
+  function filterTasks(tasks) {
+    return tasks.filter((t) => (tf.area === "all" || t.area === tf.area) && (tf.status === "all" || t.status === tf.status) && (!tf.list || (t.list || "(no list)") === tf.list));
+  }
+  function renderTasks() {
+    const all = payload.data.tasks || [];
+    const wrap = el("div", "daily-plain");
+    if (!all.length) { wrap.append(emptyState("No open tasks", "Tasks that agents file for you or work on show up here.")); return wrap; }
+
+    // row 1: area + status + Record
+    const r1 = el("div", "daily-frow");
+    const seg = el("div", "daily-seg");
+    for (const [v, label] of [["all", "All"], ["Business", "Business"], ["Personal", "Personal"]]) {
+      seg.append(btn(label, "daily-btn" + (tf.area === v ? " on" : ""), () => { tf.area = v; tf.list = ""; render(); }));
+    }
+    const stBtn = btn(`Status: ${tf.status === "all" ? "All" : STATUS_PLAIN[tf.status]} ▾`, "daily-btn pill daily-popper", () => {
+      openPop(stBtn, (p) => {
+        for (const [v, label] of STATUS_FILTERS) p.append(btn(label, "daily-pop-item" + (tf.status === v ? " on" : ""), () => { tf.status = v; closePop(); render(); }));
+      });
+    });
+    const rec = btn("Record ●", "daily-btn pri", () => say("Voice recording for tasks arrives in a later build."));
+    r1.append(seg, stBtn, el("span", "daily-sp"), rec);
+    wrap.append(r1);
+
+    // row 2: lists (counts follow the area and status filters)
+    const lc = taskListCounts(all);
+    const r2 = el("div", "daily-frow");
+    r2.append(el("span", "daily-lbl", "LISTS"));
+    const chip = (label, count, on, fn) => {
+      const b = btn("", "daily-chip2" + (on ? " on" : ""), fn);
+      b.append(el("span", null, label), el("span", "daily-n", String(count)));
+      return b;
+    };
+    r2.append(chip("All lists", lc.total, !tf.list, () => { tf.list = ""; render(); }));
+    let shown = lc.lists.slice(0, 3);
+    if (tf.list && !shown.some((x) => x.name === tf.list)) { const sel = lc.lists.find((x) => x.name === tf.list); if (sel) shown = shown.slice(0, 2).concat(sel); }
+    for (const l of shown) r2.append(chip(l.name, l.count, tf.list === l.name, () => { tf.list = l.name; render(); }));
+    const rest = lc.lists.filter((x) => !shown.some((s) => s.name === x.name));
+    if (rest.length) {
+      const total = rest.reduce((a, x) => a + x.count, 0);
+      const mb = btn("", "daily-chip2 daily-popper", () => {
+        openPop(mb, (p) => { for (const l of rest) { const b = btn("", "daily-pop-item", () => { tf.list = l.name; closePop(); render(); }); b.append(el("span", null, l.name), el("span", "daily-muted", " " + l.count)); p.append(b); } });
+      });
+      mb.append(el("span", null, "More lists ▾"), el("span", "daily-n", String(total)));
+      r2.append(mb);
+    }
+    wrap.append(r2);
+
+    // the list
+    const rows = filterTasks(all);
+    const c = card("Open tasks", [el("span", "daily-sp"), el("span", "daily-muted daily-sort", "sorted by priority, 10 first")]);
+    if (!rows.length) c.append(el("div", "daily-muted daily-pad", "No tasks match these filters."));
+    for (const t of rows) {
+      const row = el("div", "daily-tk");
+      const ti = el("div", "daily-ti");
+      const meta = el("small", "daily-muted");
+      meta.append(document.createTextNode(`${t.ageDays}d · ${t.agent} · `), el("span", "daily-scope " + (t.area === "Personal" ? "per" : "biz"), t.area));
+      if (t.list) meta.append(document.createTextNode(" · "), el("span", "daily-cat", t.list));
+      ti.append(el("div", null, t.title), meta);
+      const pb = priBar(t.priority);
+      pb.classList.add("daily-popper", "daily-clickable");
+      pb.title = `Priority ${t.priority} of 10 - click to change`;
+      pb.addEventListener("click", () => openPop(pb, (p) => {
+        p.classList.add("daily-pop-pri");
+        for (let i = 10; i >= 1; i--) {
+          const sw = btn(String(i), "daily-sw" + (i === t.priority ? " cur" : ""), async () => { closePop(); await after(await api.editTask({ agent: t.agent, id: t.id, priority: i }), `Priority set to ${i}.`); });
+          sw.style.background = PRI_COLORS[i - 1];
+          p.append(sw);
+        }
+      }));
+      const st = btn(STATUS_LABEL[t.status], "daily-st daily-popper " + STATUS_CLASS[t.status], () => openPop(st, (p) => {
+        for (const k of ["needs", "working", "waiting", "queued"]) {
+          p.append(btn(STATUS_LABEL[k], "daily-pop-item" + (k === t.status ? " on" : ""), async () => { closePop(); if (k !== t.status) await after(await api.editTask({ agent: t.agent, id: t.id, status: k }), `Status set to ${STATUS_PLAIN[k]}.`); }));
+        }
+      }));
+      st.title = "Click to change the status";
+      row.append(ti, pb, st, btn("Open", "daily-btn sm", () => jumpToAgent(t.agent)));
+      c.append(row);
+    }
+    wrap.append(c);
+    const lg = el("section", "daily-card daily-legendcard");
+    const l1 = legendPriority();
+    l1.style.marginTop = "0";
+    lg.append(l1);
+    wrap.append(lg);
+    return wrap;
+  }
+  function taskListCounts(tasks) {
+    const base = tasks.filter((t) => (tf.area === "all" || t.area === tf.area) && (tf.status === "all" || t.status === tf.status));
+    const m = new Map();
+    for (const t of base) { const k = t.list || "(no list)"; m.set(k, (m.get(k) || 0) + 1); }
+    return { total: base.length, lists: Array.from(m, ([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)) };
+  }
+
+  // ---------------------------------------------------------------- Shopping lists
+  const thumbCache = new Map();   // file name -> data URL
+  function relDay(iso, now) {
+    const t = Date.parse(iso || "");
+    if (!Number.isFinite(t)) return "";
+    const a = new Date(now); a.setHours(0, 0, 0, 0);
+    const b = new Date(t); b.setHours(0, 0, 0, 0);
+    const d = Math.round((a - b) / 86400000);
+    return d <= 0 ? "today" : d === 1 ? "yesterday" : `${d}d ago`;
+  }
+  const doneText = (iso, now) => { const r = relDay(iso, now); return `done ${r === "today" ? "today" : r === "yesterday" ? "yesterday " + clock(Date.parse(iso)) : new Date(iso).getDate() + " " + MONTHS[new Date(iso).getMonth()]}`; };
+  function copyText(text) {
+    const fallback = () => { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch (e) { /* ignore */ } ta.remove(); };
+    try { navigator.clipboard.writeText(text).catch(fallback); } catch (e) { fallback(); }
+  }
+  let selList = null;
   function renderShopping() {
     const lists = payload.data.shopping.lists || [];
     const create = () => { newListOpen = true; render(); };
@@ -313,6 +447,8 @@
         if (!r.ok) { say(r.reason || "Could not create the list."); return; }
         newListOpen = false;
         await load(true);
+        const made = ((payload.data.shopping.lists) || []).find((l) => l.name.toLowerCase() === inp.value.trim().toLowerCase());
+        if (made) selList = made.id;
         render();
       };
       inp.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); if (e.key === "Escape") { newListOpen = false; render(); } });
@@ -325,17 +461,211 @@
       if (newListOpen) e.append(form());
       return e;
     }
-    const wrap = el("div", "daily-plain");
-    const c = card("Shopping lists", [el("span", "daily-sp"), btn("+ New list", "daily-btn sm", create)]);
-    if (newListOpen) c.append(form());
+    if (!lists.some((l) => l.id === selList)) selList = lists[0].id;
+    const cur = lists.find((l) => l.id === selList);
+    const now = payload.now;
+    const wrap = el("div", "daily-shop");
+
+    // left: my lists
+    const left = el("section", "daily-card daily-shop-l");
+    left.append(card("My lists", [num(lists.length, "", "Lists")]).firstChild);
     for (const l of lists) {
       const n = (l.items || []).filter((i) => !i.doneAt && !i.archivedAt).length;
-      const row = el("div", "daily-tk");
-      row.append(el("div", "daily-ti", l.name), el("span", "daily-muted", `${n} item${n === 1 ? "" : "s"}`));
-      c.append(row);
+      const b = btn("", "daily-listbtn" + (l.id === selList ? " on" : ""), () => { selList = l.id; render(); });
+      b.append(el("span", null, l.name));
+      if (n) b.append(el("span", "daily-n", String(n)));
+      left.append(b);
     }
-    wrap.append(c, el("div", "daily-banner info", "Items, archive, add-from-link and sharing arrive in the next build."));
+    left.append(btn("+ New list", "daily-btn daily-newbtn", create));
+    if (newListOpen) left.append(form());
+
+    // right: the selected list
+    const right = el("section", "daily-card daily-shop-r");
+    const items = cur.items || [];
+    const open = items.filter((i) => !i.archivedAt);
+    const openN = items.filter((i) => !i.doneAt && !i.archivedAt).length;
+    const h = el("h3", "daily-card-h");
+    h.append(el("span", null, cur.name));
+    if (openN) h.append(el("span", "daily-n", String(openN)));
+    h.append(el("span", "daily-sp"));
+    const share = async () => { const r = await api.shopping({ op: "share", listId: cur.id }); if (r && r.ok) { copyText(r.text); say("List copied as plain text. Paste it into a message to Merav (sending from here is not built yet)."); } else say((r && r.reason) || "Could not share."); };
+    h.append(btn("Send to Merav", "daily-btn sm", share), btn("Share list", "daily-btn sm", share));
+    right.append(h);
+
+    const addRow = el("div", "daily-addrow");
+    const inp = el("input", "daily-input grow");
+    inp.placeholder = "Add an item by typing";
+    inp.maxLength = 200;
+    const add = async () => { const v = inp.value.trim(); if (!v) return; await after(await api.shopping({ op: "add", listId: cur.id, text: v, addedBy: "Iddo" })); const i2 = body.querySelector(".daily-shop-r input"); if (i2) i2.focus(); };
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
+    addRow.append(inp, btn("Add", "daily-btn pri", add), btn("Record ●", "daily-btn", () => say("Voice recording for shopping arrives in a later build.")));
+    const linkRow = el("div", "daily-addrow");
+    const link = el("input", "daily-input grow");
+    link.placeholder = "or paste a product link (Amazon, B&H, AliExpress, eBay)";
+    const addLink = async () => {
+      const v = link.value.trim();
+      if (!v) return;
+      lb.disabled = true; lb.textContent = "Reading the page...";
+      const r = await api.shopping({ op: "add-link", listId: cur.id, url: v, addedBy: "Iddo" });
+      lb.disabled = false; lb.textContent = "Add from link";
+      if (r && r.ok) { await after(r, r.detailsMissing ? "Added with the link only - details not found on that page." : "Added from the link."); }
+      else say((r && r.reason) || "Could not add that link.");
+    };
+    const lb = btn("Add from link", "daily-btn pri", addLink);
+    link.addEventListener("keydown", (e) => { if (e.key === "Enter") addLink(); });
+    linkRow.append(link, lb);
+    right.append(addRow, linkRow);
+
+    const need = open.filter((i) => i.thumb && !thumbCache.has(i.thumb)).map((i) => i.thumb).concat(items.filter((i) => i.archivedAt && i.thumb && !thumbCache.has(i.thumb)).map((i) => i.thumb));
+    if (need.length) api.thumbs(need).then((m) => { let any = false; for (const k of Object.keys(m || {})) { thumbCache.set(k, m[k]); any = true; } if (any && isOpen() && tab === "shopping") render(); }).catch(() => {});
+
+    if (!open.length) right.append(el("div", "daily-muted daily-pad", "This list is empty. Add something above."));
+    for (const it of open) {
+      const row = el("div", "daily-item" + (it.doneAt ? " done" : ""));
+      const ck = el("button", "daily-ck" + (it.doneAt ? " on" : ""), it.doneAt ? "✓" : "");
+      ck.type = "button";
+      ck.title = it.doneAt ? "Ticked - click to undo (it moves to the archive after 1 hour)" : "Tick when bought";
+      ck.addEventListener("click", async () => { await after(await api.shopping({ op: it.doneAt ? "untick" : "tick", listId: cur.id, itemId: it.id })); });
+      const tx = el("div", "daily-ti");
+      const t1 = el("div", "daily-item-t");
+      t1.append(el("span", it.doneAt ? "daily-strike" : "", it.text));
+      if (it.link && /^https:\/\//i.test(it.link)) {
+        let host = it.source || "link";
+        try { host = new URL(it.link).hostname.replace(/^www\./, ""); } catch (e) { /* keep tag */ }
+        const a = btn("↗ " + host, "daily-linkbtn", () => window.open(it.link));
+        a.title = "Open the product page in your browser";
+        t1.append(document.createTextNode(" "), a);
+      }
+      const meta = el("small", "daily-muted");
+      if (it.doneAt) meta.append(document.createTextNode(`done ${relDay(it.doneAt, now)}`));
+      else {
+        meta.append(document.createTextNode(`added ${relDay(it.added, now)}${it.addedBy ? " · " + it.addedBy : ""}`));
+        if (it.fromLink) {
+          meta.append(document.createTextNode(" · from link"));
+          if (it.source) meta.append(document.createTextNode(" · "), el("span", "daily-acct", it.source));
+          if (it.price) meta.append(document.createTextNode(" · " + it.price));
+          if (it.detailsMissing) meta.append(document.createTextNode(" · details not found"));
+        }
+      }
+      tx.append(t1, meta);
+      row.append(ck, tx);
+      if (it.thumb && thumbCache.has(it.thumb)) {
+        const im = document.createElement("img");
+        im.className = "daily-thumb";
+        im.alt = "";
+        im.src = thumbCache.get(it.thumb);
+        row.append(im);
+      } else if (it.fromLink) {
+        row.append(el("span", "daily-thumb ph", (it.source || "link").slice(0, 10)));
+      }
+      right.append(row);
+    }
+    right.append(el("div", "daily-hint", "Tick items off in the shop. A ticked item stays for 1 hour (so a mis-tap is easy to undo), then moves to this list's Archive."));
+
+    // archive
+    const arch = items.filter((i) => i.archivedAt).sort((a, b) => Date.parse(b.doneAt || b.archivedAt) - Date.parse(a.doneAt || a.archivedAt));
+    if (arch.length) {
+      const ac = el("section", "daily-card daily-archive");
+      const ah = el("h3", "daily-card-h");
+      ah.append(el("span", null, `Archive of ${cur.name}`), el("span", "daily-n", String(arch.length)), el("span", "daily-sp"), el("span", "daily-muted daily-sort", "kept 90 days"));
+      ac.append(ah);
+      for (const it of arch) {
+        const row = el("div", "daily-item");
+        const tx = el("div", "daily-ti");
+        tx.append(el("div", "daily-strike", it.text), el("small", "daily-muted", doneText(it.doneAt || it.archivedAt, now)));
+        row.append(tx, btn("Bring back", "daily-btn sm", async () => { await after(await api.shopping({ op: "bring-back", listId: cur.id, itemId: it.id }), "Back on the list."); }));
+        ac.append(row);
+      }
+      right.append(ac);
+    }
+    wrap.append(left, right);
     return wrap;
+  }
+
+  // ---------------------------------------------------------------- Birthdays & dates
+  let dateForm = null;   // null = closed; otherwise the item being edited ({} for a new one)
+  const DATE_LONG = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  function renderDates() {
+    const items = (payload.data.dates || []).filter((x) => x && x.month >= 1 && x.month <= 12);
+    const wrap = el("div", "daily-datesrow");
+    const left = el("section", "daily-card daily-dates-l");
+    const lh = el("h3", "daily-card-h");
+    const up = upcoming(items, payload.now);
+    lh.append(el("span", null, "Coming up"));
+    if (up.length) lh.append(el("span", "daily-n", String(up.length)));
+    lh.append(el("span", "daily-sp"), btn("+ Add birthday or date", "daily-btn pri sm", () => { dateForm = { kind: "birthday", repeat: true, showOnSchedule: true, remindDays: 3 }; render(); }));
+    left.append(lh);
+    if (!up.length) left.append(el("div", "daily-muted daily-pad", "No birthdays or dates yet. Add the first one."));
+    for (const x of up) {
+      const row = el("div", "daily-datarow");
+      const when = el("div", "daily-dwhen");
+      when.append(el("span", null, `${x.day} ${MONTHS[x.month - 1]}`), el("small", null, x.inDays === 0 ? "today" : `in ${x.inDays} d`));
+      row.append(when);
+      const mid = el("div", "daily-ti");
+      mid.append(el("div", null, x.title), el("small", "daily-muted", `${x.kind === "birthday" ? "Birthday" : "Date"}${x.repeat === false ? " · one-off" : ""}${x.note ? " · " + x.note : ""}${x.showOnSchedule !== false ? " · shown on Schedule" : ""}`));
+      row.append(mid, btn("Edit", "daily-btn sm", () => { dateForm = Object.assign({}, x); render(); }));
+      left.append(row);
+    }
+    wrap.append(left);
+    if (dateForm) wrap.append(dateEditor());
+    const lg = el("div", "daily-legendcard daily-card daily-datesleg");
+    lg.append(el("b", null, "Schedule"));
+    for (const [cls, label] of [["iddo", "Iddo"], ["merav", "Added by Merav"], ["bday", "Birthday / date"], ["goog", "Google Calendar"]]) {
+      const s = el("span", "daily-leg-item");
+      s.append(el("span", "daily-sw2 " + cls), document.createTextNode(label));
+      lg.append(s);
+    }
+    const out = el("div", "daily-plain");
+    out.append(wrap, lg);
+    return out;
+  }
+  // Next occurrence of each date, nearest first (one-off dates in the past are dropped).
+  function upcoming(items, now) {
+    const today = new Date(now); today.setHours(0, 0, 0, 0);
+    const out = [];
+    for (const x of items) {
+      let d;
+      if (x.repeat === false && x.year) d = new Date(x.year, x.month - 1, x.day);
+      else { d = new Date(today.getFullYear(), x.month - 1, x.day); if (d < today) d = new Date(today.getFullYear() + 1, x.month - 1, x.day); }
+      const inDays = Math.round((d - today) / 86400000);
+      if (inDays >= 0) out.push(Object.assign({}, x, { inDays }));
+    }
+    return out.sort((a, b) => a.inDays - b.inDays);
+  }
+  function dateEditor() {
+    const f = dateForm;
+    const side = el("section", "daily-card daily-dates-r");
+    side.append(el("h3", "daily-card-h", f.id ? "Edit" : "Add a new one"));
+    const field = (label, node) => { const w = el("label", "daily-field"); w.append(el("span", "daily-muted", label), node); return w; };
+    const name = el("input", "daily-input");
+    name.value = f.title || ""; name.placeholder = "Yossi, birthday"; name.maxLength = 100;
+    const date = el("input", "daily-input");
+    date.type = "date";
+    if (f.month) date.value = `${f.year || new Date(payload.now).getFullYear()}-${pad2(f.month)}-${pad2(f.day)}`;
+    const mk = (label, key) => { const l = el("label", "daily-check"); const c = document.createElement("input"); c.type = "checkbox"; c.checked = f[key] !== false; l.append(c, document.createTextNode(label)); return [l, c]; };
+    const [repL, rep] = mk("Repeat every year", "repeat");
+    const [schL, sch] = mk("Show on Schedule", "showOnSchedule");
+    const kind = document.createElement("select"); kind.className = "daily-input";
+    for (const [v, l] of [["birthday", "Birthday"], ["date", "Other date"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; kind.append(o); }
+    kind.value = f.kind || "birthday";
+    const rem = document.createElement("select"); rem.className = "daily-input";
+    for (const [v, l] of [[0, "On the day"], [1, "1 day before"], [3, "3 days before"], [7, "1 week before"], [14, "2 weeks before"]]) { const o = document.createElement("option"); o.value = String(v); o.textContent = l; rem.append(o); }
+    rem.value = String(f.remindDays != null ? f.remindDays : 3);
+    side.append(field("Name or occasion", name), field("Date", date), field("Type", kind), repL, schL, field("Remind me", rem));
+    const acts = el("div", "daily-newlist");
+    const save = async () => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.value);
+      if (!m) { say("Pick a date."); return; }
+      const item = { id: f.id, title: name.value, year: Number(m[1]), month: Number(m[2]), day: Number(m[3]), kind: kind.value, repeat: rep.checked, showOnSchedule: sch.checked, remindDays: Number(rem.value), note: f.note, agent: f.agent };
+      if (rep.checked) delete item.year;
+      const r = await api.saveDate(item);
+      if (r && r.ok) { dateForm = null; await load(true); render(); } else say((r && r.reason) || "Could not save.");
+    };
+    acts.append(btn("Save", "daily-btn pri", save), btn("Cancel", "daily-btn", () => { dateForm = null; render(); }));
+    if (f.id) acts.append(btn("Delete", "daily-btn", async () => { if (!confirm("Delete this date?")) return; const r = await api.deleteDate(f.id); if (r && r.ok) { dateForm = null; await load(true); render(); } else say((r && r.reason) || "Could not delete."); }));
+    side.append(acts);
+    setTimeout(() => name.focus(), 0);
+    return side;
   }
 
   function renderSoon(title, text) {
@@ -385,6 +715,7 @@
     if (!isOpen()) return;
     dateEl.textContent = payload ? (() => { const d = new Date(payload.now); return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`; })() : "";
     settingsBtn.classList.toggle("on", showSettings);
+    closePop();
     body.replaceChildren();
     if (!payload) { renderTabs(); body.append(el("div", "daily-muted daily-pad", "Loading...")); return; }
     renderTabs();
@@ -395,8 +726,8 @@
       else if (tab === "shopping") body.append(renderShopping());
       else if (tab === "emails") body.append(renderSoon("Emails", "Needs-your-answer, sent-no-reply and people-to-write-to arrive in a later build."));
       else if (tab === "schedule") body.append(renderSoon("Schedule", "Month and six-month calendars and the Add appointment form arrive in a later build."));
-      else if (tab === "tasks") body.append(renderSoon("Tasks", "The full task list with filters arrives in the next build. The top tasks are on Today."));
-      else if (tab === "dates") body.append(renderSoon("Birthdays & dates", "Arrives in the next build."));
+      else if (tab === "tasks") body.append(renderTasks());
+      else if (tab === "dates") body.append(renderDates());
     } catch (e) {
       console.error("daily render", e);
       body.append(el("div", "daily-error", "My Daily hit a problem drawing this tab."));

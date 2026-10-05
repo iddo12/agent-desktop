@@ -15,6 +15,8 @@ function ageDays(iso, now) {
 function priority10(t) {
   const p = Number(t && t.priority10);
   if (Number.isInteger(p) && p >= 1 && p <= 10) return p;
+  // My Daily writes the exact 1-10 value as a "p7" tag, because tasks.py itself only knows 1/2/3.
+  for (const tag of (t && t.tags) || []) { const m = /^p(10|[1-9])$/.exec(String(tag)); if (m) return Number(m[1]); }
   return { 1: 9, 2: 5, 3: 2 }[t && t.priority] || 5;
 }
 
@@ -37,7 +39,7 @@ function mapTaskStores(stores, now) {
       const tags = Array.isArray(it.tags) ? it.tags : [];
       out.push({
         id: String(it.id), agent: s.agent || "?", title: String(it.title || ""), detail: it.detail || "",
-        status: taskStatus(it), priority: priority10(it),
+        status: taskStatus(it), priority: priority10(it), tags,
         area: tags.includes("personal") ? "Personal" : "Business",
         list: it.group || "", created: it.created || null, ageDays: ageDays(it.created, now),
       });
@@ -56,7 +58,7 @@ function oldest(items, ageKey, ownerKey) {
 // Fixture tasks for test mode (and the empty-store fallback is "no tasks", never fixtures).
 function fixtureTasks(now) {
   const d = (n) => new Date(now - n * DAY).toISOString();
-  const mk = (id, agent, title, st, p, area, list, age) => ({ id, agent, title, detail: "", status: st, priority: p, area, list, created: d(age), ageDays: age });
+  const mk = (id, agent, title, st, p, area, list, age) => ({ id, agent, title, detail: "", status: st, priority: p, tags: st === "queued" ? ["queued"] : [], area, list, created: d(age), ageDays: age });
   return [
     mk("t1", "Travel Agent", "Book flight to Berlin", "needs", 9, "Business", "LensVid trade show", 3),
     mk("t2", "Personal Assistant", "Reply to Sony PR about review unit", "working", 8, "Business", "LensVid reviews", 1),
@@ -104,13 +106,18 @@ function placeholderEvents(now) {
 // dates.json items: {id, title, month (1-12), day, kind: "birthday"|"date", agent?}. Next occurrence on/after today.
 function nextOccurrence(item, now) {
   const today = new Date(now); today.setHours(0, 0, 0, 0);
-  let d = new Date(today.getFullYear(), item.month - 1, item.day);
-  if (d < today) d = new Date(today.getFullYear() + 1, item.month - 1, item.day);
+  let d;
+  if (item.repeat === false && item.year) d = new Date(item.year, item.month - 1, item.day); // one-off date
+  else {
+    d = new Date(today.getFullYear(), item.month - 1, item.day);
+    if (d < today) d = new Date(today.getFullYear() + 1, item.month - 1, item.day);
+  }
   return { at: d.getTime(), inDays: Math.round((d.getTime() - today.getTime()) / DAY) };
 }
 function upcomingDates(dates, now, limit) {
   return (dates || []).filter((x) => x && x.month >= 1 && x.month <= 12 && x.day >= 1 && x.day <= 31)
     .map((x) => Object.assign({}, x, nextOccurrence(x, now)))
+    .filter((x) => x.inDays >= 0)
     .sort((a, b) => a.at - b.at).slice(0, limit || 50);
 }
 
@@ -189,7 +196,134 @@ function cleanSettings(raw) {
   return o;
 }
 
+// ---------------------------------------------------------------- Tasks tab (filters, edits)
+// filter: {area: "all"|"Business"|"Personal", status: "all"|needs|working|waiting|queued, list: ""|name}
+function filterTasks(tasks, f) {
+  f = f || {};
+  return (tasks || []).filter((t) => (!f.area || f.area === "all" || t.area === f.area)
+    && (!f.status || f.status === "all" || t.status === f.status)
+    && (!f.list || (t.list || "(no list)") === f.list));
+}
+// Chips for the LISTS row: counts respect the area and status filters, biggest first.
+function taskListCounts(tasks, f) {
+  const base = filterTasks(tasks, Object.assign({}, f, { list: "" }));
+  const m = new Map();
+  for (const t of base) { const k = t.list || "(no list)"; m.set(k, (m.get(k) || 0) + 1); }
+  return { total: base.length, lists: Array.from(m, ([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)) };
+}
+// tasks.py arguments for a status/priority edit. `task` is a mapped task, change = {status?, priority?}.
+// tasks.py has priority 1/2/3 only, so the exact 1-10 value is also kept as a "pN" tag.
+function taskEditArgs(task, change) {
+  const a = ["--agent", task.agent, "--update", task.id];
+  const tags = (task.tags || []).filter((x) => !/^p(10|[1-9])$/.test(x) && x !== "queued");
+  const st = change && change.status;
+  const pr = change && change.priority;
+  if (!st && !pr) throw new Error("nothing to change");
+  if (st) {
+    if (!["needs", "working", "waiting", "queued"].includes(st)) throw new Error("unknown status");
+    a.push("--status", st === "waiting" ? "blocked" : "open", "--set-needs-iddo", st === "needs" ? "yes" : "no");
+    if (st === "queued") tags.push("queued");
+  } else if ((task.tags || []).includes("queued")) tags.push("queued");
+  if (pr) {
+    const p = Number(pr);
+    if (!Number.isInteger(p) || p < 1 || p > 10) throw new Error("priority must be 1-10");
+    a.push("--priority", String(p >= 8 ? 1 : p >= 4 ? 2 : 3));
+    tags.push("p" + p);
+  } else if (task.priority) tags.push("p" + task.priority);
+  a.push("--tags", tags.join(","));
+  return a;
+}
+// The same edit applied to a mapped task in memory (fixtures in test mode).
+function applyTaskEdit(task, change) {
+  const t = Object.assign({}, task);
+  if (change.status) { t.status = change.status; t.tags = (t.tags || []).filter((x) => x !== "queued").concat(change.status === "queued" ? ["queued"] : []); }
+  if (change.priority) t.priority = Number(change.priority);
+  return t;
+}
+
+// ---------------------------------------------------------------- Shopping lists
+const DONE_HOLD_MS = 3600000;          // a ticked item stays on the list for 1 hour
+const ARCHIVE_KEEP_MS = 90 * DAY;      // then lives in the archive for 90 days
+function newId(prefix) { return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function findList(s, id) { return ((s && s.lists) || []).find((l) => l.id === id) || null; }
+// Lazy sweep, run when the view loads (no timer): done > 1 h -> archived; archived > 90 d -> removed.
+function sweepShopping(s, now) {
+  let changed = false;
+  for (const l of (s && s.lists) || []) {
+    if (!Array.isArray(l.items)) { l.items = []; continue; }
+    for (const it of l.items) {
+      if (it.doneAt && !it.archivedAt && now - Date.parse(it.doneAt) >= DONE_HOLD_MS) { it.archivedAt = new Date(Date.parse(it.doneAt) + DONE_HOLD_MS).toISOString(); changed = true; }
+    }
+    const keep = l.items.filter((it) => !(it.archivedAt && now - Date.parse(it.archivedAt) >= ARCHIVE_KEEP_MS));
+    if (keep.length !== l.items.length) { l.items = keep; changed = true; }
+  }
+  return changed;
+}
+// op: {op, listId, itemId, text, addedBy, ...}. Mutates `s`; returns {ok, reason?}.
+function shoppingOp(s, op, now) {
+  const iso = new Date(now).toISOString();
+  if (op.op === "create-list") {
+    const name = String(op.name || "").trim().slice(0, 60);
+    if (!name) return { ok: false, reason: "A list needs a name." };
+    if ((s.lists || []).some((x) => x.name.toLowerCase() === name.toLowerCase())) return { ok: false, reason: "There is already a list with that name." };
+    (s.lists = s.lists || []).push({ id: newId("l"), name, created: iso, items: [] });
+    return { ok: true };
+  }
+  const l = findList(s, op.listId);
+  if (!l) return { ok: false, reason: "That list no longer exists." };
+  if (!Array.isArray(l.items)) l.items = [];
+  if (op.op === "add") {
+    const text = String(op.text || "").trim().slice(0, 200);
+    if (!text) return { ok: false, reason: "Type what to add." };
+    const it = { id: newId("i"), text, added: iso, addedBy: String(op.addedBy || "Iddo").slice(0, 60) };
+    for (const k of ["link", "source", "price", "thumb", "note"]) if (op[k]) it[k] = String(op[k]).slice(0, 500);
+    if (op.fromLink) it.fromLink = true;
+    if (op.detailsMissing) it.detailsMissing = true;
+    l.items.push(it);
+    return { ok: true, item: it };
+  }
+  const it = l.items.find((x) => x.id === op.itemId);
+  if (!it) return { ok: false, reason: "That item no longer exists." };
+  if (op.op === "tick") { if (!it.doneAt) it.doneAt = iso; delete it.archivedAt; return { ok: true }; }
+  if (op.op === "untick") { delete it.doneAt; delete it.archivedAt; return { ok: true }; }
+  if (op.op === "bring-back") { delete it.doneAt; delete it.archivedAt; it.added = iso; return { ok: true }; }
+  if (op.op === "remove") { l.items = l.items.filter((x) => x !== it); return { ok: true }; }
+  return { ok: false, reason: "Unknown action." };
+}
+function shoppingCounts(l) {
+  const items = l.items || [];
+  return { open: items.filter((i) => !i.doneAt && !i.archivedAt).length, archived: items.filter((i) => i.archivedAt).length };
+}
+// Plain text for "Share list" / "Send to Merav" (copied to the clipboard; actual sending is not built yet).
+function shoppingShareText(l) {
+  const open = (l.items || []).filter((i) => !i.doneAt && !i.archivedAt);
+  const lines = [`${l.name} (${open.length} item${open.length === 1 ? "" : "s"})`];
+  for (const i of open) lines.push(`- ${i.text}${i.price ? " (" + i.price + ")" : ""}${i.link ? " " + i.link : ""}`);
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------- Birthdays & dates (dates.json)
+// item: {id, title, month, day, year?, kind: "birthday"|"date", repeat (default true), showOnSchedule (default true), remindDays, note}
+function cleanDate(raw) {
+  const month = Number(raw && raw.month), day = Number(raw && raw.day), year = Number(raw && raw.year) || 0;
+  const title = String((raw && raw.title) || "").trim().slice(0, 100);
+  if (!title) return { error: "Give it a name or occasion." };
+  if (!(Number.isInteger(month) && month >= 1 && month <= 12 && Number.isInteger(day) && day >= 1 && day <= 31)) return { error: "Pick a valid date." };
+  const repeat = raw.repeat !== false;
+  if (!repeat && !(year >= 1900 && year <= 2200)) return { error: "A one-off date needs a year." };
+  const out = {
+    id: String(raw.id || newId("d")), title, month, day, kind: raw.kind === "birthday" ? "birthday" : "date", repeat,
+    showOnSchedule: raw.showOnSchedule !== false, remindDays: [0, 1, 3, 7, 14].includes(Number(raw.remindDays)) ? Number(raw.remindDays) : 3,
+  };
+  if (year) out.year = year;
+  if (raw.note) out.note = String(raw.note).slice(0, 200);
+  if (raw.agent) out.agent = String(raw.agent).slice(0, 60);
+  return { item: out };
+}
+
 module.exports = {
+  filterTasks, taskListCounts, taskEditArgs, applyTaskEdit,
+  DONE_HOLD_MS, ARCHIVE_KEEP_MS, sweepShopping, shoppingOp, shoppingCounts, shoppingShareText, findList, cleanDate,
   DAY, ageDays, priority10, taskStatus, STATUS_LABEL, mapTaskStores, fixtureTasks, placeholderEmails, placeholderEvents,
   nextOccurrence, upcomingDates, shoppingSummary, nextEvent, summarize, badge, buildDigest, clock, dateLabel, cleanSettings, DEFAULT_SETTINGS,
 };

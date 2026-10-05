@@ -131,3 +131,70 @@ body.daily-open #xp-panel { display: none !important; }
   .daily-two { flex-direction: column; }
   .daily-chip { flex: 1 1 40%; min-width: 0; }
 }
+
+/* ---- Phase 2: Tasks, Shopping lists, Birthdays & dates ---- */
+.daily-frow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.daily-lbl { font-size: 11.5px; font-weight: 700; letter-spacing: .06em; color: var(--text-muted); margin-right: 2px; }
+.daily-btn.pill { border-radius: 16px; }
+.daily-chip2 { font: inherit; color: var(--text); background: var(--bg-panel); border: 1px solid var(--border); border-radius: 16px; height: 30px; padding: 0 10px 0 12px;
+  display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.daily-chip2:hover { background: var(--bg-hover); }
+.daily-chip2.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.daily-chip2.on .daily-n { background: #fff; color: var(--accent); }
+.daily-sort { font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; }
+.daily-clickable { cursor: pointer; border-radius: 6px; padding: 2px 3px; }
+.daily-clickable:hover { background: var(--bg-hover); }
+button.daily-st { border: 0; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; }
+.daily-legendcard { padding: 8px 12px; }
+.daily-pop { position: fixed; z-index: 70; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+  padding: 4px; display: flex; flex-direction: column; min-width: 150px; max-height: 60vh; overflow-y: auto; }
+.daily-pop-item { font: inherit; color: var(--text); background: none; border: 0; border-radius: 6px; text-align: left; padding: 6px 10px; cursor: pointer; }
+.daily-pop-item:hover { background: var(--bg-hover); }
+.daily-pop-item.on { font-weight: 700; background: var(--bg-active); }
+.daily-pop-pri { flex-direction: row; flex-wrap: wrap; width: 148px; min-width: 0; gap: 4px; padding: 8px; }
+.daily-pop-pri .daily-sw { width: 26px; height: 26px; line-height: 24px; font-size: 12px; cursor: pointer; padding: 0; font-family: inherit; }
+.daily-sw.cur { outline: 2px solid var(--text); }
+
+.daily-shop { display: flex; gap: 14px; align-items: flex-start; max-width: 1100px; }
+.daily-shop-l { width: 230px; flex: none; display: flex; flex-direction: column; gap: 4px; }
+.daily-shop-l .daily-card-h { margin-bottom: 4px; }
+.daily-shop-r { flex: 1; min-width: 0; }
+.daily-listbtn { font: inherit; color: var(--text); background: none; border: 0; border-radius: 8px; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; text-align: left; }
+.daily-listbtn:hover { background: var(--bg-hover); }
+.daily-listbtn.on { background: var(--bg-active); font-weight: 600; }
+.daily-newbtn { margin-top: 6px; justify-content: center; }
+.daily-addrow { display: flex; gap: 8px; margin-bottom: 8px; }
+.daily-input.grow { flex: 1; min-width: 0; }
+.daily-item { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.daily-item .daily-ti { flex: 1; min-width: 0; }
+.daily-item small { color: var(--text-muted); font-size: 12px; }
+.daily-ck { width: 20px; height: 20px; flex: none; border: 2px solid #9a968a; border-radius: 5px; background: #fff; cursor: pointer; padding: 0; color: #fff; font-size: 13px; line-height: 14px; }
+.daily-ck.on { background: var(--health-healthy); border-color: var(--health-healthy); }
+.daily-strike { text-decoration: line-through; color: var(--text-muted); }
+.daily-item-t { overflow-wrap: anywhere; }
+.daily-linkbtn { font: inherit; font-size: 12.5px; color: var(--text-muted); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.daily-thumb { width: 48px; height: 48px; flex: none; margin-left: auto; border-radius: 8px; border: 1px solid var(--border); object-fit: contain; background: #fff; }
+.daily-thumb.ph { display: inline-flex; align-items: center; justify-content: center; font-size: 10px; color: var(--text-muted); background: var(--bg-hover); overflow: hidden; }
+.daily-hint { color: var(--text-muted); font-size: 12px; margin: 8px 0 10px; }
+.daily-archive { background: var(--bg-app); margin-top: 6px; }
+.daily-archive .daily-item:last-child { border-bottom: 0; }
+
+.daily-datesrow { display: flex; gap: 14px; align-items: flex-start; }
+.daily-dates-l { flex: 1; min-width: 0; min-height: 240px; }
+.daily-dates-r { width: 300px; flex: none; display: flex; flex-direction: column; gap: 6px; }
+.daily-datarow { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.daily-datarow:last-child { border-bottom: 0; }
+.daily-dwhen { width: 64px; flex: none; color: var(--text-muted); }
+.daily-dwhen { display: flex; flex-direction: column; }
+.daily-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.daily-field .daily-input { min-width: 0; }
+.daily-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-muted); }
+.daily-datesleg { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12.5px; }
+.daily-leg-item { display: inline-flex; align-items: center; gap: 6px; }
+.daily-sw2 { width: 14px; height: 14px; border-radius: 4px; border: 1px solid #bdb8a8; display: inline-block; }
+.daily-sw2.iddo { background: #e1ebf7; } .daily-sw2.merav { background: #ece0f2; } .daily-sw2.bday { background: #f8dfe3; } .daily-sw2.goog { background: #dcefe4; }
+
+@media (max-width: 900px) {
+  .daily-shop, .daily-datesrow { flex-direction: column; align-items: stretch; }
+  .daily-shop-l, .daily-dates-r { width: auto; }
+}

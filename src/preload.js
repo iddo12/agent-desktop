@@ -139,6 +139,11 @@ contextBridge.exposeInMainWorld("api", {
     load: (force) => ipcRenderer.invoke("daily-load", { force: !!force }),
     setSettings: (patch) => ipcRenderer.invoke("daily-settings-set", patch),
     createShoppingList: (name) => ipcRenderer.invoke("daily-shopping-create-list", { name }),
+    shopping: (args) => ipcRenderer.invoke("daily-shopping", args),
+    thumbs: (names) => ipcRenderer.invoke("daily-thumbs", names),
+    editTask: (args) => ipcRenderer.invoke("daily-task-edit", args),
+    saveDate: (item) => ipcRenderer.invoke("daily-dates-save", item),
+    deleteDate: (id) => ipcRenderer.invoke("daily-dates-delete", { id }),
   },
   // v1.55.0 IRIS (renderer/iris.js)
   iris: {
