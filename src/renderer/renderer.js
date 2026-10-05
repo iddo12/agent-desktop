@@ -2691,6 +2691,17 @@ const RATE_LIMIT_REFRESH_SECONDS = 60;
 // limit," and the badge gave no visual hint it might be out of date.
 const STALE_THRESHOLD_SECONDS = RATE_LIMIT_REFRESH_SECONDS * 3;
 
+// 2026-10-05: a figure older than this is not shown as a number at all. The cache stopped updating for 22 h
+// (settings.json got a BOM, so no session rendered the statusLine) while the badge kept showing "74%" next to
+// the real 84%. Above this age the badge says "stale since HH:MM" instead (Optimization's request).
+const NO_NUMBER_AFTER_SECONDS = 15 * 60;
+function staleSinceText(ageSeconds) {
+  const t = new Date(Date.now() - ageSeconds * 1000);
+  const hm = t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const sameDay = t.toDateString() === new Date().toDateString();
+  return sameDay ? hm : `${t.toLocaleDateString([], { month: "short", day: "numeric" })} ${hm}`;
+}
+
 function formatAge(ageSeconds) {
   if (ageSeconds === null || ageSeconds === undefined) return { text: "an unknown time", stale: false };
   const stale = ageSeconds > STALE_THRESHOLD_SECONDS;
@@ -2724,7 +2735,8 @@ async function refreshUsageWindows() {
   if (windows.fiveHourConfirmed) {
     const pct = Math.round(windows.fiveHourConfirmed.usedPct);
     const age = formatAge(windows.fiveHourConfirmed.ageSeconds);
-    fiveHourUsageEl.textContent = `${pct}% (5h)`;
+    const fiveTooOld = typeof windows.fiveHourConfirmed.ageSeconds === "number" && windows.fiveHourConfirmed.ageSeconds > NO_NUMBER_AFTER_SECONDS;
+    fiveHourUsageEl.textContent = fiveTooOld ? `5h: stale since ${staleSinceText(windows.fiveHourConfirmed.ageSeconds)}` : `${pct}% (5h)`;
     fiveHourUsageEl.title =
       `${pct}% of your 5-hour rate limit window used, reported directly by Anthropic (rate_limits.five_hour), ` +
       `not estimated - as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while an ` +
@@ -2756,7 +2768,8 @@ async function refreshUsageWindows() {
   if (windows.sevenDayConfirmed) {
     const pct = Math.round(windows.sevenDayConfirmed.usedPct);
     const age = formatAge(windows.sevenDayConfirmed.ageSeconds);
-    weeklyUsageEl.textContent = `${pct}% (7d)`;
+    const weekTooOld = typeof windows.sevenDayConfirmed.ageSeconds === "number" && windows.sevenDayConfirmed.ageSeconds > NO_NUMBER_AFTER_SECONDS;
+    weeklyUsageEl.textContent = weekTooOld ? `7d: stale since ${staleSinceText(windows.sevenDayConfirmed.ageSeconds)}` : `${pct}% (7d)`;
     weeklyUsageEl.title =
       `${pct}% of your weekly rate limit used, reported directly by Anthropic (rate_limits.seven_day), not estimated ` +
       `- as of ${age.text} ago. Refreshes at least every ${RATE_LIMIT_REFRESH_SECONDS}s while an INTERACTIVE terminal ` +

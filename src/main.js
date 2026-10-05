@@ -244,7 +244,15 @@ function ensureRateLimitStatusLine() {
   try {
     let settings = {};
     if (fs.existsSync(settingsPath)) {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      // 2026-10-05: a PowerShell edit left a UTF-8 BOM on settings.json; Claude Code then ignored the file
+      // (statusLine never rendered, usage cache stale 22 h). Strip it, here and on disk, so this self-heals.
+      if (raw.charCodeAt(0) === 0xfeff) {
+        settings = JSON.parse(raw.slice(1));
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+      } else {
+        settings = JSON.parse(raw);
+      }
     }
     const existing = settings.statusLine;
     // Respect a genuinely different, user-configured statusLine untouched -
