@@ -316,7 +316,7 @@ const tick = async (w, advance) => { w.t += advance == null ? 0 : advance; w.g.t
     const w = world({ throttle: "HOLD", saved: { relentless: { fleet: true, agents: {} } } });
     w.set([usr(w.t - 400000, "go"), asst(w.t - 300000, "DONE: x")]);
     await tick(w);
-    t("relentless + HOLD: no nudge", () => { assert.strictEqual(w.sent.length, 0); assert.strictEqual(w.g.snapshot("A").why.reason, "fleet throttle is HOLD"); });
+    t("relentless + usage HOLD: still nudged (order overrides the 85% throttle)", () => assert.strictEqual(w.sent.length, 1));
     const w2 = world({ throttle: "SLOW", saved: { relentless: { fleet: true, agents: {} } } });
     w2.set([usr(w2.t - 400000, "go"), asst(w2.t - 300000, "DONE: x")]);
     await tick(w2);

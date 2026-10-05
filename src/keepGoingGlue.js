@@ -182,7 +182,7 @@ function create(deps) {
       const c0 = C(p);
       if (!c0.nothingLeft) { c0.nothingLeft = { at: t, reason: d.reason.slice(0, 200) }; dirty = true; log("keepgoing: " + p + " is out of projects - " + d.reason); emit(p); }
     }
-    const isHold = d.verdict === "blocked" && /throttle is HOLD|usage hard stop/.test(d.reason);
+    const isHold = d.verdict === "blocked" && /throttle is HOLD|usage hard stop|CPU guard hold/.test(d.reason);
     if (d.verdict === "done" || d.verdict === "blocked") {
       if (!isHold && m && m.active) { m.active = false; dirty = true; }
       const hk = K.hashText(parsed.last && parsed.last.text) + d.reason;

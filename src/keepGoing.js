@@ -319,7 +319,10 @@
     if (age < LIMITS.quietMs) return none("settling", { defer: true });
     if (h && !h.systemish && c.now - h.ts < LIMITS.humanQuietMs) return none("a person typed " + Math.round((c.now - h.ts) / 1000) + " s ago", { defer: true });
     if (c.usageHardStop) return { verdict: "blocked", reason: "usage hard stop (>=95%)" };
-    if (c.throttle === "HOLD") return { verdict: "blocked", reason: "fleet throttle is HOLD" };
+    // v1.74.3 (Iddo, 2026-10-05): his "keep working regardless" order overrides the usage throttle HOLD (it fires at 85% of the week);
+    // the usage hard stop above (>= 95%) is the limit instead. The CPU guard hold ("CPUHOLD") protects the PC and wins in every mode.
+    if (c.throttle === "CPUHOLD") return { verdict: "blocked", reason: "CPU guard hold: the PC is overloaded" };
+    if (c.throttle === "HOLD" && !rel) return { verdict: "blocked", reason: "fleet throttle is HOLD" };
     if (kind) return { verdict: "nudge", kind, reason: cls.reason, question, mission: missionOn };
     return { verdict: "nudge", reason: cls.reason, mission: missionOn };
   }

@@ -269,9 +269,15 @@ t("NOTHING-LEFT: real stop in ALL modes (done, exact reason)", () => {
   assert.deepStrictEqual(K.protocolOf("x\nNOTHING-LEFT: none"), { kind: "nothing-left", reason: "none" });
   assert.strictEqual(K.classify("NOTHING-LEFT: z").verdict, "done");
 });
-t("relentless: HOLD and usage hard stop win and block", () => {
+t("relentless: usage HOLD is overridden (Iddo 2026-10-05); usage hard stop and CPU guard hold win and block", () => {
   let r = K.decide(REL(endWith("DONE: x"), { throttle: "HOLD" }));
-  assert.strictEqual(r.verdict, "blocked"); assert.strictEqual(r.reason, "fleet throttle is HOLD");
+  assert.strictEqual(r.verdict, "nudge"); // the 85% throttle HOLD does not stop an order
+  r = K.decide(REL(endWith("DONE: x"), { throttle: "CPUHOLD" }));
+  assert.strictEqual(r.verdict, "blocked"); assert.strictEqual(r.reason, "CPU guard hold: the PC is overloaded");
+  r = K.decide(Object.assign(REL(endWith(END), { throttle: "CPUHOLD" }), { relentless: false })); // plain mode: a CPU hold blocks too
+  assert.strictEqual(r.verdict, "blocked");
+  r = K.decide(Object.assign(REL(endWith(END), { throttle: "HOLD" }), { relentless: false }));
+  assert.strictEqual(r.reason, "fleet throttle is HOLD"); // plain mode: usage HOLD still blocks
   r = K.decide(REL(endWith("DONE: x"), { usageHardStop: true, throttle: "HOLD" }));
   assert.strictEqual(r.verdict, "blocked"); assert.strictEqual(r.reason, "usage hard stop (>=95%)");
   r = K.decide(REL(endWith(END), { usageHardStop: true }));
