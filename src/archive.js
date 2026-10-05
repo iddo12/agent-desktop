@@ -1106,7 +1106,8 @@ function usageModelFallback(kind) {
     const w = d.windows && d.windows[kind];
     if (!w || typeof w.usedPct !== "number") return null;
     if (kind === "5h" && /^model only/i.test(w.basis || "")) return null;
-    const resetsAt = w.resetsAt ? Math.round(Date.parse(w.resetsAt) / 1000) : null;
+    const resetsParsed = w.resetsAt ? Math.round(Date.parse(w.resetsAt) / 1000) : null;
+    const resetsAt = Number.isFinite(resetsParsed) ? resetsParsed : null;
     if (resetsAt && resetsAt < Date.now() / 1000) return null;
     return { usedPct: w.usedPct, resetsAt, ageSeconds, source: "usage-model" };
   } catch (e) {
