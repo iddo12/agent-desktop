@@ -3326,7 +3326,17 @@ try {
       try {
         const c = require("./archive").getConfirmedRateLimits();
         const hi = (x) => !!(x && typeof x.usedPct === "number" && x.usedPct >= 95);
-        return !!(c && (hi(c.sevenDay) || hi(c.fiveHour)));
+        if (c && (hi(c.sevenDay) || hi(c.fiveHour))) return true;
+        // COO review 2026-10-05: the confirmed reading is often old, so also read the usage model's own estimate
+        // (real reading + usage since) whatever its age, as long as its window has not reset. Either source >= 95% stops.
+        const um = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "System Optimization & Maintenance Agent", "UsageModel", "data", "usage_now.json"), "utf-8").replace(/^﻿/, ""));
+        const nowMs = Date.now();
+        return ["7d", "5h"].some((k) => {
+          const w = um.windows && um.windows[k];
+          if (!w || typeof w.usedPct !== "number" || w.usedPct < 95) return false;
+          if (w.resetsAt && Date.parse(w.resetsAt) < nowMs) return false;
+          return true;
+        });
       } catch (e) { return false; }
     },
     storage: {

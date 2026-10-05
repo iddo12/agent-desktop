@@ -118,7 +118,7 @@
         fb.textContent = "all agents";
         fb.setAttribute("aria-checked", fleetRelentless ? "true" : "false");
         fb.className = fleetRelentless ? "keepgoing-on" : "keepgoing-off";
-        fb.title = "Keep working regardless for ALL agents is " + (fleetRelentless ? "ON" : "OFF") + " (default off). Same order as the per-agent switch, applied to every agent. Click to switch.";
+        fb.title = "Keep working regardless for ALL agents is " + (fleetRelentless ? "ON" : "OFF") + " (default off). Same order as the per-agent switch, applied to every agent. Turning it ON wakes EVERY idle agent whose last turn ended within 24 h (nudges paced 30 s apart); prefer the per-agent switch for the few agents with a real backlog. Click to switch.";
       }
       const el = bannerEl();
       const s = p ? st(p) : null;
