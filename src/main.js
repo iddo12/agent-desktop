@@ -4448,7 +4448,7 @@ ipcMain.handle("library-state-op", (event, op) => libraryState.apply(op));
 // Per-agent "Agent documents" panel (v1.75.0): read-only list of what one agent produced; opening goes by id.
 const agentDocs = require("./agentDocs").create({
   outputRoot: "E:\\Claude work",
-  roots: [ARGUS_WORKSPACE, "E:\\Claude work", AGENTS_ROOT],
+  roots: [ARGUS_WORKSPACE, "E:\\Claude work", AGENTS_ROOT, "D:\\Dropbox\\MegaPixel-2"], // v1.75.4: Word articles written there by LensVid Talk, Review Writer, EiC
   loadRegistry: () => registry.loadEntries(ARGUS_WORKSPACE),
   libraryState,
   shell,
