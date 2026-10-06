@@ -10,6 +10,7 @@ const fs = require("fs");
 const path = require("path");
 const model = require("./model");
 const linkmeta = require("./linkmeta");
+const mailfeed = require("./mailfeed");
 const { execFile } = require("child_process");
 const { withFsRetry } = require("../fsRetry");
 
@@ -186,8 +187,11 @@ function init({ ipcMain: rawIpc, root, testMode, log, runPython, fetchProduct, m
     const own = readStore(f("appointments.json"), { items: [] }, notices, "Appointments");
     const ownEvents = (Array.isArray(own.items) ? own.items : []).filter((e) => e && Number.isFinite(e.start)).map((e) => Object.assign({ cal: "iddo" }, e, { own: true }));
     const events = p.events(now).concat(ownEvents).sort((a, b) => a.start - b.start);
+    // Real email from the local Betterbird feed (read-only file written by the Personal Assistant) when it is readable;
+    // otherwise the placeholder demo data. Calendar stays on the placeholder until Google Calendar is connected.
+    const feed = testMode ? { connected: false } : mailfeed.loadMailFeed(process.env.DAILY_MAIL_FEED || undefined, now);
     const data = {
-      tasks, emails: p.emails(now), events,
+      tasks, emails: feed.connected ? feed.emails : p.emails(now), events,
       dates: (() => { const d = readStore(f("dates.json"), { items: [] }, notices, "Birthdays & dates").items; return Array.isArray(d) ? d.filter(isObj) : []; })(),
       shopping: loadShopping(now),
     };
@@ -196,7 +200,7 @@ function init({ ipcMain: rawIpc, root, testMode, log, runPython, fetchProduct, m
       now, generatedAt: Date.now(), data, summary, digest: model.buildDigest(summary, now), badge: model.badge(summary),
       settings: model.cleanSettings(readStore(f("settings.json"), {}, notices, "Settings")),
       notices: notices.concat(skippedTaskFiles ? [`${skippedTaskFiles} task file${skippedTaskFiles === 1 ? "" : "s"} could not be read and ${skippedTaskFiles === 1 ? "is" : "are"} left out.`] : []),
-      provider: { connected: p.connected, label: p.label, accounts: p.accounts }, taskSource: source, test: !!testMode,
+      provider: { connected: p.connected, label: p.label, accounts: feed.connected ? feed.accounts : p.accounts, emailsConnected: !!feed.connected, emailsLabel: feed.connected ? feed.label : "", emailsUpdatedAt: feed.connected ? feed.updatedAt : null, emailsCounts: feed.connected ? feed.counts : null }, taskSource: source, test: !!testMode,
     };
   }
 

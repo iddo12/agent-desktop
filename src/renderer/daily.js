@@ -214,8 +214,15 @@
     b.append(btn("Dismiss", "daily-btn sm", async () => { if (api.clearNotices) await api.clearNotices(); await load(true); render(); }));
     return b;
   }
-  function demoBanner() {
-    return el("div", "daily-banner", `${payload.provider.label}. Email and calendar are not connected yet, so these are examples.`);
+  function demoBanner(kind) {
+    const pv = payload.provider;
+    if (pv.emailsConnected) {
+      const at = pv.emailsUpdatedAt ? new Date(pv.emailsUpdatedAt) : null;
+      const when = at ? ` Updated ${at.getDate()} ${MONTHS[at.getMonth()]} ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}.` : "";
+      if (kind === "emails") return el("div", "daily-banner info", `${pv.emailsLabel}.${when} Google Mail is not connected yet.`);
+      return el("div", "daily-banner", `${pv.emailsLabel}. The calendar is not connected yet, so events are examples.`);
+    }
+    return el("div", "daily-banner", `${pv.label}. Email and calendar are not connected yet, so these are examples.`);
   }
 
   // ---------------------------------------------------------------- tabs
@@ -906,7 +913,8 @@
   let emailAcct = "all";
   const DAY_MS = 86400000;
   const shortDate = (ms) => `${new Date(ms).getDate()} ${MONTHS[new Date(ms).getMonth()]}`;
-  const NOT_CONNECTED = "Email is not connected yet, so this is demo data. Reading and replying arrive when it is connected.";
+  const NOT_CONNECTED_DEMO = "Email is not connected yet, so this is demo data. Reading and replying arrive when it is connected.";
+  const NOT_CONNECTED_READONLY = "This feed is read-only for now: replying and reminders arrive later.";
   function dayBadge(days) {
     const b = el("span", "daily-dayb " + waitCls(days), `${days} d`);
     b.title = `${days} day${days === 1 ? "" : "s"} waiting`;
@@ -918,7 +926,7 @@
     const accounts = payload.provider.accounts || [];
     const now = payload.now;
     const wrap = el("div", "daily-plain");
-    if (!payload.provider.connected) wrap.append(demoBanner());
+    if (!payload.provider.connected) wrap.append(demoBanner("emails"));
 
     // accounts row: counts = items that need attention per account
     const counts = {};
@@ -942,7 +950,7 @@
     wrap.append(row);
 
     const by = (list) => (emailAcct === "all" ? list || [] : (list || []).filter((x) => x.account === emailAcct));
-    const notYet = () => say(NOT_CONNECTED);
+    const notYet = () => say(payload.provider.emailsConnected ? NOT_CONNECTED_READONLY : NOT_CONNECTED_DEMO);
     const meta = (lead, acct, tail) => {
       const m = el("small", "daily-muted");
       m.append(document.createTextNode(lead ? lead + " · " : ""), el("span", "daily-acct", acct), document.createTextNode(tail ? " · " + tail : ""));
