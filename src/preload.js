@@ -161,6 +161,11 @@ contextBridge.exposeInMainWorld("api", {
     saveAppointment: (item) => ipcRenderer.invoke("daily-appointment-save", item),
     deleteAppointment: (id) => ipcRenderer.invoke("daily-appointment-delete", { id }),
     clearNotices: () => ipcRenderer.invoke("daily-notices-clear"),
+    shipmentsLoad: (force) => ipcRenderer.invoke("daily-shipments-load", { force: !!force }),
+    shipmentsRefresh: () => ipcRenderer.invoke("daily-shipments-refresh"),
+    shipmentsOp: (args) => ipcRenderer.invoke("daily-shipments-op", args),
+    shipmentsSetKey: (provider, key) => ipcRenderer.invoke("daily-shipments-key", { provider, key }),
+    shipmentsClearKey: (provider) => ipcRenderer.invoke("daily-shipments-key", { provider, clear: true }),
   },
   // v1.55.0 IRIS (renderer/iris.js)
   iris: {

@@ -13,6 +13,8 @@ const linkmeta = require("./linkmeta");
 const mailfeed = require("./mailfeed");
 const calendarMod = require("./calendar");
 const gmailMod = require("./gmail");
+const shipMain = require("./shipments-main");
+const shipTrack = require("./shipments-track");
 const { execFile } = require("child_process");
 const { withFsRetry } = require("../fsRetry");
 
@@ -272,6 +274,24 @@ function init({ ipcMain: rawIpc, root, dataDir, safeStorage, openExternal, testM
     try { if (!gmail) return { ok: false, reason: "Gmail is not available here." }; await gmail.load(clockNow(), { force: true }); cache = null; return { ok: true }; }
     catch (err) { return { ok: false, reason: err.message }; }
   });
+  // Shipments (v1.76.0): own store, mail scan through the existing read-only mail code, tracking keys only in this process.
+  const shipTracker = shipTrack.createTracker({ dataDir: dataDir || path.join(dir, "..", "daily-keys-unavailable"), safeStorage: dataDir ? safeStorage : null, log: say,
+    fakeProvider: testMode && process.env.AGENT_DESKTOP_SHIPMENTS_FAKE === "1" ? shipTrack.createFake({}) : null });
+  const shipments = shipMain.createService({
+    file: f("shipments.json"), readStore, writeJsonAtomic, tracker: shipTracker, notices, testMode, say, now: clockNow,
+    getMails: async (now) => {
+      if (testMode) return [];
+      const out = [];
+      try { out.push(...mailfeed.loadShipmentMails(process.env.DAILY_MAIL_FEED || undefined, now)); } catch (e) { say("shipments feed: " + e.message); }
+      try { if (gmail) out.push(...(await gmail.shipmentMails(now))); } catch (e) { say("shipments gmail: " + e.message); }
+      return out;
+    },
+  });
+  if (!testMode) shipments.syncTimer();
+  ipcMain.handle("daily-shipments-load", async (e, args) => { try { return await shipments.load(args); } catch (err) { say("shipments load failed: " + err.message); return { ok: false, reason: err.message }; } });
+  ipcMain.handle("daily-shipments-refresh", async () => { try { return await shipments.refreshNow(); } catch (err) { return { ok: false, reason: err.message }; } });
+  ipcMain.handle("daily-shipments-op", (e, args) => { try { return shipments.op(args); } catch (err) { return { ok: false, reason: err.message }; } });
+  ipcMain.handle("daily-shipments-key", (e, args) => { try { return shipments.setKey(args); } catch (err) { return { ok: false, reason: err.message }; } });
   ipcMain.handle("daily-notices-clear", () => { notices.length = 0; cache = null; return { ok: true }; });
 
   ipcMain.handle("daily-settings-set", (e, patch) => {
