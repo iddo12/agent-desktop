@@ -177,6 +177,26 @@ function looksLikeAgentFolder(agentDir) {
   );
 }
 
+// v1.77.3: per-agent memo of (parsed master_state.md, agent_config.json) keyed on both files' size/mtime, so the 10 s poll
+// stats two files per agent instead of reading, regex-parsing and JSON-parsing them every time.
+const agentMemo = new Map(); // agentDir -> { sig, hasState, parsed, config }
+function fileSig(p) {
+  try { const s = fs.statSync(p); return s.size + ":" + s.mtimeMs; } catch (e) { return "-"; }
+}
+function agentFiles(agentDir) {
+  const statePath = path.join(agentDir, STATE_FILENAME);
+  const sig = fileSig(statePath) + "|" + fileSig(path.join(agentDir, CONFIG_FILENAME));
+  const hit = agentMemo.get(agentDir);
+  if (hit && hit.sig === sig) return hit;
+  const hasState = sig.split("|")[0] !== "-";
+  let parsed = { status: "No work plan yet", health: "Unknown", updated: null, tasks: [] };
+  // an unreadable file throws exactly as before and is never memoized
+  if (hasState) parsed = parseMasterState(fs.readFileSync(statePath, "utf-8"));
+  const entry = { sig, hasState, parsed, config: loadAgentConfig(agentDir) };
+  agentMemo.set(agentDir, entry);
+  return entry;
+}
+
 // opts.noAvatar: callers that never draw the avatar (the 10 s overview poll) skip even the stat.
 function listAgents(opts) {
   if (!fs.existsSync(ROOT)) return [];
@@ -187,13 +207,7 @@ function listAgents(opts) {
 
   return entries.map((entry) => {
     const agentDir = path.join(ROOT, entry.name);
-    const statePath = path.join(agentDir, STATE_FILENAME);
-    const hasState = fs.existsSync(statePath);
-    const raw = hasState ? fs.readFileSync(statePath, "utf-8") : "";
-    const parsed = hasState
-      ? parseMasterState(raw)
-      : { status: "No work plan yet", health: "Unknown", updated: null, tasks: [] };
-    const config = loadAgentConfig(agentDir);
+    const { hasState, parsed, config } = agentFiles(agentDir);
 
     return {
       folderName: entry.name,
@@ -203,7 +217,7 @@ function listAgents(opts) {
       avatar: opts && opts.noAvatar ? null : avatarDataUrl(agentDir, config),
       healthLabel: healthLabel(parsed.health),
       status: parsed.status,
-      tasks: parsed.tasks,
+      tasks: parsed.tasks.slice(),
       updated: parsed.updated,
       hasState,
       paused: !!config.paused,
@@ -302,4 +316,4 @@ function deleteAgent(agentPath) {
   fs.rmSync(resolved, { recursive: true, force: true });
 }
 
-module.exports = { ROOT, listAgents, createAgent, updateAgent, deleteAgent, setAgentPaused, SESSIONS_DIRNAME };
+module.exports = { ROOT, __agentMemoSize: () => agentMemo.size, listAgents, createAgent, updateAgent, deleteAgent, setAgentPaused, SESSIONS_DIRNAME };

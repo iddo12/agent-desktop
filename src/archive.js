@@ -39,13 +39,45 @@ function projectDirFor(cwd) {
   return path.join(os.homedir(), ".claude", "projects", encodeProjectPath(cwd));
 }
 
+// v1.77.3: shared short-lived stat/readdir cache. The 10 s overview pass asked for the same folder's file list and
+// the same files' size/mtime four to five times per agent (findJsonlFiles + memoByFiles + newestTranscript +
+// getLatestTranscript* + getHaltInfo), ~2,400 stats per pass. Everything here answers from one directory listing and
+// one stat per file per TTL window. A real change is therefore visible within STAT_TTL_MS (1.5 s) plus the caller's own
+// poll interval. Errors are never cached (a missing file throws exactly like fs.statSync). invalidateStatCache()
+// drops everything; archive.js calls it after its own writes to a transcript.
+let STAT_TTL_MS = 1500;
+const dirCache = new Map();  // dir -> { at, names }
+const statCache = new Map(); // file -> { at, st: { size, mtimeMs, ino } }
+function setStatCacheTtl(ms) { STAT_TTL_MS = ms; dirCache.clear(); statCache.clear(); }
+function invalidateStatCache() { dirCache.clear(); statCache.clear(); }
+function pruneStatCaches(now) {
+  if (statCache.size < 4000 && dirCache.size < 400) return;
+  for (const [k, v] of statCache) if (now - v.at > STAT_TTL_MS) statCache.delete(k);
+  for (const [k, v] of dirCache) if (now - v.at > STAT_TTL_MS) dirCache.delete(k);
+}
+function cachedStat(file) {
+  const now = Date.now();
+  const hit = statCache.get(file);
+  if (hit && now - hit.at < STAT_TTL_MS) return hit.st;
+  const s = fs.statSync(file);
+  const st = { size: s.size, mtimeMs: s.mtimeMs, ino: s.ino };
+  pruneStatCaches(now);
+  statCache.set(file, { at: now, st });
+  return st;
+}
+function cachedJsonlNames(dir) {
+  const now = Date.now();
+  const hit = dirCache.get(dir);
+  if (hit && now - hit.at < STAT_TTL_MS) return hit.names;
+  const names = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+  dirCache.set(dir, { at: now, names });
+  return names;
+}
+
 function findJsonlFiles(sessionCwd) {
   const dir = projectDirFor(sessionCwd);
   try {
-    return fs
-      .readdirSync(dir)
-      .filter((f) => f.endsWith(".jsonl"))
-      .map((f) => path.join(dir, f));
+    return cachedJsonlNames(dir).map((f) => path.join(dir, f));
   } catch (e) {
     return [];
   }
@@ -63,7 +95,7 @@ function memoByFiles(tag, files, compute) {
   try {
     sig = files
       .map((f) => {
-        const st = fs.statSync(f);
+        const st = cachedStat(f);
         return `${f}:${st.size}:${st.mtimeMs}`;
       })
       .join("|");
@@ -678,7 +710,7 @@ function getLatestTranscriptSizeBytes(sessionCwd) {
   let size = null;
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
     try {
-      const stat = fs.statSync(jsonlPath);
+      const stat = cachedStat(jsonlPath);
       if (stat.mtimeMs > latest) { latest = stat.mtimeMs; size = stat.size; }
     } catch (e) {
       /* skip */
@@ -691,7 +723,7 @@ function getLatestTranscriptMtimeMs(sessionCwd) {
   let latest = null;
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
     try {
-      const stat = fs.statSync(jsonlPath);
+      const stat = cachedStat(jsonlPath);
       const mtime = stat.mtimeMs;
       if (latest == null || mtime > latest) latest = mtime;
     } catch (e) {
@@ -720,22 +752,35 @@ function getLatestTranscriptMtimeMs(sessionCwd) {
 // mid-line read just means the next tick's read starts from mtime-fresh
 // bytes and gets a clean line next time).
 const HALT_TAIL_READ_BYTES = 65536;
+// v1.77.3: the answer depends only on the newest file's bytes, so it is memoized by (path,size,mtime) - the 10 s
+// overview pass used to read and parse a 64 KB tail per agent every time even when nothing had changed.
+const haltMemo = new Map(); // sessionCwd -> { sig, value }
 function getHaltInfo(sessionCwd) {
   let newestPath = null;
   let newestMtime = -Infinity;
+  let newestSize = 0;
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
     try {
-      const mtime = fs.statSync(jsonlPath).mtimeMs;
-      if (mtime > newestMtime) {
-        newestMtime = mtime;
+      const st = cachedStat(jsonlPath);
+      if (st.mtimeMs > newestMtime) {
+        newestMtime = st.mtimeMs;
+        newestSize = st.size;
         newestPath = jsonlPath;
       }
     } catch (e) {
       /* file disappeared mid-scan - skip it */
     }
   }
-  if (!newestPath) return null;
-
+  if (!newestPath) { haltMemo.delete(sessionCwd); return null; }
+  const sig = `${newestPath}:${newestSize}:${newestMtime}`;
+  const hit = haltMemo.get(sessionCwd);
+  if (hit && hit.sig === sig) return hit.value;
+  const value = computeHaltInfo(newestPath, newestSize);
+  if (value !== undefined) haltMemo.set(sessionCwd, { sig, value });
+  return value === undefined ? null : value;
+}
+// returns undefined when the file could not be read (not memoized), null for "not halted", else the halt object
+function computeHaltInfo(newestPath, cachedSize) {
   let lines;
   try {
     const size = fs.statSync(newestPath).size;
@@ -753,7 +798,7 @@ function getHaltInfo(sessionCwd) {
       fs.closeSync(fd);
     }
   } catch (e) {
-    return null;
+    return undefined;
   }
 
   // Every real assistant turn is followed by one or more bookkeeping lines
@@ -1664,6 +1709,7 @@ function setConversationTitle(sessionCwd, sessionId, title) {
     JSON.stringify({ type: "agent-name", agentName: clean, sessionId }) +
     "\n";
   withFsRetry(() => fs.appendFileSync(jsonlPath, lines, "utf-8"));
+  invalidateStatCache(); // v1.77.3: our own append must be visible to the very next stat
   return { ok: true, title: clean };
 }
 
@@ -1710,7 +1756,7 @@ function newestTranscript(sessionCwd) {
   let best = null;
   for (const jsonlPath of findJsonlFiles(sessionCwd)) {
     try {
-      const stat = fs.statSync(jsonlPath);
+      const stat = cachedStat(jsonlPath);
       if (!best || stat.mtimeMs > best.mtimeMs) best = { jsonlPath, mtimeMs: stat.mtimeMs, size: stat.size };
     } catch (e) {
       /* file disappeared between readdir and stat - skip it */
@@ -1797,4 +1843,6 @@ module.exports = {
   setConversationTitle,
   repinAgentName,
   newestTranscript,
+  setStatCacheTtl,
+  invalidateStatCache,
 };

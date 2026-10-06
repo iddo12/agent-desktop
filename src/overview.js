@@ -122,7 +122,21 @@ function readTaskStore(folderName) {
   }
 }
 
+// v1.77.3: the overview poll re-read and re-parsed up to three files per agent every 10 s. The result is a pure function of
+// those files, so it is memoized by (size,mtime) of each candidate (a stat each; the parse and the file reads are skipped).
+const openItemsMemo = new Map(); // agentPath -> { sig, value }
+function fileSig(p) {
+  try { const s = fs.statSync(p); return s.size + ":" + s.mtimeMs; } catch (e) { return "-"; }
+}
 function readOpenItems(agentPath) {
+  const sig = [path.join(TASK_STORE_DIR, path.basename(agentPath) + ".json")].concat(OPEN_ITEM_FILES.map((n) => path.join(agentPath, n))).map(fileSig).join("|");
+  const hit = openItemsMemo.get(agentPath);
+  if (hit && hit.sig === sig) return hit.value;
+  const value = readOpenItemsUncached(agentPath);
+  openItemsMemo.set(agentPath, { sig, value });
+  return value;
+}
+function readOpenItemsUncached(agentPath) {
   const stored = readTaskStore(path.basename(agentPath));
   if (stored) return stored;
   for (const name of OPEN_ITEM_FILES) {
@@ -219,4 +233,4 @@ function approveTelegramTasks(ids, telegramDir) {
   });
 }
 
-module.exports = { getAgentOverview, approveTelegramTasks, parseOpenNow };
+module.exports = { getAgentOverview, approveTelegramTasks, parseOpenNow, readOpenItems, readOpenItemsUncached };
