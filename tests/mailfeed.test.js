@@ -47,6 +47,10 @@ t("missing, damaged, wrong-shaped or oversized feed -> not connected, never thro
 t("BOM is tolerated", () => {
   assert.strictEqual(loadMailFeed(put("h.json", "\uFEFF" + JSON.stringify({ items: [item({ messageId: "1" })] })), NOW).connected, true);
 });
+t("missing/empty daysWaiting falls back to the date, not 0", () => {
+  const f = put("i.json", { items: [item({ messageId: "1", direction: "sent", daysWaiting: null }), item({ messageId: "2", direction: "sent", daysWaiting: "" })] });
+  assert.deepStrictEqual(loadMailFeed(f, NOW).emails.sentNoReply.map((x) => x.ageDays), [5, 5]);
+});
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fails ? `${fails} of ${n} FAILED` : `mailfeed: ${n} tests passed`);
 process.exit(fails ? 1 : 0);

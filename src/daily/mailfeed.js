@@ -42,7 +42,7 @@ function loadMailFeed(file, now) {
     seen.add(key);
     const account = accountLabel(it.account);
     if (!accounts.includes(account)) accounts.push(account);
-    const days = Number.isFinite(Number(it.daysWaiting)) ? Math.max(0, Math.floor(Number(it.daysWaiting))) : Math.max(0, Math.floor((now - t) / DAY));
+    const days = (it.daysWaiting != null && it.daysWaiting !== "" && Number.isFinite(Number(it.daysWaiting))) ? Math.max(0, Math.floor(Number(it.daysWaiting))) : Math.max(0, Math.floor((now - t) / DAY));
     const base = { id, account, subject: clean(it.subject, 200) || "(no subject)", ageDays: days, owner: "Personal Assistant" };
     if (dir === "received") needAnswer.push(Object.assign(base, { from: clean(it.counterparty, 160) }));
     else sentNoReply.push(Object.assign(base, { to: clean(it.counterparty, 160) }));
