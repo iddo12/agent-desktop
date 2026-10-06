@@ -27,7 +27,6 @@ t("add -> load shows events and never exposes the link; file holds it", async ()
   assert.strictEqual(r.events.length, 1);
   assert.strictEqual(r.events[0].title, "Dentist");
   assert.ok(!JSON.stringify(r.sources).includes("private-abcdef"));
-  assert.strictEqual(r.sources[0].tail, "7890".slice(0, 0) + GOOD.replace(/\/basic\.ics$/, "").slice(-4));
   await c.load(NOW);   // fresh: no second fetch
   assert.strictEqual(hits, 1);
   assert.ok(fs.readFileSync(path.join(dir, "calendar-sources.json"), "utf8").includes("private-abcdef"));

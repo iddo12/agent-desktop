@@ -1,6 +1,6 @@
 // My Daily - calendar sources (read-only). A source is Google Calendar's "secret address in iCal format". The link is a
 // secret: it is stored only in this PC's app data folder (never in Dropbox, never sent to the renderer, never logged;
-// the UI only gets the name and the last 4 characters). Fetching is https to calendar.google.com only, size and time capped.
+// the UI only gets the name). Fetching is https to calendar.google.com only, size and time capped.
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
@@ -63,12 +63,14 @@ function create({ dataDir, fetcher, log }) {
   function writeSources(list) {
     fs.mkdirSync(dataDir, { recursive: true });
     const tmp = file + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify({ sources: list }, null, 2), { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(tmp, file);
+    try {
+      fs.writeFileSync(tmp, JSON.stringify({ sources: list }, null, 2), "utf8");
+      fs.renameSync(tmp, file);
+    } catch (e) { try { fs.unlinkSync(tmp); } catch (e2) { /* nothing to clean */ } throw e; }
   }
   const view = (s) => {
     const st = state.get(s.url) || {};
-    return { name: s.name, tail: s.url.replace(/\/basic\.ics$/i, "").slice(-4), ok: !!st.updatedAt && !st.error, error: st.error || "", count: st.events ? st.events.length : 0, updatedAt: st.updatedAt || null };
+    return { name: s.name, ok: !!st.updatedAt && !st.error, error: st.error || "", count: st.events ? st.events.length : 0, updatedAt: st.updatedAt || null };
   };
 
   async function refreshOne(s, now) {

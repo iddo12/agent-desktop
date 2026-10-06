@@ -4,6 +4,7 @@
 // INTERVAL, COUNT, UNTIL, BYDAY, BYMONTHDAY), EXDATE, RECURRENCE-ID overrides, STATUS:CANCELLED. Anything it cannot read is skipped.
 const MAX_INSTANCES = 1500;      // per recurring event inside the window
 const MAX_EVENTS = 4000;         // total returned
+const BUDGET_MS = 300;           // overall time budget for all recurrence expansion in one parse
 const DAY = 86400000;
 const DOW = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 
@@ -74,7 +75,7 @@ function parseRrule(v) {
 }
 
 // Occurrence start times (wall-clock based, so DST keeps the same local hour) as UTC ms, inside [fromMs, toMs].
-function expand(ev, rule, fromMs, toMs) {
+function expand(ev, rule, fromMs, toMs, deadline) {
   const out = [];
   const [y0, mo0, d0, h, mi, s] = ev.start.wall;
   const tz = ev.start.allDay ? null : ev.start.tz;
@@ -84,6 +85,7 @@ function expand(ev, rule, fromMs, toMs) {
   let count = 0, guard = 0;
   // returns false when expansion should stop
   const push = (y, mo, d, strict) => {
+    if ((guard & 63) === 0 && Date.now() > deadline) return false;   // overall budget spent: stop expanding
     const n = new Date(Date.UTC(y, mo - 1, d));
     if (strict && n.getUTCDate() !== d) return true;   // e.g. the 31st in a 30-day month: skipped
     const t = mk(n.getUTCFullYear(), n.getUTCMonth() + 1, n.getUTCDate());
@@ -136,6 +138,7 @@ function parseIcs(text, fromMs, toMs) {
     if (line === "END:VEVENT") { if (cur) events.push(cur); cur = null; continue; }
     if (cur) { const p = parseLine(line); if (p) cur.push(p); }
   }
+  const deadline = Date.now() + BUDGET_MS;
   const masters = [], overrides = new Map();
   for (const props of events) {
     const g = (n) => props.find((p) => p.name === n);
@@ -174,7 +177,8 @@ function parseIcs(text, fromMs, toMs) {
     const dur = ev.end - ev.start.ms;
     if (!ev.rule) { add(ev, ev.start.ms, ev.end, 0); continue; }
     let i = 0;
-    for (const t of expand(ev, ev.rule, fromMs, toMs)) {
+    if (Date.now() > deadline) break;
+    for (const t of expand(ev, ev.rule, fromMs, toMs, deadline)) {
       if (ev.exdates.has(t)) continue;
       const o = overrides.get(ev.uid + "|" + t);
       if (o) add(o, o.start.ms, o.end, i++); else add(ev, t, t + dur, i++);

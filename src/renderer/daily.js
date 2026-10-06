@@ -1207,7 +1207,7 @@
     (p.calendars || []).forEach((c, idx) => {
       const row = el("div", "daily-set");
       const tx = el("div");
-      tx.append(el("b", null, c.name), el("div", "daily-muted sm", c.ok ? `${c.count} events in the next months · link ends ...${c.tail}` : `problem: ${c.error || "not loaded yet"} · link ends ...${c.tail}`));
+      tx.append(el("b", null, c.name), el("div", "daily-muted sm", c.ok ? `${c.count} events in the next months` : `problem: ${c.error || "not loaded yet"}`));
       row.append(tx, btn("Remove", "daily-btn sm", async () => {
         const r = await api.calendarRemove(idx);
         await load(true); render(); if (!(r && r.ok)) say((r && r.reason) || "Could not remove it.");
