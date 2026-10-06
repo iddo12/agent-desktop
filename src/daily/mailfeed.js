@@ -58,6 +58,30 @@ function loadMailFeed(file, now) {
   };
 }
 
+// Shipments hook (read-only): the raw received mails that look like parcel notices, for shipments-email.js. Same feed file,
+// no body in this feed, so only subject + counterparty (carrier notices carry the number in the subject, e.g. FedEx).
+function loadShipmentMails(file, now) {
+  let raw;
+  try {
+    const f = file || DEFAULT_FILE;
+    const st = fs.statSync(f);
+    if (!st.isFile() || st.size > MAX_BYTES) return [];
+    raw = JSON.parse(fs.readFileSync(f, "utf8").replace(/^﻿/, ""));
+  } catch (e) { return []; }
+  if (!raw || !Array.isArray(raw.items)) return [];
+  const sh = require("./shipments-email");
+  const out = [];
+  for (const it of raw.items) {
+    if (!it || typeof it !== "object" || it.direction === "sent") continue;
+    const t = Date.parse(it.date);
+    if (!Number.isFinite(t) || now - t > 60 * DAY) continue;
+    const mail = { from: clean(it.counterparty, 160), subject: clean(it.subject, 200), snippet: clean(it.snippet, 400), date: new Date(t).toISOString(), messageId: normId(it.messageId) };
+    if (sh.looksLikeShipment(mail)) out.push(mail);
+    if (out.length >= 200) break;
+  }
+  return out;
+}
+
 // Merge several sources (Betterbird feed, Gmail accounts): one entry per direction + Message-ID, oldest first.
 function mergeEmails(list) {
   const out = { top: [], needAnswer: [], sentNoReply: [], peopleToWrite: [], hidden: 0 };
@@ -142,4 +166,4 @@ function shapeEmails(em, rules, now) {
   return out;
 }
 
-module.exports = { loadMailFeed, mergeEmails, loadRules, shapeEmails, DEFAULT_FILE, normId };
+module.exports = { loadMailFeed, loadShipmentMails, mergeEmails, loadRules, shapeEmails, DEFAULT_FILE, normId };

@@ -197,8 +197,49 @@ function create({ dataDir, safeStorage, openExternal, client, log, request: req,
     return adding;
   }
 
+  // Shipments hook (read-only, same gmail.readonly scope): recent parcel notices WITH their text, for shipments-email.js.
+  // One search (carriers, shops and shipping words, 30 days, promotions included because parcel mail lives in Updates), at most
+  // 40 messages fetched in full, text/plain parts decoded and capped. Cached 30 minutes per account. Returns [{from,subject,body,date,messageId}].
+  const shipCache = new Map();
+  const SHIP_Q = "newer_than:30d -in:sent (from:(fedex.com OR ups.com OR dhl.com OR amazon.com OR amazon.co.uk OR amazon.de OR aliexpress.com OR cainiao.com OR iherb.com OR israelpost.co.il OR postil.com OR temu.com OR shein.com OR aramex.com OR ebay.com OR bhphotovideo.com) OR subject:(tracking OR shipped OR shipment OR parcel OR \"out for delivery\" OR delivered OR customs))";
+  const MAX_SHIP_MAILS = 40;
+  function bodyText(payload, depth) {
+    if (!payload || (depth || 0) > 6) return "";
+    const mt = String(payload.mimeType || "");
+    if (payload.body && payload.body.data && (mt === "text/plain" || (mt === "text/html" && !(payload.parts || []).length))) {
+      let t = ""; try { t = Buffer.from(String(payload.body.data).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"); } catch (e) { t = ""; }
+      return mt === "text/html" ? t.replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ") : t;
+    }
+    let plain = "", other = "";
+    for (const p of payload.parts || []) { const x = bodyText(p, (depth || 0) + 1); if (String(p.mimeType) === "text/plain") plain += x + "\n"; else other += x + "\n"; }
+    return (plain.trim() ? plain : other).slice(0, 40000);
+  }
+  async function shipmentMails(now, opts) {
+    const accts = readAccounts();
+    if (!configured() || !accts.length) return [];
+    const out = [];
+    for (const a of accts) {
+      const c = shipCache.get(a.email);
+      if (!(opts && opts.force) && c && Date.now() - c.at < 30 * 60000) { out.push(...c.mails); continue; }
+      try {
+        const token = await accessToken(a);
+        const l = await gget(token, "messages?maxResults=" + MAX_SHIP_MAILS + "&q=" + encodeURIComponent(SHIP_Q));
+        const ids = ((l.messages) || []).map((m) => m.id).filter((x) => /^[0-9a-f]+$/i.test(String(x)));
+        const msgs = await pool(ids, (id) => gget(token, "messages/" + id + "?format=full"));
+        const mails = [];
+        for (const m of msgs) {
+          if (!m) continue;
+          mails.push({ from: clean(headerOf(m, "From"), 160), subject: clean(headerOf(m, "Subject"), 200), body: bodyText(m.payload).slice(0, 30000), date: new Date(Number(m.internalDate) || now).toISOString(), messageId: normId(headerOf(m, "Message-ID") || m.id) });
+        }
+        shipCache.set(a.email, { at: Date.now(), mails });
+        out.push(...mails);
+      } catch (e) { say("gmail shipments scan failed: " + clean(e && e.message, 120)); if (c) out.push(...c.mails); }
+    }
+    return out;
+  }
+
   return {
-    configured, classifyThread,
+    configured, classifyThread, shipmentMails,
     list: () => readAccounts().map((a) => { const c = cache.get(a.email) || {}; return { email: a.email, ok: !!c.at && !c.error, error: c.error || "", needAnswer: c.items ? c.items.needAnswer.length : 0, sentNoReply: c.items ? c.items.sentNoReply.length : 0 }; }),
     addAccount,
     remove(email) {
