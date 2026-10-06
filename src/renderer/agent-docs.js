@@ -3,7 +3,7 @@
 // whenever the visible agent changes (null when none). Talks only to window.api.agentDocs* (ids, never paths).
 (function () {
   const PAGE = 40;
-  const TYPES = [["docs", "Documents"], ["image", "Images"], ["all", "All"], ["pdf", "PDF"], ["word", "Word"], ["sheet", "Sheets"], ["video", "Video"], ["other", "Other"]];
+  const TYPES = [["docs", "Documents"], ["image", "Images"], ["all", "All"], ["pdf", "PDF"], ["word", "MS Word"], ["sheet", "Sheets"], ["video", "Video"], ["other", "Other"]];
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
