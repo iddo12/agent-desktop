@@ -3062,6 +3062,8 @@ async function restartAgentSession(agentPath) {
 // checks in a row -> logged; and if the session is on a non-pinned (Haiku) model it is restarted through Restart Session,
 // which resumes it on the pinned model in auto mode (max once per 20 min per agent). A real approval on a Sonnet session is
 // only logged: restarting would throw away a question that is legitimately Iddo's.
+const approvalScan = require("./approvalScan");
+const approvalScanCache = approvalScan.createScanCache();
 const approvalBlockedSince = new Map();
 const approvalRestartAt = new Map();
 // v1.69.17: a Sonnet agent blocked on a permission prompt nobody could see (UI/UX sat for hours on "approve Bash: ls ...",
@@ -3073,19 +3075,17 @@ async function checkApprovalBlocked() {
   // Scans the daemon's job files, NOT ptySessions: an agent whose tab was never opened has no attach client, and the
   // first version (ptySessions only) never saw the two hung agents after an app restart.
   const jobsDir = path.join(require("os").homedir(), ".claude", "jobs");
-  let ids = [];
-  try { ids = fs.readdirSync(jobsDir); } catch (_) { return; }
-  const seen = new Set();
-  for (const id8 of ids) {
-    const f = path.join(jobsDir, id8, "state.json");
-    let st;
-    try { if (now - fs.statSync(f).mtimeMs > 36 * 3600 * 1000) continue; st = JSON.parse(fs.readFileSync(f, "utf-8")); } catch (_) { continue; }
-    if (!st || !st.cwd || !/\.claude-session$/i.test(st.cwd)) continue; // only the fleet's agent sessions
-    const agentPath = path.dirname(st.cwd);
-    if (!fs.existsSync(agentPath) || sessionCwdFor(agentPath) !== st.cwd) continue;
-    seen.add(agentPath);
-    if (!(st.tempo === "blocked" && /^approve\b/i.test(String(st.needs || "")))) { if (!seen.has("!" + agentPath)) { approvalBlockedSince.delete(agentPath); approvalPending.delete(agentPath); } continue; }
-    seen.add("!" + agentPath);
+  const states = approvalScan.collectAgentJobStates(jobsDir, now, approvalScanCache, (st) => {
+    if (!st.cwd || !/\.claude-session$/i.test(st.cwd)) return null; // only the fleet's agent sessions
+    const ap = path.dirname(st.cwd);
+    if (!fs.existsSync(ap) || sessionCwdFor(ap) !== st.cwd) return null;
+    return ap;
+  });
+  if (!states) return;
+  // v1.77.3: decide per agent AFTER the whole scan; a stale non-blocked job file must not reset the 90 s waiting timer of a blocked one
+  for (const [agentPath, entry] of states) {
+    const st = entry.blocked;
+    if (!st) { approvalBlockedSince.delete(agentPath); approvalPending.delete(agentPath); continue; }
     const since = approvalBlockedSince.get(agentPath) || now;
     if (!approvalBlockedSince.has(agentPath)) logStuckWatchdog(`approval-blocked: ${agentPath} - first seen waiting for "${String(st.needs).slice(0, 120)}"`);
     approvalBlockedSince.set(agentPath, since);
