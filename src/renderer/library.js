@@ -732,5 +732,8 @@
     if (document.body.classList.contains("library-open")) render();
   }).catch((err) => console.error("[library] state", err));
   refresh();
-  setInterval(refresh, POLL_MS);
+  // v1.77.3: main now answers from a cache keyed on the registry folder (a few ms while nothing changed), the poll is skipped
+  // while the window is hidden/minimized, and one refresh runs when it becomes visible again. Opening the view also refreshes.
+  setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 })();

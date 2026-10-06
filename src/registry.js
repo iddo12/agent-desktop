@@ -166,7 +166,33 @@ function webCopyOf(workspaceRoot, host) {
   return loadEntries(workspaceRoot).find((x) => x.id !== host.id && isUrl(x.link) && x.pdf && normLink(x.pdf) === key) || null;
 }
 
-function listRegistry(workspaceRoot) { return mergeWebCopies(listRegistryRaw(workspaceRoot)); }
+// v1.77.3: listRegistryRaw did ~5 sync fs calls per entry (448 entries, 551 ms of main-thread block) on every 30 s poll.
+// The list is now cached keyed on the registry folder's signature (names + size/mtime of every entry file: one readdir and
+// one stat each, a few ms) so a changed, added or removed entry rebuilds it at once; with an unchanged folder the answer
+// is reused for up to EXISTS_MEMO_MS, which bounds how stale the per-entry "missing / thumbnail / file size / viewable"
+// file-existence checks can be (a linked file that appears or vanishes on its own).
+const EXISTS_MEMO_MS = 60 * 1000;
+const listCache = new Map(); // workspaceRoot -> { sig, at, value }
+function registrySignature(workspaceRoot) {
+  const dir = registryDir(workspaceRoot);
+  let files;
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).sort(); } catch (e) { return "none"; }
+  const parts = [];
+  for (const f of files) {
+    try { const s = fs.statSync(path.join(dir, f)); parts.push(f + ":" + s.size + ":" + s.mtimeMs); } catch (e) { parts.push(f + ":-"); }
+  }
+  return parts.join("|");
+}
+function listRegistry(workspaceRoot) {
+  const now = Date.now();
+  const sig = registrySignature(workspaceRoot);
+  const hit = listCache.get(workspaceRoot);
+  if (hit && hit.sig === sig && now - hit.at < EXISTS_MEMO_MS) return hit.value;
+  const value = mergeWebCopies(listRegistryRaw(workspaceRoot));
+  listCache.set(workspaceRoot, { sig, at: now, value });
+  return value;
+}
+function invalidateListCache() { listCache.clear(); }
 
 function findEntry(workspaceRoot, id) {
   return loadEntries(workspaceRoot).find((e) => e.id === id) || null;
@@ -281,4 +307,4 @@ async function openLocalPdf(rawPath, allowedRoots, log) {
   return { ok: true };
 }
 
-module.exports = { listRegistry, registryAction, openLocalPdf, loadEntries };
+module.exports = { listRegistry, registryAction, openLocalPdf, loadEntries, invalidateListCache, registrySignature, listRegistryRaw, mergeWebCopies };
