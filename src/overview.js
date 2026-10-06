@@ -103,7 +103,8 @@ function parseOpenNow(text) {
 // tasks; a store has a status field and a needsIddo field, so neither has to
 // be guessed. Adoption is per agent - nothing breaks for the ones still on
 // prose.
-const TASK_STORE_DIR = path.join("D:\\Dropbox\\Claude stuff", "shared_reports", "tasks");
+const testGuard = require("./testGuard");
+const TASK_STORE_DIR = path.join(testGuard.workspaceRoot(), "shared_reports", "tasks"); // v1.77.2: sandbox root in test mode
 
 function readTaskStore(folderName) {
   try {
@@ -210,6 +211,7 @@ function getAgentOverview(agents, sessionCwdFor, dialogOpenFor) {
 function approveTelegramTasks(ids, telegramDir) {
   const clean = (ids || []).filter((id) => /^[0-9]{6}-[0-9a-f]{4}$/.test(id));
   if (!clean.length) return Promise.resolve({ ok: false, output: "no valid task ids" });
+  if (!testGuard.flowsEnabled()) return Promise.resolve({ ok: false, output: "test mode: tasks.py is not run" }); // v1.77.2
   return new Promise((resolve) => {
     execFile("python", [path.join(telegramDir, "tasks.py"), "--approve", ...clean],
       { cwd: telegramDir, windowsHide: true, timeout: 30000 },

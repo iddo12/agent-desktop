@@ -1167,7 +1167,7 @@ function readArchivedDay(agentPath, dateKey) {
 const FRESH_FALLBACK_SECONDS = 15 * 60;
 function usageModelFallback(kind) {
   try {
-    const p = path.join(__dirname, "..", "..", "System Optimization & Maintenance Agent", "UsageModel", "data", "usage_now.json");
+    const p = require("./testGuard").usageNowPath();
     const d = JSON.parse(fs.readFileSync(p, "utf-8").replace(/^\uFEFF/, ""));
     const ageSeconds = Math.max(0, Math.round((Date.now() - Date.parse(d.at)) / 1000));
     if (!(ageSeconds <= FRESH_FALLBACK_SECONDS)) return null;

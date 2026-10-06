@@ -25,6 +25,7 @@ function runBuilder(workspace) {
   const script = path.join(workspace, "shared_tools", "bridge", "build_status.py");
   return new Promise((resolve) => {
     if (!fs.existsSync(script)) return resolve({ ok: false, error: "build_status.py not found" });
+    if (!require("./testGuard").flowsEnabled()) return resolve({ ok: false, error: "test mode: build_status.py is not run" }); // v1.77.2
     execFile("python", [script], { cwd: path.dirname(script), windowsHide: true, timeout: 60000,
       env: Object.assign({}, process.env, { PYTHONIOENCODING: "utf-8" }) },
       (err, stdout, stderr) => resolve({ ok: !err, output: String(stdout || "") + String(stderr || "") }));

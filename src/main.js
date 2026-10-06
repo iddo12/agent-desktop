@@ -1,4 +1,7 @@
-﻿const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, Notification } = require("electron");
+﻿// v1.77.2: test-mode isolation guard - must be the very first thing to run (wraps fs writes + child_process cwd in test mode only).
+const testGuard = require("./testGuard");
+testGuard.install();
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, Notification } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const https = require("https");
@@ -1115,8 +1118,10 @@ if (!gotSingleInstanceLock) {
   });
   app.whenReady().then(() => {
     createWindow();
-    ensureRateLimitStatusLine();
-    ensureRemoteControlEnabled();
+    if (testGuard.flowsEnabled()) { // v1.77.2: these two edit the REAL ~/.claude/settings.json; no-ops in test mode
+      ensureRateLimitStatusLine();
+      ensureRemoteControlEnabled();
+    }
     reapOrphanedBackgroundAgentProcesses();
     setInterval(reapOrphanedBackgroundAgentProcesses, REAPER_INTERVAL_MS);
     setInterval(() => { checkApprovalBlocked().catch((e) => logStuckWatchdog(`checkApprovalBlocked error: ${e.message}`)); }, 60 * 1000).unref();
@@ -1618,6 +1623,7 @@ function spawnPtyWithRetry(shell, args, options, attempts = 10, delayMs = 500) {
       const { shell: spawnFile, args: spawnArgs } = toCmdShellSpawn(shell, args);
       const spawnOptions = process.platform === "win32" ? { ...options, useConpty: false } : options;
       try {
+        testGuard.assertWritable(spawnOptions && spawnOptions.cwd); // v1.77.2: test mode refuses a session cwd outside the sandbox
         const proc = pty.spawn(spawnFile, spawnArgs, spawnOptions);
         resolve(proc);
       } catch (e) {
@@ -3344,8 +3350,8 @@ try {
   const keepGoingFile = () => path.join(app.getPath("userData"), "keepgoing.json");
   const throttleFile = () => process.env.AGENT_DESKTOP_THROTTLE_FILE ||
     path.join(AGENTS_ROOT, "System Optimization & Maintenance Agent", "UsageModel", "data", "usage_now.json");
-  const kgTestPaths = () => (testMode.TEST_MODE && process.env.AGENT_DESKTOP_KEEPGOING_AGENTS ? process.env.AGENT_DESKTOP_KEEPGOING_AGENTS.split(";").filter(Boolean) : []);
-  const kgDry = () => testMode.TEST_MODE && !testMode.liveAgentsPermitted();
+  const kgTestPaths = () => (testMode.TEST_MODE && testGuard.flowsEnabled() && process.env.AGENT_DESKTOP_KEEPGOING_AGENTS ? process.env.AGENT_DESKTOP_KEEPGOING_AGENTS.split(";").filter(Boolean) : []);
+  const kgDry = () => testMode.TEST_MODE && (!testMode.liveAgentsPermitted() || !testGuard.flowsEnabled()); // v1.77.2: also dry unless fixtures opt in (AGENT_DESKTOP_TEST_ENABLE_FLOWS=1)
   keepGoing = require("./keepGoingGlue").create({
     log: (line) => logStuckWatchdog(line),
     emit: (agentPath, snap) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("keepgoing-state", snap); },
@@ -3397,7 +3403,7 @@ try {
         if (c && (hi(c.sevenDay) || hi(c.fiveHour))) return true;
         // COO review 2026-10-05: the confirmed reading is often old, so also read the usage model's own estimate
         // (real reading + usage since) whatever its age, as long as its window has not reset. Either source >= 95% stops.
-        const um = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "System Optimization & Maintenance Agent", "UsageModel", "data", "usage_now.json"), "utf-8").replace(/^﻿/, ""));
+        const um = JSON.parse(fs.readFileSync(testGuard.usageNowPath(), "utf-8").replace(/^﻿/, ""));
         const nowMs = Date.now();
         // 2026-10-06: the model's last real reading was 17 h old when it said 94.7% against a real ~100%. When that reading is
         // older than 60 min the estimate is only an estimate, so it stops 3 points early (92 for a 95 stop). Missing age = stale.
@@ -3496,7 +3502,7 @@ try {
     spawningSet: () => new Set(attachSpawning.keys()),
     blocked: () => {
       if (!keepGoing) return true;
-      if (testMode.TEST_MODE && !testMode.liveAgentsPermitted()) return true;
+      if (testMode.TEST_MODE && (!testMode.liveAgentsPermitted() || !testGuard.flowsEnabled())) return true;
       try { // the CPU guard's hold: no new work while the PC is overloaded
         const SL = require("./startLimiter");
         const info = SL.readHoldFile(path.join(require("./cpuGuardInstall").defaultStateDir(), "state", "fleet_hold.json"));
@@ -4486,7 +4492,7 @@ ipcMain.handle("get-agent-overview", () => overview.getAgentOverview(listAgents(
 // ARGUS / the Bridge (v1.39.0) - see argus-data.js. The workspace root, not
 // AGENTS_ROOT: in the sandbox the agents are fixtures but the report files are
 // real, and they are only ever read here.
-const ARGUS_WORKSPACE = "D:\\Dropbox\\Claude stuff";
+const ARGUS_WORKSPACE = testGuard.workspaceRoot(); // v1.77.2: sandbox root in test mode, the real workspace otherwise (unchanged)
 ipcMain.handle("argus-data", (event, opts) => argus.getArgusData(ARGUS_WORKSPACE, opts || {}));
 ipcMain.handle("argus-decision-count", () => argus.getDecisionCount(ARGUS_WORKSPACE));
 ipcMain.handle("memory-data", () => memoryData.getMemoryData(ARGUS_WORKSPACE));
