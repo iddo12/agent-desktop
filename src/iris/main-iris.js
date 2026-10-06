@@ -80,7 +80,11 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
       } catch (e) {}
     }
   });
-  if (svc.state.enabled) svc.start().catch((e) => say(`iris start failed: ${e.message}`));
+  if (svc.state.enabled) svc.start().catch((e) => {
+    say(`iris start failed: ${e.message}`);
+    // 2026-10-06: a second instance that cannot take the port must not leave ITS pipe name behind (tools/iris.js then talked to a dead pipe)
+    if (/EADDRINUSE/.test(String(e && e.message)) && prevPipeName) { try { fs.writeFileSync(path.join(dir, "pipe-name"), prevPipeName, "utf8"); } catch (e2) {} }
+  });
 
   const h = (name, fn) => ipcMain.handle(name, async (event, arg) => {
     try { return await fn(arg || {}); } catch (e) { say(`${name} failed: ${e.message}`); return { ok: false, reason: e.message }; }
@@ -140,6 +144,8 @@ function init({ ipcMain, app, safeStorage, Notification, getMainWindow, log, tes
     token = crypto.randomBytes(24).toString("hex");
     fs.writeFileSync(tokenFile, token, { encoding: "utf8", mode: 0o600 });
   }
+  let prevPipeName = null;
+  try { prevPipeName = fs.readFileSync(path.join(dir, "pipe-name"), "utf8"); } catch (e) {}
   fs.writeFileSync(path.join(dir, "pipe-name"), pipeName, "utf8");
   const pipe = net.createServer((sock) => {
     let buf = "";

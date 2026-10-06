@@ -1571,6 +1571,17 @@ const CHECK_ICON_SVG =
 // whole block) regardless of what was actually highlighted. Capturing the
 // selection on mousedown, before the browser clears it, is what makes
 // "select exactly what I want, then copy just that" actually work.
+// 2026-10-06 (Merav): a mostly-Hebrew agent message is drawn full width, right-to-left, flush right (class rtl-msg, see styles-rtl.css).
+const RTL_HE_RE = /[\u0590-\u05FF]/g;
+const RTL_LA_RE = /[A-Za-z]/g;
+function markRtlBubble(el, text) {
+  try {
+    const t = String(text || "").replace(/```[\S\s]*?```/g, "").replace(/`[^`]*`/g, "");
+    const he = (t.match(RTL_HE_RE) || []).length;
+    const la = (t.match(RTL_LA_RE) || []).length;
+    if (he >= 6 && he >= la * 0.35) el.classList.add("rtl-msg");
+  } catch (e) { /* cosmetic only */ }
+}
 function addCopyButton(container, getText, extraClass) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -1879,6 +1890,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
         wrapper.appendChild(timeEl);
       }
       addCopyButton(wrapper, () => text, "bubble-copy-btn");
+      markRtlBubble(wrapper, text);
       chatMessagesViewEl.appendChild(wrapper);
       continue;
     }
@@ -1921,6 +1933,7 @@ function renderChatBlocks(blocks, pendingSent, opts = {}) {
     // Reads the override rather than closing over `text`, so a long message
     // restored from its file copies what Iddo wrote instead of the file path.
     if (block.role !== "status") addCopyButton(el, () => el.dataset.copyText || text, "bubble-copy-btn");
+    if (block.role === "agent") markRtlBubble(el, text);
     chatMessagesViewEl.appendChild(el);
   }
 // Messages shown immediately at send time, before a real matching entry

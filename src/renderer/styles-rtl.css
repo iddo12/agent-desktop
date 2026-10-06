@@ -43,3 +43,16 @@
   unicode-bidi: plaintext;
   text-align: start;
 }
+
+/* v1.75.12 (Merav, 2026-10-06): agent messages used to shrink to their content and float at the left (align-self:flex-start), so
+   a Hebrew reply ended at a different x every time. Agent bubbles are now full width; mostly-Hebrew ones (class rtl-msg, set by
+   renderer.js) are right-to-left and flush against the right edge, with the copy button moved to the left corner. */
+.chat-bubble-agent { align-self: stretch; }
+.chat-bubble-agent.rtl-msg { direction: rtl; text-align: right; padding-right: 0; padding-left: 36px; }
+.chat-bubble-agent.rtl-msg > .bubble-copy-btn { right: auto; left: 0; }
+.rtl-msg p, .rtl-msg li, .rtl-msg h3, .rtl-msg h4, .rtl-msg h5, .rtl-msg blockquote, .rtl-msg th, .rtl-msg td {
+  direction: rtl; unicode-bidi: isolate; text-align: right;
+}
+.rtl-msg pre, .rtl-msg code { direction: ltr; unicode-bidi: normal; text-align: left; }
+.rtl-msg .chat-block-time { display: block; text-align: right; }
+.chat-block-time { direction: ltr; unicode-bidi: isolate; }

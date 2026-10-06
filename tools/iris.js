@@ -57,13 +57,13 @@ if (cmd === "peers" || cmd === "status") {
 }
 req.token = token;
 
-const sock = net.createConnection(pipeName);
-let buf = "";
-sock.setTimeout(30000, () => fail("timed out talking to Agent Desktop"));
-sock.on("error", (e) => fail(`Agent Desktop isn't reachable (${e.code || e.message})`));
-sock.on("connect", () => sock.write(JSON.stringify(req) + "\n"));
-sock.on("data", (d) => { buf += d.toString("utf8"); });
-sock.on("end", () => {
+// 2026-10-06: pipe-name can be stale (a second instance that could not start used to overwrite it). If the named pipe is
+// not there, try every live agent-desktop-iris pipe: each checks the token itself, so a wrong one just refuses.
+function otherPipes() {
+  const pre = "\\\\.\\pipe\\";
+  try { return fs.readdirSync(pre).filter((n) => /^agent-desktop-iris-[0-9a-f]+$/.test(n)).map((n) => pre + n).filter((n) => n !== pipeName); } catch (e) { return []; }
+}
+function handle(buf) {
   let res;
   try { res = JSON.parse(buf.trim()); } catch (e) { fail("bad reply from Agent Desktop"); }
   if (!res.ok) fail(res.reason || "failed");
@@ -76,4 +76,22 @@ sock.on("end", () => {
   } else {
     console.log(JSON.stringify(res, null, 2));
   }
-});
+}
+function connect(name, fallbacks) {
+  const sock = net.createConnection(name);
+  let buf = "";
+  sock.setTimeout(30000, () => fail("timed out talking to Agent Desktop"));
+  sock.on("error", (e) => {
+    if (fallbacks === null && (e.code === "ENOENT" || e.code === "ECONNREFUSED")) {
+      const more = otherPipes();
+      if (more.length) return connect(more[0], more.slice(1));
+    } else if (fallbacks && fallbacks.length) {
+      return connect(fallbacks[0], fallbacks.slice(1));
+    }
+    fail(`Agent Desktop isn't reachable (${e.code || e.message})`);
+  });
+  sock.on("connect", () => sock.write(JSON.stringify(req) + "\n"));
+  sock.on("data", (d) => { buf += d.toString("utf8"); });
+  sock.on("end", () => handle(buf));
+}
+connect(pipeName, null);
