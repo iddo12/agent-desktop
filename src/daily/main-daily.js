@@ -12,6 +12,7 @@ const model = require("./model");
 const linkmeta = require("./linkmeta");
 const mailfeed = require("./mailfeed");
 const calendarMod = require("./calendar");
+const gmailMod = require("./gmail");
 const { execFile } = require("child_process");
 const { withFsRetry } = require("../fsRetry");
 
@@ -110,7 +111,7 @@ const providers = {
   },
 };
 
-function init({ ipcMain: rawIpc, root, dataDir, testMode, log, runPython, fetchProduct, makeThumb, getMainWindow }) {
+function init({ ipcMain: rawIpc, root, dataDir, safeStorage, openExternal, testMode, log, runPython, fetchProduct, makeThumb, getMainWindow }) {
   const say = typeof log === "function" ? log : () => {};
   const notices = [];   // damaged-store notices, kept until dismissed (daily-notices-clear)
   // Every daily-* channel: only the main window's own frame may call it (same idea as IRIS), and an oversized
@@ -137,6 +138,14 @@ function init({ ipcMain: rawIpc, root, dataDir, testMode, log, runPython, fetchP
   let cache = null;
   // Calendar sources (Google's secret iCal link) live in the app data folder, not in Dropbox; none in test mode.
   const cal = dataDir && !testMode ? calendarMod.create({ dataDir, log: say }) : null;
+  // Gmail (read-only Google sign-in). The Google connection (client id/secret of Iddo's Google project: not a secret in Google's
+  // desktop-app model, but still kept out of the repo) is read from <app data>\gmail-client.json; without it Gmail stays off.
+  let gmailClient = null;
+  try { if (dataDir) gmailClient = readJson(path.join(dataDir, "gmail-client.json"), null); } catch (e) { gmailClient = null; }
+  const gmail = dataDir && !testMode ? gmailMod.create({
+    dataDir, safeStorage, client: gmailClient && gmailClient.clientId && gmailClient.clientSecret ? gmailClient : null, log: say,
+    openExternal: (u) => { if (typeof openExternal === "function" && /^https:\/\/accounts\.google\.com\//.test(String(u))) openExternal(u); },
+  }) : null;
   let skippedTaskFiles = 0;
   const thumbDir = path.join(dir, "thumbs");
   const tasksPy = path.join(root, "shared_tools", "tasks", "tasks.py");
@@ -196,8 +205,16 @@ function init({ ipcMain: rawIpc, root, dataDir, testMode, log, runPython, fetchP
     // Real email from the local Betterbird feed (read-only file written by the Personal Assistant) when it is readable;
     // otherwise the placeholder demo data. Calendar stays on the placeholder until Google Calendar is connected.
     const feed = testMode ? { connected: false } : mailfeed.loadMailFeed(process.env.DAILY_MAIL_FEED || undefined, now);
+    let gm = null;
+    try { gm = gmail ? await gmail.load(now, {}) : null; } catch (e) { say(`gmail load failed: ${e && e.message}`); }
+    const gmOn = !!(gm && gm.connected);
+    const parts = [];
+    if (feed.connected) parts.push({ name: "Betterbird local feed", emails: feed.emails, accounts: feed.accounts, at: feed.updatedAt });
+    if (gmOn) parts.push({ name: `Gmail (${gm.accounts.length} account${gm.accounts.length === 1 ? "" : "s"})`, emails: gm.emails, accounts: gm.accounts, at: gm.updatedAt });
+    const mailOn = parts.length > 0;
+    const mailAccounts = [].concat(...parts.map((x) => x.accounts));
     const data = {
-      tasks, emails: feed.connected ? feed.emails : p.emails(now), events,
+      tasks, emails: mailOn ? mailfeed.mergeEmails(parts.map((x) => x.emails)) : p.emails(now), events,
       dates: (() => { const d = readStore(f("dates.json"), { items: [] }, notices, "Birthdays & dates").items; return Array.isArray(d) ? d.filter(isObj) : []; })(),
       shopping: loadShopping(now),
     };
@@ -206,7 +223,7 @@ function init({ ipcMain: rawIpc, root, dataDir, testMode, log, runPython, fetchP
       now, generatedAt: Date.now(), data, summary, digest: model.buildDigest(summary, now), badge: model.badge(summary),
       settings: model.cleanSettings(readStore(f("settings.json"), {}, notices, "Settings")),
       notices: notices.concat(skippedTaskFiles ? [`${skippedTaskFiles} task file${skippedTaskFiles === 1 ? "" : "s"} could not be read and ${skippedTaskFiles === 1 ? "is" : "are"} left out.`] : []),
-      provider: { connected: calOn || p.connected, calendarConnected: calOn, calendars: calRes ? calRes.sources : [], label: p.label, accounts: feed.connected ? feed.accounts : p.accounts, emailsConnected: !!feed.connected, emailsLabel: feed.connected ? feed.label : "", emailsUpdatedAt: feed.connected ? feed.updatedAt : null, emailsCounts: feed.connected ? feed.counts : null }, taskSource: source, test: !!testMode,
+      provider: { connected: calOn || p.connected, calendarConnected: calOn, calendars: calRes ? calRes.sources : [], label: p.label, accounts: mailOn ? mailAccounts : p.accounts, emailsConnected: mailOn, emailsLabel: mailOn ? parts.map((x) => x.name).join(" + ") + " connected (read-only)" : "", emailsUpdatedAt: mailOn ? Math.max(...parts.map((x) => x.at || 0)) : null, emailsCounts: null, gmail: { configured: !!(gmail && gmail.configured()), accounts: gmail ? gmail.list() : [] }  }, taskSource: source, test: !!testMode,
     };
   }
 
@@ -242,6 +259,18 @@ function init({ ipcMain: rawIpc, root, dataDir, testMode, log, runPython, fetchP
     catch (err) { return { ok: false, reason: err.message }; }
   });
 
+  ipcMain.handle("daily-gmail-add", async () => {
+    try { if (!gmail) return { ok: false, reason: "Gmail is not available here." }; const r = await gmail.addAccount(); cache = null; if (r.ok) await gmail.load(clockNow(), { force: true }); return r; }
+    catch (err) { return { ok: false, reason: err.message }; }
+  });
+  ipcMain.handle("daily-gmail-remove", (e, args) => {
+    try { if (!gmail) return { ok: false, reason: "Gmail is not available here." }; const r = gmail.remove(args && args.email); cache = null; return r; }
+    catch (err) { return { ok: false, reason: err.message }; }
+  });
+  ipcMain.handle("daily-gmail-refresh", async () => {
+    try { if (!gmail) return { ok: false, reason: "Gmail is not available here." }; await gmail.load(clockNow(), { force: true }); cache = null; return { ok: true }; }
+    catch (err) { return { ok: false, reason: err.message }; }
+  });
   ipcMain.handle("daily-notices-clear", () => { notices.length = 0; cache = null; return { ok: true }; });
 
   ipcMain.handle("daily-settings-set", (e, patch) => {

@@ -4661,6 +4661,8 @@ try {
     getMainWindow: () => mainWindow,
     root: process.env.AGENT_DESKTOP_ROOT || path.resolve(__dirname, "..", ".."),
     dataDir: app.getPath("userData"),
+    safeStorage: require("electron").safeStorage,
+    openExternal: (u) => require("electron").shell.openExternal(u),
     testMode: testMode.TEST_MODE,
     log: (line) => logStuckWatchdog(line),
   });

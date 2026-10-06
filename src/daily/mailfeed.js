@@ -59,4 +59,25 @@ function loadMailFeed(file, now) {
   };
 }
 
-module.exports = { loadMailFeed, DEFAULT_FILE, normId };
+// Merge several sources (Betterbird feed, Gmail accounts): one entry per direction + Message-ID, oldest first.
+function mergeEmails(list) {
+  const out = { top: [], needAnswer: [], sentNoReply: [], peopleToWrite: [], hidden: 0 };
+  const seen = new Set();
+  for (const em of list) {
+    for (const k of ["needAnswer", "sentNoReply"]) {
+      for (const x of (em && em[k]) || []) {
+        const key = k + ":" + x.id;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out[k].push(x);
+      }
+    }
+    out.hidden += (em && em.hidden) || 0;
+  }
+  const byAge = (a, b) => b.ageDays - a.ageDays;
+  out.needAnswer.sort(byAge); out.sentNoReply.sort(byAge);
+  out.needAnswer = out.needAnswer.slice(0, MAX_PER_LIST); out.sentNoReply = out.sentNoReply.slice(0, MAX_PER_LIST);
+  return out;
+}
+
+module.exports = { loadMailFeed, mergeEmails, DEFAULT_FILE, normId };

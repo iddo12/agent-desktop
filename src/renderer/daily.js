@@ -1293,12 +1293,41 @@
     }
     r2.append(t2, seg);
     cal.append(r1, ...calRows, addRow, r2);
+    const gm = p.gmail || { configured: false, accounts: [] };
     const acc = card(`Email accounts (${p.accounts.length})`);
     const r3 = el("div", "daily-set");
     const t3 = el("div");
-    t3.append(el("div", null, p.accounts.join(" · ")), el("div", "daily-muted sm", "spam and promotions are hidden from My Daily · need another account? Ask the assistant; Security adds it"));
-    r3.append(t3, btn("Manage accounts", "daily-btn sm", () => say("Accounts are added by the Security agent once email is connected.")));
+    t3.append(el("div", null, p.accounts.join(" · ")), el("div", "daily-muted sm", "spam, promotions and no-reply senders are hidden from My Daily"));
+    r3.append(t3, btn("Refresh", "daily-btn sm", async () => {
+      const r = await api.gmailRefresh();
+      await load(true); render(); say(r && r.ok ? "Email refreshed." : (r && r.reason) || "Could not refresh.");
+    }));
     acc.append(r3);
+    for (const a of gm.accounts) {
+      const row = el("div", "daily-set");
+      const tx = el("div");
+      tx.append(el("b", null, a.email), el("div", "daily-muted sm", a.ok ? `Gmail, read-only · ${a.needAnswer} to answer · ${a.sentNoReply} sent without reply` : `problem: ${a.error || "not loaded yet"}`));
+      row.append(tx, btn("Remove", "daily-btn sm", async () => {
+        const r = await api.gmailRemove(a.email);
+        await load(true); render(); if (!(r && r.ok)) say((r && r.reason) || "Could not remove it.");
+      }));
+      acc.append(row);
+    }
+    const addG = el("div", "daily-set");
+    const addGt = el("div");
+    addGt.append(el("b", null, "Add a Gmail account (read-only)"), el("div", "daily-muted sm", gm.configured
+      ? "Opens Google in your browser: sign in yourself and allow \"read your email\". Agent Desktop can only read, never send or delete. The sign-in is kept only on this PC."
+      : "Not set up on this PC yet: the Google connection file is missing. Ask Iddo's Security agent."));
+    const addGb = btn("Add Gmail account", "daily-btn sm pri", async () => {
+      if (!gm.configured) return say("Gmail is not set up on this PC yet.");
+      addGb.disabled = true; say("Finish the sign-in in your browser...");
+      const r = await api.gmailAdd();
+      addGb.disabled = false;
+      await load(true); render();
+      say(r && r.ok ? `Gmail connected: ${r.email}` : (r && r.reason) || "Could not connect Gmail.");
+    });
+    addG.append(addGt, addGb);
+    acc.append(addG);
     wrap.append(cal, acc);
     if (!p.calendarConnected || !p.emailsConnected) wrap.append(demoBanner());
     return wrap;
