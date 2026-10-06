@@ -216,73 +216,22 @@
   }
   function demoBanner(kind) {
     const pv = payload.provider;
-    if (pv.emailsConnected) {
+    const emailTxt = pv.emailsConnected ? pv.emailsLabel + "." : "Email is not connected yet, so emails are examples.";
+    const calTxt = pv.calendarConnected ? "Calendar connected (read-only)." : "The calendar is not connected yet, so events are examples.";
+    if (kind === "emails") {
       const at = pv.emailsUpdatedAt ? new Date(pv.emailsUpdatedAt) : null;
       const when = at ? ` Updated ${at.getDate()} ${MONTHS[at.getMonth()]} ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}.` : "";
-      if (kind === "emails") return el("div", "daily-banner info", `${pv.emailsLabel}.${when} Google Mail is not connected yet.`);
-      return el("div", "daily-banner", `${pv.emailsLabel}. The calendar is not connected yet, so events are examples.`);
+      return el("div", "daily-banner info", pv.emailsConnected ? `${pv.emailsLabel}.${when} Google Mail is not connected yet.` : emailTxt);
     }
-    return el("div", "daily-banner", `${pv.label}. Email and calendar are not connected yet, so these are examples.`);
-  }
-
-  // ---------------------------------------------------------------- tabs
-  function tabCounts() {
-    const s = payload && payload.summary;
-    if (!s) return {};
-    return {
-      emails: [s.emailsAttention, "blue", `${s.emailsAttention} need attention${s.sentOldest || s.emailsNeedOldest ? " - " + sub(s.emailsNeedOldest) : ""}`],
-      tasks: [s.tasksOpen, "", `${s.tasksOpen} open - ${sub(s.tasksOldest)}`],
-      shopping: [s.shopLists, "", `${s.shopLists} list${s.shopLists === 1 ? "" : "s"}${s.shopOldest ? " - oldest item " + s.shopOldest.days + "d" : ""}`],
-      dates: [s.datesCount, "", s.datesNext ? `next in ${s.datesNext.inDays}d` : ""],
-    };
-  }
-  // Layout follows the width of the My Daily view itself (not the window): full tab bar, "More" menu, or sideways-scrolling tabs.
-  let layout = "full";
-  function computeLayout() { const w = view.clientWidth || 1000; return w >= 770 ? "full" : w >= 540 ? "more" : "narrow"; }
-  function renderTabs() {
-    tabsEl.replaceChildren();
-    const counts = tabCounts();
-    const hidden = layout === "more" ? ["dates"] : [];
-    for (const [id, label] of TABS) {
-      if (hidden.includes(id)) continue;
-      const b = el("button", "daily-tab" + (!showSettings && tab === id ? " on" : ""));
-      b.type = "button";
-      b.append(el("span", null, label));
-      const c = counts[id];
-      if (c && c[0]) b.append(num(c[0], c[1], c[2]));
-      b.addEventListener("click", () => { tab = id; showSettings = false; render(); });
-      tabsEl.append(b);
-    }
-    if (hidden.length) {
-      const on = !showSettings && hidden.includes(tab);
-      const mb = el("button", "daily-tab daily-popper" + (on ? " on" : ""));
-      mb.type = "button";
-      mb.append(el("span", null, "More ▾"));
-      const total = hidden.reduce((a, id) => a + ((counts[id] && counts[id][0]) || 0), 0);
-      if (total) mb.append(num(total, "", "Items in the tabs under More"));
-      mb.addEventListener("click", () => openPop(mb, (p) => {
-        for (const id of hidden) {
-          const lab = TABS.find((x) => x[0] === id)[1];
-          const c = counts[id];
-          const it = btn("", "daily-pop-item daily-more-item" + (tab === id && !showSettings ? " on" : ""), () => { closePop(); tab = id; showSettings = false; render(); });
-          it.append(el("span", null, lab));
-          if (c && c[0]) it.append(el("span", "daily-n", String(c[0])));
-          if (c && c[2]) it.append(el("small", "daily-muted", c[2]));
-          p.append(it);
-        }
-        const st = btn("", "daily-pop-item daily-more-item" + (showSettings ? " on" : ""), () => { closePop(); showSettings = true; render(); });
-        st.append(el("span", null, "Settings: calendar sharing & sync"), el("small", "daily-muted", "gear"));
-        p.append(st);
-      }));
-      tabsEl.append(mb);
-    }
+    if (kind === "calendar") return el("div", "daily-banner", calTxt);
+    return el("div", "daily-banner", `${emailTxt} ${calTxt}`);
   }
 
   // ---------------------------------------------------------------- Today
   function renderToday() {
     const s = payload.summary, d = payload.data, now = payload.now;
     const wrap = el("div", "daily-today");
-    if (!payload.provider.connected) wrap.append(demoBanner());
+    if (!payload.provider.calendarConnected || !payload.provider.emailsConnected) wrap.append(demoBanner());
 
     const chip = (big, color, label, subText, onClick) => {
       const c = el("button", "daily-chip");
@@ -322,7 +271,8 @@
       sched.append(row);
     });
     // Top emails
-    const mails = card("Top emails today", [num(s.emailsAttention, "blue", "Open Emails", () => { tab = "emails"; render(); }), el("span", "daily-sp"), btn("Emails", "daily-btn sm", () => { tab = "emails"; render(); })]);
+    const noTop = !d.emails.top.length;   // the Betterbird feed carries no importance rating yet: no count next to an empty list
+    const mails = card("Top emails today", [noTop ? el("span") : num(s.emailsAttention, "blue", "Open Emails", () => { tab = "emails"; render(); }), el("span", "daily-sp"), btn("Emails", "daily-btn sm", () => { tab = "emails"; render(); })]);
     mails.classList.add("grow");
     for (const m of d.emails.top.slice(0, 3)) {
       const row = el("div", "daily-tk");
@@ -335,7 +285,7 @@
       row.append(ti, imp);
       mails.append(row);
     }
-    mails.append(el("div", "daily-leg", "●●● very important · ●●○ important · ●○○ routine"));
+    mails.append(noTop ? el("div", "daily-leg", `${s.emailsNeedAnswer} emails need an answer and ${s.sentNoReply} sent ones have no reply (open Emails). Importance ratings are not part of the feed yet.`) : el("div", "daily-leg", "●●● very important · ●●○ important · ●○○ routine"));
     two.append(sched, mails);
     wrap.append(two);
 
@@ -926,7 +876,7 @@
     const accounts = payload.provider.accounts || [];
     const now = payload.now;
     const wrap = el("div", "daily-plain");
-    if (!payload.provider.connected) wrap.append(demoBanner("emails"));
+    if (!payload.provider.emailsConnected) wrap.append(demoBanner("emails"));
 
     // accounts row: counts = items that need attention per account
     const counts = {};
@@ -1048,7 +998,7 @@
     if (cursor == null) cursor = now;
     const cur = new Date(cursor);
     const wrap = el("div", "daily-plain daily-sched");
-    if (!payload.provider.connected) wrap.append(demoBanner());
+    if (!payload.provider.calendarConnected) wrap.append(demoBanner("calendar"));
 
     const bar = el("div", "daily-frow");
     const seg = el("div", "daily-seg");
@@ -1246,9 +1196,37 @@
     const cal = card("Calendar");
     const r1 = el("div", "daily-set");
     const t1 = el("div");
-    t1.append(el("b", null, "Google Calendar"), el("div", "daily-muted sm", `${p.connected ? "two-way sync" : "not connected yet - demo data is shown"}`));
-    const sync = btn("Sync now", "daily-btn sm", () => { say(p.connected ? "Syncing..." : "Not connected yet - there is nothing to sync."); });
+    t1.append(el("b", null, "Google Calendar (read-only)"), el("div", "daily-muted sm", p.calendarConnected ? "connected through the secret iCal link, refreshed every few minutes" : "not connected yet - demo data is shown. Paste the secret iCal link below."));
+    const sync = btn("Sync now", "daily-btn sm", async () => {
+      if (!p.calendarConnected) return say("Not connected yet - there is nothing to sync.");
+      const r = await api.calendarRefresh();
+      await load(true); render(); say(r && r.ok ? "Calendar refreshed." : (r && r.reason) || "Could not refresh.");
+    });
     r1.append(t1, sync);
+    const calRows = [];
+    (p.calendars || []).forEach((c, idx) => {
+      const row = el("div", "daily-set");
+      const tx = el("div");
+      tx.append(el("b", null, c.name), el("div", "daily-muted sm", c.ok ? `${c.count} events in the next months · link ends ...${c.tail}` : `problem: ${c.error || "not loaded yet"} · link ends ...${c.tail}`));
+      row.append(tx, btn("Remove", "daily-btn sm", async () => {
+        const r = await api.calendarRemove(idx);
+        await load(true); render(); if (!(r && r.ok)) say((r && r.reason) || "Could not remove it.");
+      }));
+      calRows.push(row);
+    });
+    const addRow = el("div", "daily-set");
+    const addTx = el("div");
+    const nameIn = document.createElement("input"); nameIn.type = "text"; nameIn.placeholder = "Name, e.g. Iddo"; nameIn.maxLength = 40; nameIn.className = "daily-input";
+    const urlIn = document.createElement("input"); urlIn.type = "password"; urlIn.placeholder = "Paste the Secret address in iCal format"; urlIn.autocomplete = "off"; urlIn.spellcheck = false; urlIn.className = "daily-input";
+    addTx.append(el("b", null, "Add a calendar"), el("div", "daily-muted sm", "Google Calendar > Settings > your calendar > Secret address in iCal format. The link is kept only on this PC."), nameIn, urlIn);
+    const addBtn = btn("Add", "daily-btn sm pri", async () => {
+      addBtn.disabled = true;
+      const r = await api.calendarAdd(nameIn.value, urlIn.value);
+      urlIn.value = "";
+      addBtn.disabled = false;
+      if (r && r.ok) { await load(true); render(); say(`Calendar added (${r.count} events found).`); } else say((r && r.reason) || "Could not add it.");
+    });
+    addRow.append(addTx, addBtn);
     const r2 = el("div", "daily-set");
     const t2 = el("div");
     t2.append(el("b", null, "Share my calendar with Merav"), el("div", "daily-muted sm", "She can view and add or edit entries (for example the dentist). You do not see hers."));
@@ -1261,7 +1239,7 @@
       seg.append(b);
     }
     r2.append(t2, seg);
-    cal.append(r1, r2);
+    cal.append(r1, ...calRows, addRow, r2);
     const acc = card(`Email accounts (${p.accounts.length})`);
     const r3 = el("div", "daily-set");
     const t3 = el("div");
@@ -1269,7 +1247,7 @@
     r3.append(t3, btn("Manage accounts", "daily-btn sm", () => say("Accounts are added by the Security agent once email is connected.")));
     acc.append(r3);
     wrap.append(cal, acc);
-    if (!p.connected) wrap.append(demoBanner());
+    if (!p.calendarConnected || !p.emailsConnected) wrap.append(demoBanner());
     return wrap;
   }
 

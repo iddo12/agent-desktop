@@ -145,6 +145,9 @@ contextBridge.exposeInMainWorld("api", {
   daily: {
     load: (force) => ipcRenderer.invoke("daily-load", { force: !!force }),
     setSettings: (patch) => ipcRenderer.invoke("daily-settings-set", patch),
+    calendarAdd: (name, url) => ipcRenderer.invoke("daily-calendar-add", { name, url }),
+    calendarRemove: (index) => ipcRenderer.invoke("daily-calendar-remove", { index }),
+    calendarRefresh: () => ipcRenderer.invoke("daily-calendar-refresh"),
     createShoppingList: (name) => ipcRenderer.invoke("daily-shopping-create-list", { name }),
     shopping: (args) => ipcRenderer.invoke("daily-shopping", args),
     thumbs: (names) => ipcRenderer.invoke("daily-thumbs", names),

@@ -11,6 +11,7 @@ const path = require("path");
 const model = require("./model");
 const linkmeta = require("./linkmeta");
 const mailfeed = require("./mailfeed");
+const calendarMod = require("./calendar");
 const { execFile } = require("child_process");
 const { withFsRetry } = require("../fsRetry");
 
@@ -109,7 +110,7 @@ const providers = {
   },
 };
 
-function init({ ipcMain: rawIpc, root, testMode, log, runPython, fetchProduct, makeThumb, getMainWindow }) {
+function init({ ipcMain: rawIpc, root, dataDir, testMode, log, runPython, fetchProduct, makeThumb, getMainWindow }) {
   const say = typeof log === "function" ? log : () => {};
   const notices = [];   // damaged-store notices, kept until dismissed (daily-notices-clear)
   // Every daily-* channel: only the main window's own frame may call it (same idea as IRIS), and an oversized
@@ -134,6 +135,8 @@ function init({ ipcMain: rawIpc, root, testMode, log, runPython, fetchProduct, m
   const f = (n) => path.join(dir, n);
   const taskDir = path.join(root, "shared_reports", "tasks");
   let cache = null;
+  // Calendar sources (Google's secret iCal link) live in the app data folder, not in Dropbox; none in test mode.
+  const cal = dataDir && !testMode ? calendarMod.create({ dataDir, log: say }) : null;
   let skippedTaskFiles = 0;
   const thumbDir = path.join(dir, "thumbs");
   const tasksPy = path.join(root, "shared_tools", "tasks", "tasks.py");
@@ -186,7 +189,10 @@ function init({ ipcMain: rawIpc, root, testMode, log, runPython, fetchProduct, m
     const { tasks, source } = await loadTasks(now);
     const own = readStore(f("appointments.json"), { items: [] }, notices, "Appointments");
     const ownEvents = (Array.isArray(own.items) ? own.items : []).filter((e) => e && Number.isFinite(e.start)).map((e) => Object.assign({ cal: "iddo" }, e, { own: true }));
-    const events = p.events(now).concat(ownEvents).sort((a, b) => a.start - b.start);
+    let calRes = null;
+    try { calRes = cal ? await cal.load(now, { onUpdated: () => { cache = null; } }) : null; } catch (e) { say(`calendar load failed: ${e && e.message}`); }
+    const calOn = !!(calRes && calRes.connected);
+    const events = (calOn ? calRes.events : p.events(now)).concat(ownEvents).sort((a, b) => a.start - b.start);
     // Real email from the local Betterbird feed (read-only file written by the Personal Assistant) when it is readable;
     // otherwise the placeholder demo data. Calendar stays on the placeholder until Google Calendar is connected.
     const feed = testMode ? { connected: false } : mailfeed.loadMailFeed(process.env.DAILY_MAIL_FEED || undefined, now);
@@ -200,7 +206,7 @@ function init({ ipcMain: rawIpc, root, testMode, log, runPython, fetchProduct, m
       now, generatedAt: Date.now(), data, summary, digest: model.buildDigest(summary, now), badge: model.badge(summary),
       settings: model.cleanSettings(readStore(f("settings.json"), {}, notices, "Settings")),
       notices: notices.concat(skippedTaskFiles ? [`${skippedTaskFiles} task file${skippedTaskFiles === 1 ? "" : "s"} could not be read and ${skippedTaskFiles === 1 ? "is" : "are"} left out.`] : []),
-      provider: { connected: p.connected, label: p.label, accounts: feed.connected ? feed.accounts : p.accounts, emailsConnected: !!feed.connected, emailsLabel: feed.connected ? feed.label : "", emailsUpdatedAt: feed.connected ? feed.updatedAt : null, emailsCounts: feed.connected ? feed.counts : null }, taskSource: source, test: !!testMode,
+      provider: { connected: calOn || p.connected, calendarConnected: calOn, calendars: calRes ? calRes.sources : [], label: p.label, accounts: feed.connected ? feed.accounts : p.accounts, emailsConnected: !!feed.connected, emailsLabel: feed.connected ? feed.label : "", emailsUpdatedAt: feed.connected ? feed.updatedAt : null, emailsCounts: feed.connected ? feed.counts : null }, taskSource: source, test: !!testMode,
     };
   }
 
@@ -213,6 +219,27 @@ function init({ ipcMain: rawIpc, root, testMode, log, runPython, fetchProduct, m
       say(`my daily load failed: ${err.message}`);
       return { error: err.message };
     }
+  });
+
+  ipcMain.handle("daily-calendar-add", async (e, args) => {
+    try {
+      if (!cal) return { ok: false, reason: "Calendars are not available here." };
+      const r = cal.add(args && args.name, args && args.url);
+      if (!r.ok) return r;
+      cache = null;
+      const res = await cal.load(clockNow(), { force: true });
+      const mine = res.sources[res.sources.length - 1];
+      if (mine && mine.error) { cal.remove(res.sources.length - 1); cache = null; return { ok: false, reason: `Could not read that calendar: ${mine.error}` }; }
+      return { ok: true, count: mine ? mine.count : 0 };
+    } catch (err) { return { ok: false, reason: err.message }; }
+  });
+  ipcMain.handle("daily-calendar-remove", (e, args) => {
+    try { if (!cal) return { ok: false, reason: "Calendars are not available here." }; const r = cal.remove(args && args.index); cache = null; return r; }
+    catch (err) { return { ok: false, reason: err.message }; }
+  });
+  ipcMain.handle("daily-calendar-refresh", async () => {
+    try { if (!cal) return { ok: false, reason: "Calendars are not available here." }; await cal.load(clockNow(), { force: true }); cache = null; return { ok: true }; }
+    catch (err) { return { ok: false, reason: err.message }; }
   });
 
   ipcMain.handle("daily-notices-clear", () => { notices.length = 0; cache = null; return { ok: true }; });

@@ -4657,6 +4657,7 @@ try {
     ipcMain,
     getMainWindow: () => mainWindow,
     root: process.env.AGENT_DESKTOP_ROOT || path.resolve(__dirname, "..", ".."),
+    dataDir: app.getPath("userData"),
     testMode: testMode.TEST_MODE,
     log: (line) => logStuckWatchdog(line),
   });
