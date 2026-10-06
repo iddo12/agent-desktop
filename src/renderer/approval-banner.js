@@ -49,5 +49,7 @@
       el.classList.remove("hidden");
     } catch (e) { /* never break the chat */ }
   }
-  setInterval(poll, 5000);
+  // v1.77.3: the banner is for a person looking at the window; skipped while hidden, one poll when it is shown again
+  setInterval(() => { if (!document.hidden) poll(); }, 5000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
 })();

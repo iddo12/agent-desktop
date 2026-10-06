@@ -2447,7 +2447,7 @@ function scheduleRebuildChatView(agentPath) {
 // something that hasn't changed costs one IPC round-trip, not a visible
 // re-render.
 const CHAT_VIEW_STALE_POLL_MS = 4000;
-setInterval(() => {
+function chatViewStalePoll() {
   if (!activeAgentPath || rawTerminalMode) return;
   // 2026-09-20: this poll's own implicit assumption - a terminal/session
   // object always exists for the active agent - can silently stop holding.
@@ -2467,7 +2467,10 @@ setInterval(() => {
     return; // let the freshly (re)created session's own activity drive the next real rebuild
   }
   rebuildChatView(activeAgentPath);
-}, CHAT_VIEW_STALE_POLL_MS);
+}
+// v1.77.3: nobody is looking while the window is hidden/minimized; one catch-up rebuild runs when it becomes visible again.
+setInterval(() => { if (!document.hidden) chatViewStalePoll(); }, CHAT_VIEW_STALE_POLL_MS);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) chatViewStalePoll(); });
 
 // Raw terminal is the fallback/advanced view for anything that genuinely
 // needs real keystroke-level interaction (the Model picker's arrow keys, a

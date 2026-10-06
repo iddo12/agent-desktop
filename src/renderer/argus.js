@@ -1487,5 +1487,7 @@
   // Sidebar lamps without a rebuild: read last data on start.
   window.api.argusData({ refresh: false }).then((d) => { data = d; render(); }).catch(() => {});
   pollBadge();
-  setInterval(pollBadge, BADGE_MS);
+  // v1.77.3: cosmetic badge - skipped while the window is hidden, refreshed once when it is shown again
+  setInterval(() => { if (!document.hidden) pollBadge(); }, BADGE_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollBadge(); });
 })();
