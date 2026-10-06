@@ -10,7 +10,7 @@
 
   const TABS = [
     ["today", "Today"], ["emails", "Emails"], ["schedule", "Schedule"], ["tasks", "Tasks"],
-    ["shopping", "Shopping lists"], ["dates", "Birthdays & dates"],
+    ["shopping", "Shopping lists"], ["shipments", "Shipments"], ["dates", "Birthdays & dates"],
   ];
   const PRI_COLORS = ["#f3f0e8", "#f0e6c0", "#ecdc9f", "#e8d085", "#e6bf6b", "#e5a95a", "#e48d4c", "#e2703f", "#dc4f35", "#c93a2a"];
   const STATUS_LABEL = { needs: "▲ Needs you", working: "▶ Working", waiting: "◐ Waiting", queued: "○ Queued" };
@@ -227,6 +227,10 @@
     return el("div", "daily-banner", `${emailTxt} ${calTxt}`);
   }
 
+  // ---------------------------------------------------------------- Shipments (daily-shipments.js)
+  let shipView = null;
+  try { if (window.dailyShipments) shipView = window.dailyShipments.create({ el, btn, say, copyText, api, emptyState, rerender: () => { if (isOpen()) render(); }, isActive: () => isOpen() && tab === "shipments" && !showSettings }); } catch (e) { console.error("shipments view", e); }
+
   // ---------------------------------------------------------------- tabs
   function tabCounts() {
     const s = payload && payload.summary;
@@ -236,6 +240,7 @@
       tasks: [s.tasksOpen, "", `${s.tasksOpen} open - ${sub(s.tasksOldest)}`],
       shopping: [s.shopLists, "", `${s.shopLists} list${s.shopLists === 1 ? "" : "s"}${s.shopOldest ? " - oldest item " + s.shopOldest.days + "d" : ""}`],
       dates: [s.datesCount, "", s.datesNext ? `next in ${s.datesNext.inDays}d` : ""],
+      shipments: shipView ? shipView.tabCount() : null,
     };
   }
   // Layout follows the width of the My Daily view itself (not the window): full tab bar, "More" menu, or sideways-scrolling tabs.
@@ -1361,6 +1366,7 @@
       if (showSettings) body.append(renderSettings());
       else if (tab === "today") body.append(renderToday());
       else if (tab === "shopping") body.append(renderShopping());
+      else if (tab === "shipments" && shipView) body.append(shipView.render());
       else if (tab === "emails") body.append(renderEmails());
       else if (tab === "schedule") body.append(renderSchedule());
       else if (tab === "tasks") body.append(renderTasks());

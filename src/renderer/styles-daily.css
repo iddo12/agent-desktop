@@ -284,3 +284,42 @@ button.daily-st { border: 0; font: inherit; font-size: 11px; font-weight: 600; c
 /* Hebrew entries (dir=auto set by daily.js) read from the right; keep chips and rows aligned to their start edge */
 #daily-view [dir="auto"] { text-align: start; unicode-bidi: plaintext; }
 .daily-chipx[dir="auto"] { display: block; }
+
+/* ---- Shipments (v1.76.0) ---- */
+.ship-wrap { max-width: 1100px; }
+.ship-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ship-note { font-size: 12px; font-weight: 400; }
+.ship-banner { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ship-legend { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.ship-chip { display: inline-block; font-size: 11.5px; font-weight: 600; line-height: 18px; padding: 0 8px; border-radius: 9px; white-space: nowrap; background: var(--daily-blue-bg); color: #2a63ac; }
+.ship-chip.bad { background: #fbe3df; color: #a62b1c; }
+.ship-chip.warn { background: #fdecd0; color: #8a5200; }
+.ship-chip.ok { background: var(--daily-ok-bg); color: #116c33; }
+.ship-chip.mute { background: var(--bg-hover); color: var(--text-muted); }
+.ship-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.ship-group .ship-row:last-child { border-bottom: 0; }
+.ship-ico { flex: none; width: 38px; height: 28px; border-radius: 6px; background: var(--bg-hover); color: var(--text-muted); font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.ship-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ship-l1, .ship-l2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.ship-name { overflow-wrap: anywhere; }
+.ship-merch, .ship-carrier, .ship-eta, .ship-muted, .ship-from { color: var(--text-muted); font-size: 12.5px; }
+.ship-eta { font-weight: 600; color: var(--text); }
+.ship-no { font: inherit; font-size: 12.5px; font-family: Consolas, monospace; background: var(--bg-hover); border: 0; border-radius: 5px; padding: 1px 6px; color: var(--text); cursor: copy; }
+.ship-no:hover { background: var(--bg-active); }
+.ship-action { font-size: 12.5px; font-weight: 600; color: #8a5200; }
+.ship-action.bad { color: #a62b1c; }
+.ship-ev { font-size: 12.5px; overflow-wrap: anywhere; }
+.ship-ev-p { color: var(--text-muted); }
+.ship-acts { flex: none; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; max-width: 330px; }
+.ship-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.ship-add .daily-input { margin-top: 0; }
+.ship-key { display: flex; flex-direction: column; gap: 6px; }
+.ship-toggle { font: inherit; background: none; border: 0; padding: 0; color: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
+.ship-group.needs { border-color: #e6b3ac; }
+.ship-row.archived { opacity: .8; }
+.ship-foot { padding-top: 4px; }
+/* narrow window: stack like Tasks (buttons drop under the text) */
+#daily-view.narrow .ship-row { flex-wrap: wrap; row-gap: 6px; }
+#daily-view.narrow .ship-main { flex: 1 1 200px; }
+#daily-view.narrow .ship-acts { flex: 1 1 100%; justify-content: flex-start; max-width: none; padding-left: 48px; }
+#daily-view.more .ship-acts { max-width: 220px; }
