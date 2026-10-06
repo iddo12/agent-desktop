@@ -1116,13 +1116,13 @@
         cell.addEventListener("click", () => gotoDay(new Date(c.year, c.month - 1, c.day)));
         cell.append(el("b", null, String(c.day)));
         const list = map.get(c.key) || [];
-        for (const e of list.slice(0, 2)) {
+        for (const e of list.slice(0, 3)) {
           const ch = el("span", "daily-chipx " + (e.cal || "iddo"), entryText(e, true));
           ch.title = e.title;
           ch.addEventListener("click", (ev) => { ev.stopPropagation(); openEntry(e); });
           cell.append(ch);
         }
-        if (list.length > 2) { const more = el("span", "daily-more", `+${list.length - 2} more`); more.setAttribute("role", "button"); cell.append(more); }
+        if (list.length > 3) { const more = el("span", "daily-more", `+${list.length - 3} more`); more.setAttribute("role", "button"); cell.append(more); }
         grid.append(cell);
       }
       wrap.append(grid);
