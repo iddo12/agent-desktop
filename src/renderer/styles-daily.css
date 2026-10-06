@@ -212,7 +212,7 @@ button.daily-st { border: 0; font: inherit; font-size: 11px; font-weight: 600; c
 .daily-g { color: #555; } .daily-g.d3 { color: #b45309; font-weight: 600; } .daily-g.d5 { color: #c0291c; font-weight: 600; }
 .daily-sm, .sm { font-size: 12px; }
 
-.daily-sched { position: relative; }
+.daily-sched { position: relative; max-width: none; }   /* the month grid uses the whole width of the window */
 .daily-sched-title { min-width: 130px; text-align: center; }
 .daily-mon { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-template-rows: auto; grid-auto-rows: minmax(104px, calc((100vh - 330px) / 6)); gap: 6px; }   /* rows grow with the window; a long entry makes its row taller */
 .daily-mon-h { text-align: center; font-size: 12px; font-weight: 700; color: var(--text-muted); padding: 2px 0; }
