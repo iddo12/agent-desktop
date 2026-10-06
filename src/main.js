@@ -3399,9 +3399,13 @@ try {
         // (real reading + usage since) whatever its age, as long as its window has not reset. Either source >= 95% stops.
         const um = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "System Optimization & Maintenance Agent", "UsageModel", "data", "usage_now.json"), "utf-8").replace(/^﻿/, ""));
         const nowMs = Date.now();
+        // 2026-10-06: the model's last real reading was 17 h old when it said 94.7% against a real ~100%. When that reading is
+        // older than 60 min the estimate is only an estimate, so it stops 3 points early (92 for a 95 stop). Missing age = stale.
+        const ageMin = um.lastReading && typeof um.lastReading.ageMin === "number" ? um.lastReading.ageMin : Infinity;
+        const modelLim = ageMin > 60 ? lim - 3 : lim;
         return ["7d", "5h"].some((k) => {
           const w = um.windows && um.windows[k];
-          if (!w || typeof w.usedPct !== "number" || w.usedPct < lim) return false;
+          if (!w || typeof w.usedPct !== "number" || w.usedPct < modelLim) return false;
           if (w.resetsAt && Date.parse(w.resetsAt) < nowMs) return false;
           return true;
         });
