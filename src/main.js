@@ -22,6 +22,7 @@ const {
   getLatestTranscriptSizeBytes,
   getHaltInfo,
   listConversations,
+  getCurrentConversation,
   setConversationTitle,
   repinAgentName,
 } = require("./archive");
@@ -3040,8 +3041,7 @@ const TEST_FAULT_DIR = () => app.getPath("userData");
 function testFaultFile(name) { return path.join(TEST_FAULT_DIR(), name); }
 async function restartAgentSession(agentPath) {
   const sessionCwd = sessionCwdFor(agentPath);
-  const convos = listConversations(sessionCwd);
-  const cur = convos.find((c) => c.isCurrent) || convos[0];
+  const cur = getCurrentConversation(sessionCwd); // v1.77.3: newest conversation only, not a full parse of every transcript
   if (!cur || !cur.sessionId) throw new Error("no conversation to resume");
   const old = ptySessions.get(agentPath);
   const size = { cols: old && old.cols, rows: old && old.rows };
@@ -3996,8 +3996,7 @@ function agentDisplayName(agentPath) {
 async function autoTitleFreshConversation(agentPath, sessionCwd) {
   try {
     for (let attempt = 0; attempt < 5; attempt++) {
-      const convos = listConversations(sessionCwd);
-      const current = convos.find((c) => c.isCurrent) || convos[0];
+      const current = getCurrentConversation(sessionCwd);
       if (current && current.sessionId) {
         // Never clobber a title someone deliberately set (a user rename, or
         // a resumed conversation that already carried one).

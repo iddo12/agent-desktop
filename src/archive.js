@@ -1591,7 +1591,20 @@ function summarizeText(s, max) {
   return collapsed.slice(0, max - 1).trimEnd() + "…";
 }
 
+// v1.77.3: per-file memo of the parsed meta keyed on (path,size,mtimeMs) - taken from a fresh stat, not the TTL stat cache.
+// Old transcripts never change, so only the live file is ever re-parsed; callers get copies (listConversations mutates).
+const convMetaMemo = new Map(); // path -> { sig, meta }
 function readConversationMeta(jsonlPath) {
+  let sig;
+  try { const st = fs.statSync(jsonlPath); sig = st.size + ":" + st.mtimeMs; } catch (e) { convMetaMemo.delete(jsonlPath); return null; }
+  const hit = convMetaMemo.get(jsonlPath);
+  if (hit && hit.sig === sig) return hit.meta ? { ...hit.meta } : null;
+  const meta = parseConversationMeta(jsonlPath);
+  if (convMetaMemo.size > 4000) convMetaMemo.clear();
+  convMetaMemo.set(jsonlPath, { sig, meta });
+  return meta ? { ...meta } : null;
+}
+function parseConversationMeta(jsonlPath) {
   let raw;
   try {
     raw = fs.readFileSync(jsonlPath, "utf-8");
@@ -1679,6 +1692,21 @@ function listConversations(sessionCwd) {
   // show which row is "current" without the renderer re-deriving the rule.
   if (metas.length) metas[0].isCurrent = true;
   return metas;
+}
+
+// v1.77.3: the conversation `--continue` resumes (what listConversations() flags isCurrent) without parsing every
+// transcript of the agent: files are ranked by their tail timestamp (same ranking as the live readers), then only the
+// top one is parsed (memoized). Same answer as listConversations()[0]; falls back to the full list when no ranked file
+// yields a meta (empty folder, files without timestamps), so the result never differs from the old behaviour.
+function getCurrentConversation(sessionCwd) {
+  invalidateStatCache(); // a conversation file created a moment ago (fresh session) must be seen
+  const ranked = rankFilesByTail(findJsonlFiles(sessionCwd));
+  for (const r of ranked.slice(0, 3)) {
+    const meta = readConversationMeta(r.jsonlPath);
+    if (meta) { meta.isCurrent = true; return meta; }
+  }
+  const all = listConversations(sessionCwd);
+  return all[0] || null;
 }
 
 // A session id is always a UUID (hex + dashes). Enforced before it's ever
@@ -1844,5 +1872,6 @@ module.exports = {
   repinAgentName,
   newestTranscript,
   setStatCacheTtl,
+  getCurrentConversation,
   invalidateStatCache,
 };
