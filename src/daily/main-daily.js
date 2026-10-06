@@ -144,6 +144,7 @@ function init({ ipcMain: rawIpc, root, dataDir, safeStorage, openExternal, testM
   try { if (dataDir) gmailClient = readJson(path.join(dataDir, "gmail-client.json"), null); } catch (e) { gmailClient = null; }
   const gmail = dataDir && !testMode ? gmailMod.create({
     dataDir, safeStorage, client: gmailClient && gmailClient.clientId && gmailClient.clientSecret ? gmailClient : null, log: say,
+    exportFile: process.env.DAILY_GMAIL_EXPORT || "E:/Claude work/Personal Assistant Agent/mail_index/gmail_feed.json",
     openExternal: (u) => { if (typeof openExternal === "function" && /^https:\/\/accounts\.google\.com\//.test(String(u))) openExternal(u); },
   }) : null;
   let skippedTaskFiles = 0;
@@ -214,7 +215,7 @@ function init({ ipcMain: rawIpc, root, dataDir, safeStorage, openExternal, testM
     const mailOn = parts.length > 0;
     const mailAccounts = [].concat(...parts.map((x) => x.accounts));
     const data = {
-      tasks, emails: mailOn ? mailfeed.mergeEmails(parts.map((x) => x.emails)) : p.emails(now), events,
+      tasks, emails: mailOn ? mailfeed.shapeEmails(mailfeed.mergeEmails(parts.map((x) => x.emails)), mailfeed.loadRules(process.env.DAILY_MAIL_RULES || undefined), now) : p.emails(now), events,
       dates: (() => { const d = readStore(f("dates.json"), { items: [] }, notices, "Birthdays & dates").items; return Array.isArray(d) ? d.filter(isObj) : []; })(),
       shopping: loadShopping(now),
     };

@@ -16,7 +16,7 @@ t("maps received -> needAnswer and sent -> sentNoReply, oldest first", () => {
   const f = put("a.json", { generated: "2026-10-06T09:00:00Z", source: "betterbird", items: [item({ messageId: "1" }), item({ messageId: "2", date: new Date(NOW - 9 * DAY).toISOString() }), item({ messageId: "3", direction: "sent", daysWaiting: 4 })] });
   const r = loadMailFeed(f, NOW);
   assert.strictEqual(r.connected, true);
-  assert.deepStrictEqual(r.emails.needAnswer.map((x) => x.id), ["2", "1"]);
+  assert.deepStrictEqual(r.emails.needAnswer.map((x) => x.id), ["1", "2"]);   // newest first
   assert.strictEqual(r.emails.sentNoReply[0].ageDays, 4);
   assert.strictEqual(r.emails.sentNoReply[0].to, "Bob <b@x.com>");
   assert.deepStrictEqual(r.accounts, ["Betterbird"]);
@@ -50,6 +50,21 @@ t("BOM is tolerated", () => {
 t("missing/empty daysWaiting falls back to the date, not 0", () => {
   const f = put("i.json", { items: [item({ messageId: "1", direction: "sent", daysWaiting: null }), item({ messageId: "2", direction: "sent", daysWaiting: "" })] });
   assert.deepStrictEqual(loadMailFeed(f, NOW).emails.sentNoReply.map((x) => x.ageDays), [5, 5]);
+});
+t("shapeEmails: rules hide / VIP keep, newest-first top list ranked by importance", () => {
+  const { shapeEmails, loadRules } = require("../src/daily/mailfeed");
+  const em = { needAnswer: [
+    { id: "a", from: "Shop <deals@shop.com>", subject: "Sale", ageDays: 0, at: NOW - 1000 },
+    { id: "b", from: "Dan <dan@x.com>", subject: "Lunch?", ageDays: 1, at: NOW - DAY, unread: true },
+    { id: "c", from: "Boss <boss@x.com>", subject: "Contract", ageDays: 20, at: NOW - 20 * DAY },
+    { id: "d", from: "Lea <lea@x.com>", subject: "Hi", ageDays: 1, at: NOW - 2 * DAY, important: true }], sentNoReply: [] };
+  const rules = { hideSenders: ["deals@"], vipSenders: ["boss@"], needAnswerMaxDays: 14, topDays: 2, topMax: 5 };
+  const r = shapeEmails(em, rules, NOW);
+  assert.deepStrictEqual(r.needAnswer.map((x) => x.id), ["b", "c", "d"]);          // a hidden; c is VIP so the 14-day cap does not drop it
+  assert.deepStrictEqual(r.top.map((x) => [x.id, x.importance]), [["d", 3], ["b", 2]]);
+  const f = put("rules.json", { hideSenders: ["x"], needAnswerMaxDays: 999, junk: 1 });
+  assert.strictEqual(loadRules(f).needAnswerMaxDays, 90);
+  assert.deepStrictEqual(loadRules(path.join(tmp, "none.json")), {});
 });
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fails ? `${fails} of ${n} FAILED` : `mailfeed: ${n} tests passed`);

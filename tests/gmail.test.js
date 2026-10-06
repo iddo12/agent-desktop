@@ -27,6 +27,13 @@ t("classifyThread: reply needed / sent without reply / noise ignored", () => {
   assert.strictEqual(classifyThread({ messages: [msg({ from: "Shop <no-reply@shop.com>" })] }, "me@gmail.com", NOW).kind, null);
   assert.strictEqual(classifyThread({ messages: [msg({ labels: ["INBOX", "CATEGORY_PROMOTIONS"] })] }, "me@gmail.com", NOW).kind, null);
   assert.strictEqual(classifyThread({ messages: [] }, "me@gmail.com", NOW).kind, null);
+  // bulk mail (List-Unsubscribe / Precedence: bulk) never needs an answer
+  const bulk = msg({ days: 1 }); bulk.payload.headers.push({ name: "List-Unsubscribe", value: "<mailto:x@y>" });
+  assert.strictEqual(classifyThread({ messages: [bulk] }, "me@gmail.com", NOW).kind, null);
+  const prec = msg({ days: 1 }); prec.payload.headers.push({ name: "Precedence", value: "bulk" });
+  assert.strictEqual(classifyThread({ messages: [prec] }, "me@gmail.com", NOW).kind, null);
+  const u = classifyThread({ messages: [msg({ days: 0, labels: ["INBOX", "UNREAD", "IMPORTANT"] })] }, "me@gmail.com", NOW);
+  assert.deepStrictEqual([u.unread, u.important, u.kind], [true, true, "needAnswer"]);
 });
 
 function fakeGoogle(opts) {

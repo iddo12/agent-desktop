@@ -18,6 +18,7 @@ const FRESH_MS = 5 * 60 * 1000;
 const THREADS_PER_LIST = 60;
 const CONCURRENCY = 4;
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const BULK_HEADERS = /^(bulk|list|junk)$/i;
 const NO_REPLY_FROM = /(no-?reply|do-?not-?reply|mailer-daemon|postmaster|notifications?@|newsletter|bounce)/i;
 
 const clean = (v, n) => String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, n);
@@ -67,14 +68,16 @@ function classifyThread(thread, me, now) {
     subject: clean(headerOf(last, "Subject"), 200) || "(no subject)",
     ageDays: Math.max(0, Math.floor((now - t) / DAY)),
   };
-  if (mine) return Object.assign(base, { kind: "sentNoReply", to: clean(headerOf(last, "To"), 160) });
+  if (mine) return Object.assign(base, { kind: "sentNoReply", to: clean(headerOf(last, "To"), 160), at: t });
   if (NO_REPLY_FROM.test(fromRaw)) return { kind: null };
+  // 2026-10-06: newsletters and robots that slip past Gmail's categories: bulk mail has List-Unsubscribe / Precedence: bulk / Auto-Submitted
+  if (headerOf(last, "List-Unsubscribe") || BULK_HEADERS.test(headerOf(last, "Precedence").trim()) || /^auto-/i.test(headerOf(last, "Auto-Submitted").trim())) return { kind: null };
   const labels = last.labelIds || [];
   if (labels.some((l) => /^CATEGORY_(PROMOTIONS|SOCIAL|UPDATES|FORUMS)$/.test(l) || l === "SPAM" || l === "TRASH")) return { kind: null };
-  return Object.assign(base, { kind: "needAnswer", from: clean(fromRaw, 160) });
+  return Object.assign(base, { kind: "needAnswer", from: clean(fromRaw, 160), at: t, unread: labels.includes("UNREAD"), important: labels.includes("IMPORTANT") || labels.includes("STARRED") });
 }
 
-function create({ dataDir, safeStorage, openExternal, client, log, request: req }) {
+function create({ dataDir, safeStorage, openExternal, client, log, request: req, exportFile }) {
   const say = typeof log === "function" ? log : () => {};
   const call = req || request;
   const file = path.join(dataDir, "gmail-accounts.bin");
@@ -123,17 +126,22 @@ function create({ dataDir, safeStorage, openExternal, client, log, request: req 
   async function fetchAccount(acct, now) {
     const token = await accessToken(acct);
     const lists = [
-      ["in:inbox newer_than:21d -category:promotions -category:social -category:updates -category:forums", "needAnswer"],
+      ["in:inbox newer_than:14d -category:promotions -category:social -category:updates -category:forums", "needAnswer"],
       ["in:sent newer_than:45d", "sentNoReply"],
     ];
-    const items = { needAnswer: [], sentNoReply: [] };
+    const items = { needAnswer: [], sentNoReply: [], raw: [] };
     for (const [q, want] of lists) {
       const l = await gget(token, "threads?maxResults=" + THREADS_PER_LIST + "&q=" + encodeURIComponent(q));
       const ids = ((l.threads) || []).map((t) => t.id).filter((x) => /^[0-9a-f]+$/i.test(String(x)));
-      const threads = await pool(ids, (id) => gget(token, "threads/" + id + "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID"));
+      const threads = await pool(ids, (id) => gget(token, "threads/" + id + "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=List-Unsubscribe&metadataHeaders=Precedence&metadataHeaders=Auto-Submitted"));
       for (const th of threads) {
         if (!th) continue;
         const c = classifyThread(th, acct.email, now);
+        try {   // headers-only record of every thread seen (for the Personal Assistant's cross-check with Betterbird)
+          const m = (th.messages || [])[(th.messages || []).length - 1];
+          if (m) items.raw.push({ messageId: normId(headerOf(m, "Message-ID") || m.id), direction: (m.labelIds || []).includes("SENT") || addrOf(headerOf(m, "From")) === acct.email ? "sent" : "received",
+            date: new Date(Number(m.internalDate) || now).toISOString(), account: acct.email, counterparty: clean(headerOf(m, "From") || headerOf(m, "To"), 160), subject: clean(headerOf(m, "Subject"), 200), labels: (m.labelIds || []).slice(0, 12), folder: want === "sentNoReply" ? "Sent" : "Inbox" });
+        } catch (e) { /* export is best effort */ }
         if (c.kind === want) items[want].push(Object.assign({ account: acct.email, owner: "Personal Assistant" }, c));
       }
     }
@@ -216,8 +224,18 @@ function create({ dataDir, safeStorage, openExternal, client, log, request: req 
         const c = cache.get(a.email);
         if (c && c.items) { any = true; updatedAt = Math.max(updatedAt, c.at); emails.needAnswer.push(...c.items.needAnswer); emails.sentNoReply.push(...c.items.sentNoReply); }
       }
-      const byAge = (x, y) => y.ageDays - x.ageDays;
-      emails.needAnswer.sort(byAge); emails.sentNoReply.sort(byAge);
+      if (exportFile) {
+        try {
+          const raw = [];
+          for (const a of accts) { const c = cache.get(a.email); if (c && c.items && c.items.raw) raw.push(...c.items.raw); }
+          const tmp = exportFile + ".tmp";
+          fs.mkdirSync(path.dirname(exportFile), { recursive: true });
+          fs.writeFileSync(tmp, JSON.stringify({ generated: new Date().toISOString(), source: "gmail", accounts: accts.map((a) => a.email), items: raw }), "utf8");
+          fs.renameSync(tmp, exportFile);
+        } catch (e) { say("gmail export failed: " + clean(e && e.message, 120)); }
+      }
+      emails.needAnswer.sort((x, y) => x.ageDays - y.ageDays);                 // newest first: today's mail on top
+      emails.sentNoReply.sort((x, y) => y.ageDays - x.ageDays);                // longest waiting first
       return { connected: any, accounts: accts.map((a) => a.email), emails, updatedAt };
     },
   };

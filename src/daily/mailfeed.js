@@ -43,12 +43,11 @@ function loadMailFeed(file, now) {
     const account = accountLabel(it.account);
     if (!accounts.includes(account)) accounts.push(account);
     const days = (it.daysWaiting != null && it.daysWaiting !== "" && Number.isFinite(Number(it.daysWaiting))) ? Math.max(0, Math.floor(Number(it.daysWaiting))) : Math.max(0, Math.floor((now - t) / DAY));
-    const base = { id, account, subject: clean(it.subject, 200) || "(no subject)", ageDays: days, owner: "Personal Assistant" };
+    const base = { id, account, subject: clean(it.subject, 200) || "(no subject)", ageDays: days, owner: "Personal Assistant", at: t };
     if (dir === "received") needAnswer.push(Object.assign(base, { from: clean(it.counterparty, 160) }));
     else sentNoReply.push(Object.assign(base, { to: clean(it.counterparty, 160) }));
   }
-  const byAge = (a, b) => b.ageDays - a.ageDays;
-  needAnswer.sort(byAge); sentNoReply.sort(byAge);
+  needAnswer.sort((a, b) => a.ageDays - b.ageDays); sentNoReply.sort((a, b) => b.ageDays - a.ageDays);
   const gen = Date.parse(raw.generated);
   const updatedAt = Number.isFinite(gen) ? gen : st.mtimeMs;
   return {
@@ -74,10 +73,48 @@ function mergeEmails(list) {
     }
     out.hidden += (em && em.hidden) || 0;
   }
-  const byAge = (a, b) => b.ageDays - a.ageDays;
-  out.needAnswer.sort(byAge); out.sentNoReply.sort(byAge);
+  out.needAnswer.sort((a, b) => a.ageDays - b.ageDays);       // newest first
+  out.sentNoReply.sort((a, b) => b.ageDays - a.ageDays);      // longest waiting first
   out.needAnswer = out.needAnswer.slice(0, MAX_PER_LIST); out.sentNoReply = out.sentNoReply.slice(0, MAX_PER_LIST);
   return out;
 }
 
-module.exports = { loadMailFeed, mergeEmails, DEFAULT_FILE, normId };
+// ---- keep/hide rules (owned by the Personal Assistant agent; Iddo defines them with it) --------------------------------------
+// mail_rules.json: { hideSenders: ["substring of From", ...], hideSubjects: ["..."], vipSenders: ["..."], needAnswerMaxDays: 14, topDays: 2, topMax: 8 }
+// vipSenders always show (and rank top); hide* drop an entry; everything is plain case-insensitive substring matching.
+const DEFAULT_RULES = "E:/Claude work/Personal Assistant Agent/mail_index/mail_rules.json";
+function loadRules(file) {
+  try {
+    const f = file || DEFAULT_RULES;
+    const st = fs.statSync(f);
+    if (!st.isFile() || st.size > 256 * 1024) return {};
+    const r = JSON.parse(fs.readFileSync(f, "utf8").replace(/^﻿/, ""));
+    const list = (v) => (Array.isArray(v) ? v.map((x) => clean(x, 120).toLowerCase()).filter(Boolean).slice(0, 500) : []);
+    return { hideSenders: list(r.hideSenders), hideSubjects: list(r.hideSubjects), vipSenders: list(r.vipSenders),
+      needAnswerMaxDays: Number.isFinite(Number(r.needAnswerMaxDays)) ? Math.max(1, Math.min(90, Number(r.needAnswerMaxDays))) : null,
+      topDays: Number.isFinite(Number(r.topDays)) ? Math.max(1, Math.min(14, Number(r.topDays))) : null,
+      topMax: Number.isFinite(Number(r.topMax)) ? Math.max(1, Math.min(20, Number(r.topMax))) : null };
+  } catch (e) { return {}; }
+}
+// Apply rules and build the "Top emails today" list (importance 3 = VIP or starred/important, 2 = unread, 1 = other) from recent person mail.
+function shapeEmails(em, rules, now) {
+  const r = rules || {};
+  const has = (hay, needles) => (needles || []).some((n) => hay.includes(n));
+  const vip = (x) => has(String(x.from || "").toLowerCase(), r.vipSenders);
+  const keep = (x, isNeed) => {
+    if (vip(x)) return true;
+    if (has(String(x.from || x.to || "").toLowerCase(), r.hideSenders) || has(String(x.subject || "").toLowerCase(), r.hideSubjects)) return false;
+    if (isNeed && r.needAnswerMaxDays != null && x.ageDays > r.needAnswerMaxDays) return false;
+    return true;
+  };
+  const out = Object.assign({}, em, { needAnswer: (em.needAnswer || []).filter((x) => keep(x, true)), sentNoReply: (em.sentNoReply || []).filter((x) => keep(x, false)) });
+  const topDays = r.topDays || 2, topMax = r.topMax || 8;
+  out.top = out.needAnswer.filter((x) => x.ageDays <= topDays).map((x) => ({
+    id: x.id, account: x.account, from: x.from, subject: x.subject,
+    at: Number.isFinite(x.at) ? x.at : now - x.ageDays * DAY,
+    importance: vip(x) || x.important ? 3 : x.unread ? 2 : 1,
+  })).sort((a, b) => b.importance - a.importance || b.at - a.at).slice(0, topMax);
+  return out;
+}
+
+module.exports = { loadMailFeed, mergeEmails, loadRules, shapeEmails, DEFAULT_FILE, normId };
