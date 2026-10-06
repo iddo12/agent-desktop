@@ -112,7 +112,7 @@
       const name = state.agentName ? ` (${state.agentName})` : "";
       progressEl.textContent = `Agents ready: ${state.done} of ${state.total}${name}`;
     } else {
-      // The first sweep waits ~10 s after launch before it lists the agents.
+      // The first sweep waits a few seconds after launch before it lists the agents (main.js STARTUP_SWEEP_DELAY_MS).
       progressEl.textContent = "Getting ready to check the agents...";
     }
   }

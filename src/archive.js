@@ -210,6 +210,66 @@ function extractLessons(md) {
 function getLiveTranscriptBlocks(sessionCwd) {
   return memoByFiles("blocks:" + sessionCwd, findJsonlFiles(sessionCwd), () => computeLiveTranscriptBlocks(sessionCwd));
 }
+
+// --- Tail-ranked file selection (v1.76.0) ------------------------------------
+// Measured 2026-10-06: the three live readers below (blocks, activity, usage)
+// each parsed EVERY .jsonl in an agent's folder in full on their first call
+// after launch - 563 files, 2.2 GB, ~52 s of main-thread time across the 22
+// agents, all of it inside the first minute (the 10 s overview poll and the
+// auto-handoff sweep ask for every agent). Yet the newest file per agent is
+// 0.25-6 MB (30 MB in all): every reader only ever needs the newest one or
+// two files, and the old files were parsed purely to learn they are old.
+//
+// tailLatestTs() answers "newest timestamp in this file" from its last 64 KB
+// (growing x8 when the tail holds no timestamped line, e.g. only custom-title /
+// agent-name records appended by setConversationTitle, up to a full read), and
+// is memoised per (path, size, inode). Transcripts are append-only and written
+// in time order, so the tail holds the file's maximum timestamp; the readers
+// rank files by it and parse only the ones they need. The full forward parse of
+// the chosen files is unchanged, so their output is byte-identical to before
+// (checked on all 22 real agent folders: tools/compare-archive-readers.js).
+const TAIL_TS_BYTES = 64 * 1024;
+const tailTsCache = new Map(); // path -> { size, ino, ts }
+function tailLatestTs(jsonlPath) {
+  let st;
+  try { st = fs.statSync(jsonlPath); } catch (e) { return null; }
+  const hit = tailTsCache.get(jsonlPath);
+  if (hit && hit.size === st.size && hit.ino === st.ino) return hit;
+  let ts = -Infinity;
+  let fd;
+  try {
+    fd = fs.openSync(jsonlPath, "r");
+    for (let bytes = TAIL_TS_BYTES; ; bytes *= 8) {
+      const start = Math.max(0, st.size - bytes);
+      const buf = Buffer.alloc(st.size - start);
+      const n = fs.readSync(fd, buf, 0, buf.length, start);
+      const lines = buf.subarray(0, n).toString("utf-8").split("\n");
+      // The first line of a mid-file window is almost always cut: skip it (the next bigger window covers it).
+      for (let i = start > 0 ? 1 : 0; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        let obj;
+        try { obj = JSON.parse(lines[i]); } catch (e) { continue; }
+        if (!obj.timestamp) continue;
+        const t = new Date(obj.timestamp).getTime();
+        if (t > ts) ts = t;
+      }
+      if (ts > -Infinity || start === 0) break;
+    }
+  } catch (e) {
+    /* unreadable: ranks last */
+  } finally {
+    if (fd != null) try { fs.closeSync(fd); } catch (e) {}
+  }
+  const rec = { size: st.size, ino: st.ino, ts };
+  tailTsCache.set(jsonlPath, rec);
+  return rec;
+}
+// Files of a session folder, newest first by tail timestamp (ties keep readdir order). Unreadable files rank last.
+function rankFilesByTail(paths) {
+  const ranked = paths.map((jsonlPath, i) => ({ jsonlPath, i, ts: (tailLatestTs(jsonlPath) || { ts: -Infinity }).ts }));
+  ranked.sort((x, y) => (x.ts === y.ts ? x.i - y.i : y.ts > x.ts ? 1 : -1));
+  return ranked;
+}
 // 2026-10-02: incremental + slim. Used to re-read and re-parse EVERY transcript in the folder
 // (old 16 MB sessions included) on each change to the live one, on the main thread, every few
 // seconds while an agent works. Now each file keeps a byte offset and its newest timestamp; only
@@ -299,28 +359,24 @@ function advanceLiveFile(jsonlPath, cur) {
   }
 }
 function computeLiveTranscriptBlocks(sessionCwd) {
-  const paths = findJsonlFiles(sessionCwd);
-  const states = [];
-  for (const jsonlPath of paths) {
-    let cur = liveFileState.get(jsonlPath);
-    if (!cur) { cur = { offset: 0, carryBuf: null, latestTs: -Infinity, entries: [] }; liveFileState.set(jsonlPath, cur); }
-    advanceLiveFile(jsonlPath, cur);
-    states.push({ jsonlPath, cur });
-  }
+  // v1.76.0: rank by tail timestamp first (see tailLatestTs); only the two newest files are ever
+  // parsed. Before, every file in the folder was parsed in full once per launch just to be ranked.
   // Only the two newest files can ever be shown (current + one hop back after a handoff reset).
-  const ranked = states.slice().sort((x, y) => y.cur.latestTs - x.cur.latestTs);
-  const keep = new Set(ranked.slice(0, 2));
+  const ranked = rankFilesByTail(findJsonlFiles(sessionCwd));
   const files = [];
-  for (const st of ranked) {
-    if (keep.has(st)) {
-      if (!st.cur.entries) {
+  for (let i = 0; i < ranked.length; i++) {
+    const { jsonlPath } = ranked[i];
+    let cur = liveFileState.get(jsonlPath);
+    if (i < 2) {
+      if (!cur) { cur = { offset: 0, carryBuf: null, latestTs: -Infinity, entries: [] }; liveFileState.set(jsonlPath, cur); }
+      if (!cur.entries) {
         // fell back into the top two after being dropped: rebuild once from the start
-        st.cur.entries = []; st.cur.offset = 0; st.cur.carryBuf = null; st.cur.latestTs = -Infinity;
-        advanceLiveFile(st.jsonlPath, st.cur);
+        cur.entries = []; cur.offset = 0; cur.carryBuf = null; cur.latestTs = -Infinity;
       }
-      files.push({ entries: st.cur.entries, latestTs: st.cur.latestTs });
-    } else if (st.cur.entries) {
-      st.cur.entries = null; // free memory; offset/latestTs kept so it costs nothing while unchanged
+      advanceLiveFile(jsonlPath, cur);
+      files.push({ entries: cur.entries, latestTs: cur.latestTs });
+    } else if (cur && cur.entries) {
+      cur.entries = null; // free memory; offset/latestTs kept so it costs nothing while unchanged
     }
   }
   // Most-recently-active file first, so files[0] is the one being written to
@@ -532,11 +588,15 @@ function readActivityFile(jsonlPath) {
 }
 
 function readActivitySummary(sessionCwd) {
+  // v1.76.0: the summary comes from the single newest file (the one with the latest timestamp), so
+  // rank by tail timestamp and parse files newest-first, stopping as soon as the parsed file's own
+  // latest timestamp is at least every remaining file's tail timestamp (their upper bound). In
+  // practice that is one file; before, every file in the folder was parsed in full.
   let best = null;
-  const live = new Set();
-  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
-    live.add(jsonlPath);
-    const st = readActivityFile(jsonlPath);
+  const ranked = rankFilesByTail(findJsonlFiles(sessionCwd));
+  for (let i = 0; i < ranked.length; i++) {
+    if (best && best.latestTs > -Infinity && !(ranked[i].ts > best.latestTs)) break;
+    const st = readActivityFile(ranked[i].jsonlPath);
     if (st && st.latestTs > (best ? best.latestTs : -Infinity)) best = st;
   }
   if (!best) return { lastHumanTs: null, lastEndTurnTs: null, last: null, lastSessionId: null };
@@ -831,10 +891,18 @@ function readUsageFile(jsonlPath) {
 }
 
 function computeLatestUsage(sessionCwd) {
+  // v1.76.0: newest-first by tail timestamp; a file can only hold a newer usage entry than the one
+  // found so far if its tail timestamp (its newest line of any kind) is newer, so the walk stops there.
+  // Normally that is the newest file alone; before, every file in the folder was parsed in full.
   let latestUsage = null;
-  for (const jsonlPath of findJsonlFiles(sessionCwd)) {
+  let latestMs = -Infinity;
+  for (const { jsonlPath, ts } of rankFilesByTail(findJsonlFiles(sessionCwd))) {
+    if (latestUsage && !(ts > latestMs)) break;
     const u = readUsageFile(jsonlPath);
-    if (u && (!latestUsage || new Date(u.timestamp) > new Date(latestUsage.timestamp))) latestUsage = u;
+    if (u) {
+      const ms = new Date(u.timestamp).getTime();
+      if (!latestUsage || ms > latestMs) { latestUsage = u; latestMs = ms; }
+    }
   }
   return latestUsage;
 }
@@ -1194,6 +1262,42 @@ function getLegacyRateLimits() {
 // from scratch. Only complete lines are consumed, so a half-written last
 // line is picked up on the next call.
 const usageFileCache = new Map();
+// v1.76.0: the per-file records survive a restart. Cold, this scan read every transcript of every
+// project on the machine (3+ GB, 21 s measured on 2026-10-06) on the main thread, on the first usage
+// refresh after launch. With the records saved to disk (main.js hands the file in, the scan runs in a
+// worker thread) a restart only reads what was appended since. A record is reused only for the same
+// inode with at least `offset` bytes still there; anything else is rescanned from zero, as before.
+let usageFileCacheDirty = false;
+function loadUsageFileCache(file) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(file, "utf-8"));
+    if (!doc || doc.version !== 1 || !Array.isArray(doc.files)) return 0;
+    let n = 0;
+    for (const f of doc.files) {
+      if (!f || typeof f.path !== "string" || !Number.isFinite(f.offset)) continue;
+      usageFileCache.set(f.path, {
+        offset: f.offset, ino: f.ino, humanTs: Array.isArray(f.humanTs) ? f.humanTs : [],
+        dayCounts: new Map(Array.isArray(f.dayCounts) ? f.dayCounts : []), earliestMs: f.earliestMs == null ? null : f.earliestMs,
+        maxTokens: f.maxTokens || 0, latestTokens: f.latestTokens || null,
+      });
+      n++;
+    }
+    return n;
+  } catch (e) {
+    return 0; // no cache yet, or unreadable: scan from scratch, exactly as before
+  }
+}
+function saveUsageFileCache(file) {
+  const files = [];
+  for (const [p, r] of usageFileCache) {
+    files.push({ path: p, offset: r.offset, ino: r.ino, humanTs: r.humanTs, dayCounts: [...r.dayCounts], earliestMs: r.earliestMs, maxTokens: r.maxTokens, latestTokens: r.latestTokens });
+  }
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), files }), "utf-8");
+  fs.renameSync(tmp, file);
+  usageFileCacheDirty = false;
+}
+function isUsageFileCacheDirty() { return usageFileCacheDirty; }
 function updateUsageFileRecord(filePath) {
   let st;
   try {
@@ -1202,11 +1306,12 @@ function updateUsageFileRecord(filePath) {
     return null;
   }
   let rec = usageFileCache.get(filePath);
-  if (!rec || st.size < rec.offset) {
-    rec = { offset: 0, humanTs: [], dayCounts: new Map(), earliestMs: null, maxTokens: 0, latestTokens: null };
+  if (!rec || st.size < rec.offset || (rec.ino !== undefined && st.ino !== rec.ino)) {
+    rec = { offset: 0, ino: st.ino, humanTs: [], dayCounts: new Map(), earliestMs: null, maxTokens: 0, latestTokens: null };
     usageFileCache.set(filePath, rec);
   }
   if (st.size === rec.offset) return rec;
+  usageFileCacheDirty = true;
   let text;
   try {
     const fd = fs.openSync(filePath, "r");
@@ -1673,10 +1778,17 @@ module.exports = {
   getSessionActivity,
   getLatestTranscriptMtimeMs,
   getLatestTranscriptSizeBytes,
+  loadUsageFileCache,
+  saveUsageFileCache,
+  isUsageFileCacheDirty,
   __readActivitySummaryForTest: readActivitySummary,
   __computeLatestUsageForTest: computeLatestUsage,
   __computeLiveBlocksForTest: computeLiveTranscriptBlocks,
   __blocksFromEntriesForTest: blocksFromEntries,
+  __tailLatestTsForTest: tailLatestTs,
+  __rankFilesByTailForTest: rankFilesByTail,
+  __readActivityFileForTest: readActivityFile,
+  __readUsageFileForTest: readUsageFile,
   getHaltInfo,
   getConfirmedRateLimits,
   extractLessons,

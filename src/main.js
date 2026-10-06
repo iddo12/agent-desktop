@@ -884,7 +884,39 @@ function maybeMarkStartupReady() {
   if (startupState.ready || !startupState.sweepDone || !startupState.rendererLoaded) return;
   startupState.ready = true;
   startupState.readyAt = Date.now();
+  logStuckWatchdog(`startup: ready (overlay released) after ${Math.round((Date.now() - APP_START_MS) / 1000)}s`);
   sendStartup("startup-ready", startupSnapshot());
+}
+
+// v1.76.0 startup timeline + main-thread stall monitor. Every launch writes a
+// few "startup:" lines to the watchdog log (window shown, renderer loaded,
+// first agent list / chat transcript answered, ready) so a slow start can be
+// read off the log instead of guessed at, and for the first two minutes a
+// 100 ms timer measures how late it fires: the sum of lateness over 50 ms is
+// time the main thread spent blocked (synchronous file parsing, spawns), which
+// is what makes clicks and IPC wait. One summary line at the end; ~0 cost.
+const STARTUP_SWEEP_DELAY_MS = 4000;
+const startupMarksSeen = new Set();
+function startupMark(name) {
+  if (startupMarksSeen.has(name)) return;
+  startupMarksSeen.add(name);
+  logStuckWatchdog(`startup: ${name} at +${((Date.now() - APP_START_MS) / 1000).toFixed(1)}s`);
+}
+function startMainThreadStallMonitor() {
+  const TICK = 100, WINDOW_MS = 120000, THRESHOLD = 50;
+  let last = Date.now();
+  let blocked = 0, worst = 0, stalls = 0;
+  const t = setInterval(() => {
+    const now = Date.now();
+    const late = now - last - TICK;
+    last = now;
+    if (late > THRESHOLD) { blocked += late; stalls++; if (late > worst) worst = late; }
+    if (now - APP_START_MS >= WINDOW_MS) {
+      clearInterval(t);
+      logStuckWatchdog(`startup: main thread blocked ${(blocked / 1000).toFixed(1)}s in the first ${WINDOW_MS / 1000}s (${stalls} stalls over ${THRESHOLD} ms, worst ${worst} ms)`);
+    }
+  }, TICK);
+  t.unref();
 }
 
 // Called once, when the first sweep returns (however it returns). `measured`
@@ -955,7 +987,9 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
-  if (testMode.TEST_MODE) mainWindow.once("ready-to-show", () => { try { mainWindow.showInactive(); } catch (e) {} });
+  // v1.76.0: AGENT_DESKTOP_HIDDEN=1 (sandbox only) keeps the window unshown so a measurement run never
+  // touches the screen; backgroundThrottling is already off, so timers run as if visible.
+  if (testMode.TEST_MODE && process.env.AGENT_DESKTOP_HIDDEN !== "1") mainWindow.once("ready-to-show", () => { try { mainWindow.showInactive(); } catch (e) {} });
   // index.html carries its own <title>, and Electron lets a page's title win
   // over the BrowserWindow `title` option - which is why the first sandbox
   // launch still read "Agent Desktop" despite setting it above. Refusing the
@@ -1011,9 +1045,11 @@ function createWindow() {
   // Second half of the startup "ready" condition (see startupState). Fires on
   // every load, including a renderer reload - harmless after the first.
   mainWindow.webContents.on("did-finish-load", () => {
+    startupMark("renderer loaded");
     startupState.rendererLoaded = true;
     maybeMarkStartupReady();
   });
+  mainWindow.once("show", () => startupMark("window shown"));
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
@@ -1108,7 +1144,10 @@ if (!gotSingleInstanceLock) {
     // thrown) marks the sweep half of "ready". A throw is logged and still
     // counts as done - the overlay must never wait on a sweep that has ended.
     // A sandbox whose sweep will be skipped anyway is ready at once rather
-    // than after the 10 s settle delay below.
+    // than after the settle delay below.
+    // v1.76.0: the delay is 4 s, not 10 - the window and renderer are up in
+    // ~2 s and the reaper no longer blocks the main thread; the sweep itself
+    // now takes seconds, not a minute, so the countdown is short.
     if (!testMode.liveAgentsPermitted()) markStartupSweepDone(false);
     // v1.66.1: the startup overlay never waits longer than 90 s for the sweep (a CPU hold can queue starts for
     // up to 15 min; the sweep carries on in the background, the overlay is released with a log line).
@@ -1123,7 +1162,8 @@ if (!gotSingleInstanceLock) {
           logStuckWatchdog(`ensureAllAgentsBackgrounded startup error: ${e.message}`);
           markStartupSweepDone(false);
         });
-    }, 10000);
+    }, STARTUP_SWEEP_DELAY_MS);
+    startMainThreadStallMonitor();
     setInterval(() => {
       ensureAllAgentsBackgrounded().catch((e) => logStuckWatchdog(`ensureAllAgentsBackgrounded interval error: ${e.message}`));
     }, ENSURE_AGENTS_ALIVE_INTERVAL_MS);
@@ -1212,7 +1252,7 @@ process.on("unhandledRejection", (reason) => {
 
 // ---------------------------------------------------------------- agents --
 
-ipcMain.handle("list-agents", () => listAgents());
+ipcMain.handle("list-agents", () => { startupMark("first agent list answered"); return listAgents(); });
 
 // Sidebar groups ("folders"). Visual-only - see src/groups.js for the full
 // contract. The renderer sends the whole document back on every change
@@ -2421,6 +2461,7 @@ async function ensureAllAgentsBackgroundedImpl(progress) {
   }
   for (let i = 0; i < toCheck.length; i++) {
     const agent = toCheck[i];
+    let dispatchedThisAgent = false;
     try {
       const sessionCwd = sessionCwdFor(agent.path);
       let alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd);
@@ -2436,6 +2477,7 @@ async function ensureAllAgentsBackgroundedImpl(progress) {
         // prompt is caught as it is drawn), is logged by the catch below and
         // still counts as processed for the startup countdown.
         dispatchBudget--;
+        dispatchedThisAgent = true;
         const id = await dispatchBackgroundAgent(shell, spawnEnv, sessionCwd);
         logStuckWatchdog(`ensureAllAgentsBackgrounded: dispatched ${agent.folderName} -> ${id}`);
         alive = await findAliveBackgroundAgent(shell, spawnEnv, sessionCwd, { fresh: true }); // re-fetch for its full sessionId, below
@@ -2470,7 +2512,12 @@ async function ensureAllAgentsBackgroundedImpl(progress) {
     // The stagger only separates one agent's CLI launch from the next, so
     // there is nothing to wait for after the last one (it used to add a dead
     // 2 s to every sweep, which the startup countdown would now show).
-    if (i < toCheck.length - 1) await new Promise((resolve) => setTimeout(resolve, ENSURE_AGENTS_ALIVE_STAGGER_MS));
+    // v1.76.0: and nothing to wait for after an agent that was merely found
+    // alive - no CLI process was launched for it. The sweep used to sleep 2 s
+    // after every one of the 22 agents (42 s of the 78 s startup countdown
+    // was this sleep, measured 2026-10-06); dispatches are still spaced, and
+    // the start limiter (4 s apart, max 3 in flight) paces them as well.
+    if (i < toCheck.length - 1 && dispatchedThisAgent) await new Promise((resolve) => setTimeout(resolve, ENSURE_AGENTS_ALIVE_STAGGER_MS));
   }
   return { measured: true };
 }
@@ -2685,28 +2732,37 @@ async function stopBackgroundAgentForCwd(sessionCwd) {
 // Get-CimInstance's first-use module load writes a "Preparing modules..."
 // progress record that PowerShell serializes as CLIXML onto the output
 // stream when invoked non-interactively like this, corrupting the JSON.
-function runPowerShellJson(script) {
+// execFile (argument array, no shell) rather than exec (shell string) - the
+// -EncodedCommand payload is base64 so it can't contain shell metacharacters
+// either way, but this avoids a shell entirely rather than relying on that
+// being true forever.
+// v1.76.0: asynchronous (was execFileSync). The only caller (the orphan reaper)
+// runs at startup, right after the window is created, and the synchronous call
+// blocked the main thread for ~1.4 s (measured 2026-10-06) while the renderer's
+// first IPC requests waited behind it.
+function runPowerShellJsonAsync(script) {
   const wrapped = `$ProgressPreference='SilentlyContinue'; ${script}`;
   const encoded = Buffer.from(wrapped, "utf16le").toString("base64");
-  // execFileSync (argument array, no shell) rather than execSync (shell
-  // string) - the -EncodedCommand payload is base64 so it can't contain
-  // shell metacharacters either way, but this avoids a shell entirely
-  // rather than relying on that being true forever.
-  const out = execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
-    encoding: "utf-8",
-    maxBuffer: 20 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "ignore"],
+  return new Promise((resolve, reject) => {
+    execFile("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+      encoding: "utf-8",
+      maxBuffer: 20 * 1024 * 1024,
+      windowsHide: true,
+      timeout: 60000,
+    }, (err, out) => {
+      if (err) return reject(err);
+      try {
+        const parsed = String(out).trim() ? JSON.parse(String(out)) : [];
+        resolve(Array.isArray(parsed) ? parsed : [parsed]);
+      } catch (e) {
+        reject(e);
+      }
+    });
   });
-  const parsed = out.trim() ? JSON.parse(out) : [];
-  return Array.isArray(parsed) ? parsed : [parsed];
 }
-
 function listClaudeProcessesWindows() {
-  try {
-    return runPowerShellJson("Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress");
-  } catch (e) {
-    return [];
-  }
+  return runPowerShellJsonAsync("Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress")
+    .catch(() => []);
 }
 
 // process.kill(pid, 0) throws ESRCH if the pid is gone, but throws EPERM
@@ -2738,7 +2794,7 @@ async function reapOrphanedBackgroundAgentProcesses() {
   // real agents. There is deliberately no env var to turn this back on.
   if (!testMode.processReapingPermitted()) return;
   try {
-    const procs = listClaudeProcessesWindows();
+    const procs = await listClaudeProcessesWindows();
     const pidsPresent = new Set(procs.map((p) => p.ProcessId));
     const ptyHosts = procs.filter((p) => (p.CommandLine || "").includes("--bg-pty-host"));
     if (ptyHosts.length === 0) return;
@@ -4313,6 +4369,7 @@ ipcMain.handle("get-context-usage", (event, { agentPath }) => getLatestUsage(ses
 const lastLiveSent = new Map(); // agentPath -> last blocks array handed to the renderer
 ipcMain.handle("get-live-transcript", (event, { agentPath, ifChanged }) => {
   const blocks = getLiveTranscriptBlocks(sessionCwdFor(agentPath));
+  startupMark("first chat transcript answered");
   if (ifChanged && lastLiveSent.get(agentPath) === blocks) return { unchanged: true };
   lastLiveSent.set(agentPath, blocks);
   return blocks;
@@ -4502,7 +4559,60 @@ ipcMain.handle("open-local-pdf", (event, { filePath } = {}) =>
 ipcMain.handle("approve-telegram-tasks", (event, { ids }) =>
   overview.approveTelegramTasks(ids, path.join(AGENTS_ROOT, "Security", "Tools", "TelegramBridge")));
 
-ipcMain.handle("get-usage-windows", () => getUsageWindows());
+// v1.76.0: the account-wide usage scan runs in a worker thread (src/usageWorker.js) with its per-file
+// records persisted in userData, so a launch no longer blocks the main thread for ~21 s on the first
+// usage refresh. If the worker cannot start, the old main-thread call is used.
+const USAGE_SCAN_CACHE_PATH = path.join(app.getPath("userData"), "usage-scan-cache.json");
+let usageWorker = null;
+let usageWorkerBroken = false;
+let usageReqSeq = 0;
+const usagePending = new Map(); // id -> { resolve, reject }
+function failUsagePending(err) {
+  for (const [, p] of usagePending) p.reject(err);
+  usagePending.clear();
+}
+function getUsageWindowsOffThread() {
+  if (usageWorkerBroken) return Promise.resolve(getUsageWindows());
+  try {
+    if (!usageWorker) {
+      const { Worker } = require("worker_threads");
+      usageWorker = new Worker(path.join(__dirname, "usageWorker.js"), { workerData: { cacheFile: USAGE_SCAN_CACHE_PATH } });
+      usageWorker.on("message", (m) => {
+        const p = m && usagePending.get(m.id);
+        if (!p) return;
+        usagePending.delete(m.id);
+        if (m.id === 1) logStuckWatchdog(`startup: first usage scan answered by the worker in ${m.ms} ms (${m.loaded} file records restored from the cache)`);
+        if (m.error) p.reject(new Error(m.error));
+        else p.resolve(m.result);
+      });
+      usageWorker.on("error", (e) => {
+        logStuckWatchdog(`usage worker error: ${e && e.message}`);
+        usageWorkerBroken = true; // main-thread fallback from now on
+        failUsagePending(e);
+        usageWorker = null;
+      });
+      usageWorker.on("exit", (code) => {
+        if (code !== 0) logStuckWatchdog(`usage worker exited with code ${code}`);
+        failUsagePending(new Error("usage worker exited"));
+        usageWorker = null;
+      });
+      usageWorker.unref();
+    }
+    const id = ++usageReqSeq;
+    return new Promise((resolve, reject) => {
+      usagePending.set(id, { resolve, reject });
+      usageWorker.postMessage({ type: "get-usage-windows", id });
+    }).catch((e) => {
+      logStuckWatchdog(`usage worker request failed (${e && e.message}) - answered on the main thread`);
+      return getUsageWindows();
+    });
+  } catch (e) {
+    logStuckWatchdog(`usage worker could not start: ${e && e.message} - main-thread scan`);
+    usageWorkerBroken = true;
+    return Promise.resolve(getUsageWindows());
+  }
+}
+ipcMain.handle("get-usage-windows", () => getUsageWindowsOffThread());
 
 // 2026-09-20: renderer.js's PLAN_FIVE_HOUR_ESTIMATES fallback (used only
 // when Anthropic's own confirmed rate_limits figure isn't available yet)
