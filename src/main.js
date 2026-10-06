@@ -2542,6 +2542,8 @@ async function ensureAllAgentsBackgroundedImpl(progress) {
 // fully synchronous-filesystem: no CLI process, no transcript parsing, one
 // stat per quiet agent per pass (see repinAgentName()'s own comments).
 const REPIN_AGENT_NAMES_INTERVAL_MS = 60 * 1000;
+const REPIN_LOG_EVERY_MS = 60 * 60 * 1000;
+const repinLogThrottle = require("./logThrottle").createLogThrottle(REPIN_LOG_EVERY_MS);
 function repinAllAgentNames() {
   let agents;
   try {
@@ -2556,11 +2558,16 @@ function repinAllAgentNames() {
       if (result) {
         // result.from is null when the tail held no agent-name at all (a fresh
         // conversation, or one whose naming records predate the tail window).
-        logStuckWatchdog(
-          result.from === null
-            ? `repinAgentNames: ${agent.folderName} pinned (no prior name in transcript tail)`
-            : `repinAgentNames: ${agent.folderName} renamed back from "${result.from}"`
-        );
+        // v1.77.3: 48% of the watchdog log was this line (300-860/day). The rename still happens every time; it is LOGGED
+        // only the first time per agent per hour, with a count of the ones skipped since.
+        const rl = repinLogThrottle.check(agent.folderName);
+        if (rl.log) {
+          logStuckWatchdog(
+            (result.from === null
+              ? `repinAgentNames: ${agent.folderName} pinned (no prior name in transcript tail)`
+              : `repinAgentNames: ${agent.folderName} renamed back from "${result.from}"`) + (rl.skipped ? ` (+${rl.skipped} more renames since the last log line)` : "")
+          );
+        }
       }
     } catch (e) {
       logStuckWatchdog(`repinAgentNames: ${agent.folderName} failed: ${e.message}`);

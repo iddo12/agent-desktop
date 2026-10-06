@@ -592,8 +592,18 @@
     }
     applyAgentStates();
     updateCount();
-    render();
+    renderIfOpen();
   }
+
+  // v1.77.3: the panel DOM is rebuilt every 10 s only when the panel is open; while it is closed the data is kept and the
+  // panel is rendered from it the moment it opens (observer below), so nothing shown is ever older than the last poll.
+  let panelDirty = false;
+  function renderIfOpen() {
+    if (document.body.classList.contains("xp-panel-open")) { panelDirty = false; render(); }
+    else panelDirty = true;
+  }
+  new MutationObserver(() => { if (panelDirty && document.body.classList.contains("xp-panel-open")) renderIfOpen(); })
+    .observe(document.body, { attributes: true, attributeFilter: ["class"] });
 
   let lastActive = null;
   function apply() {
@@ -603,7 +613,7 @@
     try { buildLegend(); } catch (e) { console.error("[header-tasks] legend", e); }
     // Agent switch: re-render from the data already in hand, no extra IPC.
     const cur = typeof activeAgentPath === "undefined" ? null : activeAgentPath;
-    if (cur !== lastActive) { lastActive = cur; updateCount(); render(); }
+    if (cur !== lastActive) { lastActive = cur; updateCount(); renderIfOpen(); }
   }
 
   // The chat header and the sidebar are rebuilt on agent selection and every
@@ -629,5 +639,7 @@
     if (el) mo.observe(el, { childList: true, subtree: true });
   }
   refresh();
-  setInterval(refresh, POLL_MS);
+  // v1.77.3: skipped while the window is hidden/minimized (it costs main-thread time for nobody); one refresh when shown again
+  setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 })();
