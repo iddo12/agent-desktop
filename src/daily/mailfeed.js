@@ -93,9 +93,32 @@ function loadRules(file) {
     return { hideSenders: list(r.hideSenders), hideSubjects: list(r.hideSubjects), vipSenders: list(r.vipSenders),
       needAnswerMaxDays: Number.isFinite(Number(r.needAnswerMaxDays)) ? Math.max(1, Math.min(90, Number(r.needAnswerMaxDays))) : null,
       topDays: Number.isFinite(Number(r.topDays)) ? Math.max(1, Math.min(14, Number(r.topDays))) : null,
+      keepSubjects: list(r.keepSubjects), keepSenders: list(r.keepSenders), ownDomains: Array.isArray(r.ownDomains) ? list(r.ownDomains) : null,
+      relevance: r.relevance === "all" ? "all" : "people",
       topMax: Number.isFinite(Number(r.topMax)) ? Math.max(1, Math.min(20, Number(r.topMax))) : null };
   } catch (e) { return {}; }
 }
+// 2026-10-06 (Iddo: "I mostly see spam or irrelevant automatic mail"): by default "needs an answer" now shows only mail that looks like it
+// comes from a PERSON (display name + a personal-looking address, not a role/robot mailbox, not your own sites' system mail), or that Gmail itself
+// marked Important/Starred, or that your rules say to keep (vipSenders, keepSenders, keepSubjects). Set "relevance":"all" in mail_rules.json to see everything.
+const ROLE_LOCAL = /^(info|contact|support|sales|admin|administrator|hello|hi|team|office|help|service|services|billing|accounts?|orders?|news|newsletter|updates?|alerts?|notifications?|notify|no[-_]?reply|do[-_]?not[-_]?reply|mailer|marketing|promo|offers?|deals?|ae-|bounce|system|wordpress|webmaster|postmaster)([._-]|\d|$)/i;
+const OWN_DOMAINS = ["lensvid.com", "megapixel.co.il", "veggiez.co.il", "shooteat.co.il"];
+function addrParts(from) {
+  const m = /^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(String(from || ""));
+  const addr = (m ? m[2] : String(from || "")).trim().toLowerCase();
+  const name = m ? m[1].trim() : "";
+  const at = addr.lastIndexOf("@");
+  return { name, local: at > 0 ? addr.slice(0, at) : addr, domain: at > 0 ? addr.slice(at + 1) : "" };
+}
+function personLike(x, own) {
+  const p = addrParts(x.from);
+  if (!p.local || !p.domain) return false;
+  if (ROLE_LOCAL.test(p.local)) return false;
+  if ((own || OWN_DOMAINS).some((d) => p.domain === d || p.domain.endsWith("." + d))) return false;
+  if (/^(deals|selection|mail|email|e|news|em|bounce|notify|notifications|mailer|marketing|send|smtp)\./i.test(p.domain)) return false;   // bulk-sending subdomains
+  return true;
+}
+
 // Apply rules and build the "Top emails today" list (importance 3 = VIP or starred/important, 2 = unread, 1 = other) from recent person mail.
 function shapeEmails(em, rules, now) {
   const r = rules || {};
@@ -103,6 +126,8 @@ function shapeEmails(em, rules, now) {
   const vip = (x) => has(String(x.from || "").toLowerCase(), r.vipSenders);
   const keep = (x, isNeed) => {
     if (vip(x)) return true;
+    if (has(String(x.from || "").toLowerCase(), r.keepSenders) || has(String(x.subject || "").toLowerCase(), r.keepSubjects)) return true;
+    if (isNeed && r.relevance !== "all" && !x.important && !personLike(x, r.ownDomains)) return false;
     if (has(String(x.from || x.to || "").toLowerCase(), r.hideSenders) || has(String(x.subject || "").toLowerCase(), r.hideSubjects)) return false;
     if (isNeed && r.needAnswerMaxDays != null && x.ageDays > r.needAnswerMaxDays) return false;
     return true;

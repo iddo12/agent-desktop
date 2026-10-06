@@ -66,6 +66,15 @@ t("shapeEmails: rules hide / VIP keep, newest-first top list ranked by importanc
   assert.strictEqual(loadRules(f).needAnswerMaxDays, 90);
   assert.deepStrictEqual(loadRules(path.join(tmp, "none.json")), {});
 });
+t("people-first relevance: persons and Gmail-important stay, robots/own-site/no_reply banks go, keep rules rescue", () => {
+  const { shapeEmails } = require("../src/daily/mailfeed");
+  const mk = (id, from, o) => Object.assign({ id, from, subject: "s", ageDays: 1, at: NOW }, o || {});
+  const em = { needAnswer: [mk("1", "Yosi <yosi@sfo.co.il>"), mk("2", "AliExpress <ae-ai-notify23@selection.aliexpress.com>"), mk("3", "Lensvid <contact@lensvid.com>"),
+    mk("4", "\"Bank\" <No_Reply_Discount@bank.co.il>"), mk("5", "Vania <v@videndum.com>", { important: true }), mk("7", "GreenGeeks <support@greengeeks.com>", { subject: "[#PDB-1] Please unblock" })], sentNoReply: [] };
+  assert.deepStrictEqual(shapeEmails(em, {}, NOW).needAnswer.map((x) => x.id), ["1", "5"]);
+  assert.deepStrictEqual(shapeEmails(em, { keepSubjects: ["please unblock"] }, NOW).needAnswer.map((x) => x.id), ["1", "5", "7"]);
+  assert.strictEqual(shapeEmails(em, { relevance: "all" }, NOW).needAnswer.length, 6);
+});
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fails ? `${fails} of ${n} FAILED` : `mailfeed: ${n} tests passed`);
 process.exit(fails ? 1 : 0);
