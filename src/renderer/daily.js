@@ -227,6 +227,59 @@
     return el("div", "daily-banner", `${emailTxt} ${calTxt}`);
   }
 
+  // ---------------------------------------------------------------- tabs
+  function tabCounts() {
+    const s = payload && payload.summary;
+    if (!s) return {};
+    return {
+      emails: [s.emailsAttention, "blue", `${s.emailsAttention} need attention${s.sentOldest || s.emailsNeedOldest ? " - " + sub(s.emailsNeedOldest) : ""}`],
+      tasks: [s.tasksOpen, "", `${s.tasksOpen} open - ${sub(s.tasksOldest)}`],
+      shopping: [s.shopLists, "", `${s.shopLists} list${s.shopLists === 1 ? "" : "s"}${s.shopOldest ? " - oldest item " + s.shopOldest.days + "d" : ""}`],
+      dates: [s.datesCount, "", s.datesNext ? `next in ${s.datesNext.inDays}d` : ""],
+    };
+  }
+  // Layout follows the width of the My Daily view itself (not the window): full tab bar, "More" menu, or sideways-scrolling tabs.
+  let layout = "full";
+  function computeLayout() { const w = view.clientWidth || 1000; return w >= 770 ? "full" : w >= 540 ? "more" : "narrow"; }
+  function renderTabs() {
+    tabsEl.replaceChildren();
+    const counts = tabCounts();
+    const hidden = layout === "more" ? ["dates"] : [];
+    for (const [id, label] of TABS) {
+      if (hidden.includes(id)) continue;
+      const b = el("button", "daily-tab" + (!showSettings && tab === id ? " on" : ""));
+      b.type = "button";
+      b.append(el("span", null, label));
+      const c = counts[id];
+      if (c && c[0]) b.append(num(c[0], c[1], c[2]));
+      b.addEventListener("click", () => { tab = id; showSettings = false; render(); });
+      tabsEl.append(b);
+    }
+    if (hidden.length) {
+      const on = !showSettings && hidden.includes(tab);
+      const mb = el("button", "daily-tab daily-popper" + (on ? " on" : ""));
+      mb.type = "button";
+      mb.append(el("span", null, "More ▾"));
+      const total = hidden.reduce((a, id) => a + ((counts[id] && counts[id][0]) || 0), 0);
+      if (total) mb.append(num(total, "", "Items in the tabs under More"));
+      mb.addEventListener("click", () => openPop(mb, (p) => {
+        for (const id of hidden) {
+          const lab = TABS.find((x) => x[0] === id)[1];
+          const c = counts[id];
+          const it = btn("", "daily-pop-item daily-more-item" + (tab === id && !showSettings ? " on" : ""), () => { closePop(); tab = id; showSettings = false; render(); });
+          it.append(el("span", null, lab));
+          if (c && c[0]) it.append(el("span", "daily-n", String(c[0])));
+          if (c && c[2]) it.append(el("small", "daily-muted", c[2]));
+          p.append(it);
+        }
+        const st = btn("", "daily-pop-item daily-more-item" + (showSettings ? " on" : ""), () => { closePop(); showSettings = true; render(); });
+        st.append(el("span", null, "Settings: calendar sharing & sync"), el("small", "daily-muted", "gear"));
+        p.append(st);
+      }));
+      tabsEl.append(mb);
+    }
+  }
+
   // ---------------------------------------------------------------- Today
   function renderToday() {
     const s = payload.summary, d = payload.data, now = payload.now;
