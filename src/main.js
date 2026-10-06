@@ -4780,6 +4780,26 @@ app.whenReady().then(() => {
   }
 });
 
+// v1.77.4 PHEME delivery: the Stream Deck dictation tool hands its text to the selected agent over a local token-guarded pipe
+// (src/phemeDelivery.js); the renderer sends it through the normal Send path, this side verifies it landed. Isolated like IRIS.
+app.whenReady().then(() => {
+  try {
+    require("./phemeMain").init({
+      ipcMain,
+      app,
+      getMainWindow: () => mainWindow,
+      ptyState: (p) => { const s = ptySessions.get(p); return !s ? "none" : s.starting ? "starting" : s.proc ? "attached" : "none"; },
+      transcriptHas: (p, text, sinceMs) => transcriptTailHasText(p, text, sinceMs),
+      sentLogSince: (p, sinceMs) => (lastSentAt.get(p) || 0) >= sinceMs,
+      log: (line) => logStuckWatchdog(line),
+      testMode: testMode.TEST_MODE,
+    });
+  } catch (e) {
+    console.error("pheme delivery failed to load:", e);
+    try { logStuckWatchdog(`pheme delivery failed to load: ${e.message}`); } catch (e2) {}
+  }
+});
+
 // v1.72.0 My Daily - tasks, schedule, shopping and email overview. No timers; loads on demand (see daily/main-daily.js).
 try {
   require("./daily/main-daily").init({
@@ -4897,9 +4917,11 @@ async function switchConversationImpl(agentPath, { resumeSessionId, newConversat
 // copy existed anywhere to recover it. Every multi-character write to a session is appended here
 // BEFORE it goes to the pty, so a cut message can always be recovered/compared. JSONL, rotated at 5 MB.
 const SENT_LOG_PATH = path.join(app.getPath("userData"), "sent-messages.jsonl");
+const lastSentAt = new Map(); // agentPath -> ms of the last multi-character pty write (v1.77.4: PHEME delivery proof)
 function logSentInput(agentPath, data) {
   try {
     if (typeof data !== "string" || data.length < 2) return; // skip lone "\r" / keystrokes
+    lastSentAt.set(agentPath, Date.now());
     try {
       if (fs.statSync(SENT_LOG_PATH).size > 5 * 1024 * 1024) fs.renameSync(SENT_LOG_PATH, SENT_LOG_PATH + ".old");
     } catch (e) {}

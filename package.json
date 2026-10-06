@@ -1,12 +1,12 @@
 {
   "name": "agent-desktop",
-  "version": "1.77.3",
+  "version": "1.77.4",
   "description": "Standalone desktop app for managing and chatting with local Claude Code agents",
   "main": "src/main.js",
   "private": true,
   "scripts": {
     "start": "electron .",
-    "test": "node tests/testGuard.test.js && node tests/handoffDelivery.test.js && node tests/libraryState.test.js && node tests/startLimiter.test.js && node tests/cpuGuardInstall.test.js && node tests/cpuGuardGlue.test.js && node tests/connectionHealth.test.js && node tests/deliveryScreen.test.js && node tests/noUndef.test.js && node tests/handoffLogic.test.js && node tests/keepGoing.test.js && node tests/keepGoingGlue.test.js && node tests/unsentLedger.test.js && node tests/topbar.test.js && node tests/memoryData.test.js && node tests/daily.test.js && node tests/daily-hardening.test.js && node tests/mailfeed.test.js && node tests/ics.test.js && node tests/calendar.test.js && node tests/gmail.test.js && node tests/dailyRenderer.test.js && node tests/shipments.test.js && node tests/shipments-email.test.js && node tests/shipments-track.test.js && node tests/shipments-renderer.test.js && node tests/agentDocs.test.js && node tools/check-changelog.js && node tests/keepGoingAttach.test.js && node tests/archiveTailRank.test.js && node tests/approvalScan.test.js && node tests/statCache.test.js && node tests/registryCache.test.js && node tests/convMemo.test.js && node tests/perfRenderer.test.js"
+    "test": "node tests/testGuard.test.js && node tests/handoffDelivery.test.js && node tests/libraryState.test.js && node tests/startLimiter.test.js && node tests/cpuGuardInstall.test.js && node tests/cpuGuardGlue.test.js && node tests/connectionHealth.test.js && node tests/deliveryScreen.test.js && node tests/noUndef.test.js && node tests/handoffLogic.test.js && node tests/keepGoing.test.js && node tests/keepGoingGlue.test.js && node tests/unsentLedger.test.js && node tests/topbar.test.js && node tests/memoryData.test.js && node tests/daily.test.js && node tests/daily-hardening.test.js && node tests/mailfeed.test.js && node tests/ics.test.js && node tests/calendar.test.js && node tests/gmail.test.js && node tests/dailyRenderer.test.js && node tests/shipments.test.js && node tests/shipments-email.test.js && node tests/shipments-track.test.js && node tests/shipments-renderer.test.js && node tests/agentDocs.test.js && node tools/check-changelog.js && node tests/keepGoingAttach.test.js && node tests/archiveTailRank.test.js && node tests/approvalScan.test.js && node tests/statCache.test.js && node tests/registryCache.test.js && node tests/convMemo.test.js && node tests/perfRenderer.test.js && node tests/phemeDelivery.test.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

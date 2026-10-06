@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld("api", {
   voiceSave: (wavBase64) => ipcRenderer.invoke("voice-save", { wavBase64 }),
   logGuard: (line) => ipcRenderer.send("guard-log", { line }),
   sendInput: (agentPath, data, opts) => ipcRenderer.send("terminal-input", { agentPath, data, app: !!(opts && opts.app) }),
+  onPhemeRequest: (callback) => { ipcRenderer.on("pheme-request", (event, payload) => callback(payload)); }, // v1.77.4 PHEME delivery
+  phemeReply: (id, result) => ipcRenderer.send("pheme-reply", { id, result }),
   onPressEnter: (callback) => { ipcRenderer.on("press-enter", (event, payload) => callback(payload)); },
   terminalBlankCheck: (agentPath, blank) => ipcRenderer.invoke("terminal-blank-check", { agentPath, blank: !!blank }), // v1.69.4
   canSendCtrlC: (agentPath, snippet) => ipcRenderer.invoke("can-send-ctrlc", { agentPath, text: snippet }), // v1.69.4

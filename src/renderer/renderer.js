@@ -3884,6 +3884,73 @@ try {
   });
 } catch (e) { /* older preload */ }
 
+// v1.77.4 PHEME delivery: main asks which agent is on screen and hands over dictated text (src/phemeDelivery.js).
+// "Selected" means: an agent chat is showing (not My Daily / ARGUS / Links / Library / Memory, not the empty state) and its
+// session has started. The text then goes through the SAME path as the Send button (sendOrHold -> submitToAgent), including the
+// long-message file hand-off, the busy-agent queue and the pending bubble; main verifies it landed.
+const PHEME_OVERLAY_CLASSES = ["argus-open", "daily-open", "iris-open", "library-open", "memory-open"];
+function phemeSelected() {
+  if (!activeAgentPath) return { ok: false, reason: "no-agent-selected" };
+  if (chatViewEl.classList.contains("hidden") || PHEME_OVERLAY_CLASSES.some((c) => document.body.classList.contains(c))) {
+    return { ok: false, reason: "not-an-agent-chat (My Daily, ARGUS or another view is showing)" };
+  }
+  const a = agents.find((x) => x.path === activeAgentPath);
+  const session = terminals.get(activeAgentPath);
+  if (!session || !session.started) return { ok: false, reason: "chat-not-started", agent: a && a.displayName };
+  return { ok: true, agentPath: activeAgentPath, name: (a && a.displayName) || activeAgentPath.split(/[\/]/).pop() };
+}
+async function phemeSend(text, expectPath) {
+  const sel = phemeSelected();
+  if (!sel.ok) return sel;
+  if (sel.agentPath !== expectPath) return { ok: false, reason: "selection-changed" };
+  const agentPath = sel.agentPath;
+  const session = terminals.get(agentPath);
+  let entry = null;
+  if (session.sendQueue.length === 0 && !(window.guardsAgentInFlow && window.guardsAgentInFlow(agentPath)) &&
+      !(window.connHealth && window.connHealth.holding && window.connHealth.holding(agentPath))) {
+    const nowP = Date.now();
+    entry = { text, addedAt: nowP, sentAt: nowP, midTurn: false, provisional: true };
+    session.pendingSent.push(entry);
+    renderChatBlocks(session.lastBlocks || [], session.pendingSent, { forceBottom: true });
+  }
+  let how = null, sentText = text;
+  const run = async () => {
+    let toSend = text;
+    if (text.length > LONG_MESSAGE_FILE_THRESHOLD) {
+      try {
+        const filePath = await window.api.saveLongMessage(text);
+        toSend = `This message was too long to paste directly, so it was saved to a file - please read it: "${filePath}"`;
+        longMessageCache.set(filePath, text);
+      } catch (e) { console.error("[agent-desktop] pheme saveLongMessage failed - sending inline instead:", e); }
+    }
+    sentText = toSend;
+    how = await sendOrHold(agentPath, session, toSend, entry);
+  };
+  const prev = session.sendChain || Promise.resolve();
+  const mine = prev.then(run).catch((e) => {
+    if (entry && session.pendingSent.includes(entry)) { // never leave a bubble for a message that was not sent
+      session.pendingSent = session.pendingSent.filter((p) => p !== entry);
+      if (agentPath === activeAgentPath) renderChatBlocks(session.lastBlocks || [], session.pendingSent, {});
+    }
+    throw e;
+  });
+  session.sendChain = mine.catch(() => {});
+  try { await mine; } catch (e) { return { ok: false, reason: "send-failed: " + (e && e.message) }; }
+  const held = how === "held" || (typeof how === "string" && how !== "sent" && how !== "midturn");
+  return { ok: true, how: held ? "held" : how, sentText };
+}
+try {
+  window.api.onPhemeRequest(async (req) => {
+    let result;
+    try {
+      if (req.kind === "selected") result = phemeSelected();
+      else if (req.kind === "send") result = await phemeSend(String(req.text || ""), req.expectPath);
+      else result = { ok: false, reason: "unknown-request" };
+    } catch (e) { result = { ok: false, reason: "renderer-error: " + (e && e.message) }; }
+    window.api.phemeReply(req.id, result);
+  });
+} catch (e) { /* older preload */ }
+
 function writeQueued(session, fn) {
   const prev = (session && session.writeChain) || Promise.resolve();
   const run = prev.then(fn);
