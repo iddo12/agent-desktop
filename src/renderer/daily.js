@@ -1305,6 +1305,15 @@
   }
 
   // ---------------------------------------------------------------- render
+  // Hebrew text is laid out right-to-left and aligned right when it STARTS with Hebrew (dir="auto" decides from the first
+  // strong letter; text starting with English stays left). Only leaf elements that contain Hebrew letters are touched.
+  const HEBREW = /[֐-׿]/;
+  function applyBidi(root) {
+    for (const n of root.querySelectorAll("span,div,small,b,h3,h4,button,label")) {
+      if (n.dir || n.firstElementChild) continue;   // already set, or not a text leaf
+      if (HEBREW.test(n.textContent)) n.setAttribute("dir", "auto");
+    }
+  }
   function render() {
     if (!isOpen()) return;
     dateEl.textContent = payload ? (() => { const d = new Date(payload.now); return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`; })() : "";
@@ -1331,6 +1340,7 @@
       console.error("daily render", e);
       body.append(el("div", "daily-error", "My Daily hit a problem drawing this tab."));
     }
+    try { applyBidi(body); } catch (e) { /* cosmetic only */ }
   }
 
   // ---------------------------------------------------------------- hover digest
